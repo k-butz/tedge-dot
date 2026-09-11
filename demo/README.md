@@ -127,6 +127,46 @@ The connectors publish samples to the thin-edge.io MQTT broker
 > (`port = "tcp://127.0.0.1:9200"`). The other four protocols work out of the
 > box.
 
+### Podman instead of Docker
+
+[podman-compose.yaml](podman-compose.yaml) is a drop-in alternative for devices
+that run podman. It is deliberately narrower than
+[docker-compose.yaml](docker-compose.yaml): no `build:` sections, so it needs
+no repository checkout and pulls only the images published by this repo, and no
+host networking, so it works on **podman-compose 1.0.x**. Copy that one file
+onto the device:
+
+```sh
+podman-compose -p tedge-dot-sims -f podman-compose.yaml pull
+podman-compose -p tedge-dot-sims -f podman-compose.yaml up -d
+podman-compose -p tedge-dot-sims -f podman-compose.yaml ps
+podman-compose -p tedge-dot-sims -f podman-compose.yaml down
+```
+
+Pass `-p` explicitly: podman-compose 1.0.x ignores the compose-spec `name:`
+key and would otherwise name the project after the enclosing directory. It runs
+rootless, and `docker compose -f podman-compose.yaml` works too.
+
+It covers Modbus, OPC-UA and PROFIBUS. The two CAN simulators are **not** in
+it, because SocketCAN is a property of a network namespace rather than a port:
+they need `--network host`, and podman-compose 1.0.2/1.0.3 emit both
+`--network host` and `--net <project>_default --network-alias <svc>`, which
+podman rejects (fixed in podman-compose 1.0.6). Start those two directly:
+
+```sh
+sudo modprobe vcan
+sudo ip link add dev vcan0 type vcan
+sudo ip link set up vcan0
+
+sudo podman run -d --name canbus-sim  --network host --privileged \
+  --restart unless-stopped ghcr.io/reubenmiller/tedge-dot/canbus-sim:latest
+sudo podman run -d --name canopen-sim --network host --privileged \
+  --restart unless-stopped ghcr.io/reubenmiller/tedge-dot/canopen-sim:latest
+```
+
+The simulator images are published for `linux/amd64` and `linux/arm64` only, so
+a 32-bit armhf device can run the connector package but not these simulators.
+
 ### Requirements
 
 - A real Linux host (not macOS Docker Desktop — its LinuxKit kernel has no
