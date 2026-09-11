@@ -24,27 +24,43 @@ so the C package (`tedge-dot-c`) *conflicts* with the Rust one — install one o
 the other. It additionally ships the **PROFIBUS** connector, which the Rust
 package omits.
 
-- Trigger it manually (**workflow_dispatch**) for a snapshot: `.deb` / `.rpm` /
-  `.apk` + tarballs for `amd64` and `arm64`, uploaded as run artifacts.
-- Push a **`c-v*`** tag (e.g. `c-v0.1.0`) for a GitHub pre-release. (The Rust
+- Trigger it manually (**workflow_dispatch**) to refresh the rolling
+  **`c-snapshot`** pre-release, so the latest build is always one download away.
+- Push a **`c-v*`** tag (e.g. `c-v0.1.0`) for a versioned pre-release. (The Rust
   release workflow ignores `c-v*` tags.)
 
-Packaging is done with **nfpm** rather than goreleaser: goreleaser's headline
-feature is cross-compiling Go/Rust with zig, but the C build links *system*
-shared libraries (`libmodbus`, `libmosquitto`, `libcjson`) — which zig can't
-cross-link without target-arch copies of each — so it is built **natively** on
-`ubuntu-24.04` and `ubuntu-24.04-arm` runners instead. `open62541` is built
-from source (client-only) and statically linked, so it is not a runtime
-dependency; the runtime deps are `libmodbus5`, `libmosquitto1`, `libcjson1`
-(Debian/Ubuntu names; the nfpm config maps rpm/apk names too).
+Both publish `.deb` / `.rpm` / `.apk` + tarballs for `amd64`, `arm64` and
+`armhf`, plus a `SHA256SUMS` covering every asset.
 
-Local packaging (needs `nfpm`, and the config expects `poc-c/build/tedge-dot`):
+Packaging is done with **nfpm** rather than goreleaser: goreleaser's headline
+feature is cross-compiling Go/Rust with zig, and it has no notion of a C build
+that also links *system* shared libraries. The build itself does use zig — see
+below.
+
+### Cross-compilation
+
+Every architecture is cross-compiled on one machine by [cross/](cross/): a
+Debian container where **zig supplies the compiler and libc** and **Debian
+supplies the target-architecture shared libraries** (`libmodbus`,
+`libmosquitto`, `libcjson`) via multiarch. open62541 is not packaged by Debian,
+so it is still built from source — cross-compiled with the same toolchain and
+statically linked.
+
+The point is not only that one runner builds every architecture. zig lets us
+**pin the minimum glibc** (2.17 — Debian 8 / RHEL 7 era), which a native build
+fundamentally cannot: a binary built on `ubuntu-24.04` hard-requires glibc 2.39
+on the target, which rules out most OT gateways in the field.
 
 ```sh
-cmake -B poc-c/build -S poc-c -G Ninja && cmake --build poc-c/build
-ARCH=$(dpkg --print-architecture) VERSION=0.1.0 \
-  nfpm pkg -f poc-c/packaging/nfpm.yaml -p deb -t dist/
+just c-cross-image            # build the toolchain image
+just c-cross arm64            # -> poc-c/dist/arm64/tedge-dot
+just c-verify arm64           # golden vectors on Debian bullseye (glibc 2.31)
+just c-package arm64 0.1.0    # -> poc-c/dist/packages/*.{deb,rpm,apk}
+just c-cross-all              # every architecture in C_ARCHS
 ```
+
+`just c-verify` for a non-native architecture needs binfmt/qemu registered:
+`docker run --privileged --rm tonistiigi/binfmt --install all`.
 
 The packaged systemd unit runs `tedge-dot run /etc/tedge/plugins/ot` — a
 **directory**, so one process runs every connector config it contains (one
@@ -64,6 +80,7 @@ worker thread per file), matching the Rust single-service model.
 | `src/main.c` | `read` / `write` / `run` CLI | `src/main.rs` |
 | `tests/golden.c` | conformance runner for `crates/sdk/conformance/vectors.json` | `tests/golden_vectors.rs` |
 | `ci/smoke.sh` | e2e smoke: connector ⇄ simulator ⇄ broker, per protocol (used by the `c-poc` CI job) | conformance/e2e suites |
+| `cross/` | zig + Debian-multiarch cross-compilation image, build and verify scripts | goreleaser/zig |
 | `third_party/tomlc99/` | vendored TOML parser (MIT) | serde/toml |
 
 The Rust `Connector` trait maps to a C vtable (`tdot_connector_t` in

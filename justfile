@@ -169,3 +169,64 @@ cleanup DEVICE_ID $CI="true":
     c8y devicemanagement certificates list -n --tenant "$(c8y currenttenant get --select name --output csv)" --filter "name eq ${DEVICE_ID}" --pageSize 2000 | c8y devicemanagement certificates delete --tenant "$(c8y currenttenant get --select name --output csv)"
     c8y inventory find -n --owner "device_${DEVICE_ID}" -p 100 | c8y inventory delete
     c8y users delete -n --id "device_${DEVICE_ID}$" --tenant "$(c8y currenttenant get --select name --output csv)" --silentStatusCodes 404 --silentExit
+
+# --- C proof of concept (poc-c/) ---------------------------------------------
+#
+# The C build is cross-compiled with zig inside a Debian multiarch container
+# (poc-c/cross/), so one host builds every architecture and the binaries carry
+# a glibc floor we choose (2.17 by default) rather than the build host's.
+
+# Debian architectures the C PoC is built and packaged for.
+C_ARCHS := "amd64 arm64 armhf"
+C_GLIBC_MIN := "2.17"
+
+# Build the zig cross-compilation image.
+c-cross-image:
+    docker build -t tedge-dot-cross poc-c/cross
+
+# Cross-build the C PoC for one architecture into poc-c/dist/<arch>/.
+# Usage: just c-cross arm64 [extra cmake args]
+c-cross arch="arm64" *args="": c-cross-image
+    mkdir -p "poc-c/dist/{{arch}}"
+    docker run --rm \
+        -v "$PWD:/src:ro" -v "$PWD/poc-c/dist/{{arch}}:/out" \
+        -e ARCH={{arch}} -e GLIBC_MIN={{C_GLIBC_MIN}} \
+        tedge-dot-cross {{args}}
+
+# Cross-build every architecture in C_ARCHS.
+c-cross-all: c-cross-image
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for arch in {{C_ARCHS}}; do just c-cross "$arch"; done
+
+# Run the golden decode vectors for a cross-built architecture on an old distro
+# (Debian bullseye, glibc 2.31) — checks both the cross build and the glibc floor.
+# Non-native architectures need binfmt/qemu:
+#   docker run --privileged --rm tonistiigi/binfmt --install all
+c-verify arch="arm64":
+    docker run --rm --platform linux/{{ if arch == "armhf" { "arm/v7" } else { arch } }} \
+        -v "$PWD/poc-c/dist/{{arch}}:/out" \
+        -v "$PWD:/src:ro" \
+        -v "$PWD/poc-c/cross/verify.sh:/verify.sh:ro" \
+        debian:bullseye-slim /verify.sh
+
+# Package one cross-built architecture as deb/rpm/apk into poc-c/dist/packages/.
+# Usage: just c-package arm64 0.1.0
+c-package arch="arm64" version="0.0.0-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # nfpm expands env vars in scalar fields but not in contents[].src, so stage
+    # the architecture's binary at the fixed path nfpm.yaml points to.
+    mkdir -p poc-c/dist/staged poc-c/dist/packages
+    cp "poc-c/dist/{{arch}}/tedge-dot" poc-c/dist/staged/tedge-dot
+    case "{{arch}}" in
+        armhf) nfpm_arch=arm7 ;;
+        *)     nfpm_arch="{{arch}}" ;;
+    esac
+    for format in deb rpm apk; do
+        docker run --rm -v "$PWD:/work" -w /work \
+            -e ARCH="$nfpm_arch" -e VERSION="{{version}}" \
+            ghcr.io/goreleaser/nfpm:latest \
+            pkg -f poc-c/packaging/nfpm.yaml -p "$format" -t poc-c/dist/packages/
+    done
+    ls -l poc-c/dist/packages

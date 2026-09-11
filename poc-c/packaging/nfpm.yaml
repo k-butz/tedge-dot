@@ -1,10 +1,12 @@
 # nfpm configuration for the C proof-of-concept build of tedge-dot.
 # Docs: https://nfpm.goreleaser.com
 #
-# Unlike the Rust build (packaged by goreleaser, which cross-compiles with
-# zig), the C build links system shared libraries and is therefore built
-# natively per architecture; this file is run once per arch by
-# .github/workflows/release-c.yaml with ARCH and VERSION set in the env.
+# Run once per architecture by .github/workflows/release-c.yaml (and by
+# `just c-package`) with ARCH and VERSION set in the env. nfpm expands env vars
+# in scalar fields like `arch:` but NOT in `contents[].src`, so the binary for
+# the architecture being packaged is staged into poc-c/dist/staged/ first --
+# a dedicated path rather than poc-c/build/, so a cross-package run can never
+# silently pick up a stale native build. See poc-c/cross/ for the builds.
 #
 # The package is a drop-in replacement for the Rust `tedge-dot` package: same
 # binary path, same systemd unit, same config layout — so it conflicts with it
@@ -59,7 +61,7 @@ scripts:
 
 contents:
   # The single native binary (also a standalone read/write CLI).
-  - src: poc-c/build/tedge-dot
+  - src: poc-c/dist/staged/tedge-dot
     dst: /usr/bin/tedge-dot
     file_info: { owner: root, group: root, mode: 0755 }
 
