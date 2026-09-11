@@ -24,7 +24,7 @@ modules that run inside a mapper and are hot-reloaded without restarts.
 | [ot-alarm](ot-alarm/) | thin-edge → thin-edge | `m/<group>` | `a/<type>` alarm (hysteresis) |
 | [ot-event](ot-event/) | thin-edge → thin-edge | `m/<group>` | `e/<type>` event (on change) |
 | [ot-registration](ot-registration/) | OT → thin-edge | `ot/<protocol>/status/link` | `te/device/<device>//` child registration (+ optional `twin/<fragment>`) |
-| [ot-command-forward](ot-command-forward/) | thin-edge → OT | `cmd/ot_<verb>/<id>` (incl. `ot_parameter_update`) | `ot/<protocol>/cmd/<verb>/<id>` |
+| [ot-command-forward](ot-command-forward/) | thin-edge → OT | `cmd/ot_<verb>/<id>` (incl. `parameter_update`) | `ot/<protocol>/cmd/<verb>/<id>` |
 | [ot-command-result](ot-command-result/) | OT → thin-edge | `ot/<protocol>/cmd/<verb>/<id>` | `cmd/ot_<verb>/<id>` (or the `origin.command`) |
 | [ot-parameter-state](ot-parameter-state/) | OT → thin-edge | `sample/<point>`, `cmd/write*/<id>` | `twin/<set>` |
 
@@ -45,7 +45,7 @@ into `-`. The verbs cover the legacy Cumulocity operations (see the
 | `ot_set_config` | `set-config` | `c8y_ModbusConfiguration`, `c8y_SerialConfiguration` |
 | `ot_define_device` | `define-device` | `c8y_ModbusDevice`, `c8y_Coils`, `c8y_Registers` |
 | `ot_remove_device` | `remove-device` | — |
-| `ot_parameter_update` | `write-batch` (reshaped by `ot-command-forward`) | `c8y_ParameterUpdate` (device parameters) |
+| `parameter_update` | `write-batch` (reshaped by `ot-command-forward`) | `c8y_ParameterUpdate` (device parameters; template owned by tedge-parameter-plugin) |
 
 The `write` verb is implemented by the protocol module; the `set-config`/`define-device`/
 `remove-device` management verbs are implemented once by the SDK runtime (it owns the connector
@@ -55,10 +55,15 @@ allow-list of `ot_*` command types (add a line to its `flow.toml` to support a n
 **Device parameters** (see [RFC 0003](../doc/rfc/0003-parameter-writes.md)): writable points are
 parameters. `ot-parameter-state` keeps one retained twin fragment per *parameter set*
 (`te/device/<device>///twin/<set>`, keyed by point id) current from the samples (which echo each
-point's `access`) and from acknowledged writes. `ot-command-forward` reshapes an
-`ot_parameter_update` command (e.g. a Cumulocity `c8y_ParameterUpdate` operation mapped by
-[operations/c8y_ParameterUpdate.template](../operations/c8y_ParameterUpdate.template)) into ONE connector
+point's `access`) and from acknowledged writes. `ot-command-forward` reshapes a
+`parameter_update` command — the command type of the
+[tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin), whose
+`c8y_ParameterUpdate.template` maps the Cumulocity operation onto it — into ONE connector
 `write-batch`, and `ot-command-result` completes it through the batch request's `origin.command`.
+The plugin's own workflow only serves the main device (tedge-agent runs workflows for its own
+entity only), so on OT child devices the flows are the sole handler and no second template is
+needed: the c8y mapper binds templates per fragment name, so two templates for
+`c8y_ParameterUpdate` could never coexist.
 The set a point belongs to comes from `meta.parameter.set`; `tedge-dot describe` renders the
 same sets as Cumulocity DTM definitions for a tenant admin to register.
 
@@ -93,8 +98,8 @@ fragment (`twin_fragment`, e.g. `c8y_ModbusDevice`).
  cloud operation  ──▶  cmd/ot_<verb>/<id>  ──▶ ot-command-forward ──▶ ot/<protocol>/cmd/<verb>/<id> ──▶ driver acts
  driver result    ──▶  ot/<protocol>/cmd/<verb>/<id> ─▶ ot-command-result ──▶ cmd/ot_<verb>/<id> (operation completes)
 
- c8y_ParameterUpdate ─▶ cmd/ot_parameter_update/<id> ─▶ ot-command-forward ─▶ ot/<protocol>/cmd/write-batch/<id> ─▶ driver writes N points
- driver result       ─▶ ot/<protocol>/cmd/write-batch/<id> ─▶ ot-command-result ─▶ cmd/ot_parameter_update/<id> (operation completes)
+ c8y_ParameterUpdate ─▶ cmd/parameter_update/<id> ─▶ ot-command-forward ─▶ ot/<protocol>/cmd/write-batch/<id> ─▶ driver writes N points
+ driver result       ─▶ ot/<protocol>/cmd/write-batch/<id> ─▶ ot-command-result ─▶ cmd/parameter_update/<id> (operation completes)
  samples + write results ─▶ ot-parameter-state ─▶ te/device/<device>///twin/<set> ─▶ Parameters tab
 ```
 

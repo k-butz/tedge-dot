@@ -27,7 +27,7 @@ ${LINK_TOPIC}           te/device/${DEVICE}/ot/${PROTOCOL}/status/link
 ${CAPS_TOPIC}           te/device/main/service/${SERVICE}/ot/capabilities
 ${HEALTH_TOPIC}         te/device/main/service/${SERVICE}/status/health
 ${BATCH_PREFIX}         te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write-batch
-${PARAM_CMD_PREFIX}     te/device/${DEVICE}///cmd/ot_parameter_update
+${PARAM_CMD_PREFIX}     te/device/${DEVICE}///cmd/parameter_update
 ${PARAM_TWIN}           te/device/${DEVICE}///twin/${PROTOCOL}_parameters
 # The flows container installs thin-edge from the main channel at build time; give it time.
 ${FLOWS_TIMEOUT}        120
@@ -170,7 +170,7 @@ Write Batch Rejects An Empty Request
 
 Flows Register The Device And Advertise The Parameter Capability
     [Documentation]    (flows) ot-registration turns the link status into a child-device
-    ...                registration and advertises ot_parameter_update so a cloud mapper routes
+    ...                registration and advertises parameter_update so a cloud mapper routes
     ...                c8y_ParameterUpdate operations to it.
     [Tags]    flows
     ${payload}=    Wait For Retained    te/device/${DEVICE}//    timeout=${FLOWS_TIMEOUT}
@@ -189,7 +189,7 @@ Parameter Twin Follows The Device
     Dictionary Should Not Contain Key    ${twin}    level_f32
 
 Parameter Update Command Writes The Points And Completes
-    [Documentation]    (flows) A Cumulocity-shaped ot_parameter_update command (as the c8y mapper
+    [Documentation]    (flows) A Cumulocity-shaped parameter_update command (as the c8y mapper
     ...                would publish for a c8y_ParameterUpdate operation) is bridged to ONE
     ...                connector write-batch, completes with the mapper metadata preserved, and
     ...                the twin reflects the new values.

@@ -87,7 +87,9 @@ tedge mqtt pub -r te/device/plc1/ot/modbus/cmd/write-batch/b1 '{"status":"init",
 
 From Cumulocity, writable points are **device parameters**: the `ot-parameter-state` flow
 keeps one twin fragment per parameter set current, and the command flows turn a
-`c8y_ParameterUpdate` operation from the device's *Parameters* tab into one `write-batch`.
+`c8y_ParameterUpdate` operation from the device's *Parameters* tab (mapped by the
+[tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin), which owns that
+operation) into one `write-batch`.
 A tenant admin declares the sets once with the definition `tedge-dot describe` prints from
 the same config. See [RFC 0003](doc/rfc/0003-parameter-writes.md), [flows/](flows/) and
 [operations/](operations/).

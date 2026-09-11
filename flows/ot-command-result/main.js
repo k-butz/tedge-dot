@@ -8,7 +8,7 @@
 // generic `ot_<verb>` command (the connector verb's `-` becomes `_` and gains the `ot_` prefix:
 // write -> ot_write, set-config -> ot_set_config, define-device -> ot_define_device, ...).
 // A request whose init carried `origin.command` (ot-command-forward sets it when it reshapes a
-// command, e.g. ot_parameter_update -> write-batch) is mirrored onto that command type instead.
+// command, e.g. parameter_update -> write-batch) is mirrored onto that command type instead.
 // Only connector-driven transitions are mirrored (status != init), so the original request that
 // ot-command-forward sends to the connector is not echoed back (no loop).
 

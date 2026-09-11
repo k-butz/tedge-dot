@@ -31,9 +31,9 @@ every parameter as one retained twin fragment per *parameter set*
 (`te/device/<device>///twin/<set>`, keyed by point id) — that fragment is what a cloud UI
 displays and edits. The SDK runtime gains one protocol-neutral verb, **`write-batch`**, built on
 the module's `write`, so an edit of several parameters is one command with one result; the
-existing command flows carry it (`ot-command-forward` reshapes an `ot_parameter_update`
+existing command flows carry it (`ot-command-forward` reshapes an `parameter_update`
 command into a `write-batch`, `ot-command-result` completes it). The Cumulocity glue is one
-generic operation template (`c8y_ParameterUpdate` → `ot_parameter_update`). The cloud-side
+generic operation template (`c8y_ParameterUpdate` → `parameter_update`). The cloud-side
 declaration of the sets (Digital Twin Manager property definitions) is a tenant admin's
 one-off act; `tedge-dot describe` prints it from the same TOML so the config remains the single
 source of truth, but the device never talks to the DTM service. Writes travel as thin-edge
@@ -76,7 +76,7 @@ Three places could own the definition; the config wins:
 
 To **connector commands** (`te/device/<d>/ot/<protocol>/cmd/<verb>/<id>`): yes, it already
 does, and this RFC adds `write-batch` there. To **thin-edge/cloud commands**
-(`te/device/<d>///cmd/ot_parameter_update/<id>`, `c8y_ParameterUpdate`): no. The connector
+(`te/device/<d>///cmd/parameter_update/<id>`, `c8y_ParameterUpdate`): no. The connector
 stays ignorant of thin-edge command types and cloud fragments; the bridge is flows, hot-reloaded
 and protocol-neutral, exactly like measurements and the existing `ot_write` bridge. Nor does
 the runtime publish the twin itself: that would be the driver's first thin-edge-model output
@@ -119,28 +119,46 @@ it is — a commissioning and debugging tool for a stopped service. The paramete
 "script per parameter set" model would have pushed writes through the CLI (see below), which
 is the main reason not to build on it for point writes.
 
-## tedge-parameter-plugin: assessed, not used for point writes
+## tedge-parameter-plugin: owns the Cumulocity operation; the flows serve the OT children
 
 [tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin) maps
-`c8y_ParameterUpdate` onto a `parameter_update` workflow whose `prepare` step picks the set
-name out of the operation and whose `run` step executes
-`/usr/share/tedge/parameter-plugins/<set> set <json>`. Current values are whatever a script
-publishes to `te/device/main///twin/<set>` (a `tedge-inventory` script at boot).
+`c8y_ParameterUpdate` onto a `parameter_update` workflow (tedge-agent) whose `prepare` step
+picks the set name out of the operation and whose `run` step executes
+`/usr/share/tedge/parameter-plugins/<set> set <json>`; current values are whatever a script
+publishes to `te/device/main///twin/<set>`.
 
-| | tedge-parameter-plugin | this RFC |
+Two facts about thin-edge shape the coordination:
+
+1. The c8y mapper binds `.template` files **by fragment name**
+   (`get_template_name_by_operation_name` picks the first template whose `on_fragment`
+   matches, whatever workflow operation the device declared). Two templates for
+   `c8y_ParameterUpdate` can therefore never coexist: a second one silently shadows the first
+   for every device. An earlier revision of this prototype shipped its own template and hit
+   exactly that.
+2. tedge-agent's workflow engine subscribes to commands of **its own entity only**
+   (`EntityFilter::Entity(device_topic_id)`), so a `parameter_update` command addressed to a
+   child device is never picked up by the plugin's workflow.
+
+Hence the split: the plugin's template is the single owner of the operation, the OT child
+devices advertise the plugin's `parameter_update` command (published by `ot-registration`),
+the mapper symlinks the plugin's template for them, and `ot-command-forward` /
+`ot-command-result` are the only handlers of that command on child devices. On the main device
+the plugin's workflow and its script-per-set model keep working untouched — a natural home for
+gateway-level settings such as the connector `poll_interval` (a `parameter-plugins/tedge_dot`
+script issuing `set-config`; not part of this RFC). No change to the plugin is needed, and the
+"dynamic handler" problem does not arise: on children the set name is read from the
+`c8y_ParameterUpdate_<set>` marker by the flow.
+
+| | main device (plugin) | OT child devices (this RFC) |
 | --- | --- | --- |
-| Where it runs | main device, tedge-agent workflow, shell script per set | any registered OT child device, mapper flows |
-| How a write reaches the device | the script decides — `tedge-dot write` (second session) or hand-rolled `tedge mqtt pub` + wait | one `write-batch` command on the connector's existing session |
-| Current values | script publishes the twin when it feels like it | derived continuously from samples + acknowledged writes, per set |
-| Definition | hand-written in DTM | rendered from the config (`describe`), same `meta` as the flows |
-| Dependencies | jq, tedge-inventory, sudo/tedge-write | none beyond the mapper |
+| Operation template | plugin's `c8y_ParameterUpdate.template` | the same file, symlinked per child by the mapper |
+| Command type | `parameter_update` | `parameter_update` |
+| Handler | tedge-agent workflow → set script | flows → connector `write-batch` |
+| Current values | script publishes the twin | `ot-parameter-state` from samples + acknowledged writes |
 
-The two are complementary and coexist on one gateway: templates are bound per device by the
-capability a device advertises, so the plugin keeps handling `parameter_update` on the **main
-device** (system settings, and — a good fit — connector settings such as `poll_interval`
-through the `set-config` verb) while `c8y_ParameterUpdate` on **OT child devices** maps to
-`ot_parameter_update`. Should the plugin later grow a "publish an MQTT command and wait" set
-type, it could front the same flows; nothing here prevents that.
+Why the point writes are not routed through the plugin's scripts instead: a script per set
+would push writes through `tedge-dot write` (a second protocol session, see Q4) or hand-rolled
+MQTT, and it has no notion of point state; on child devices it cannot run at all.
 
 ## Contract additions (additive, SDK-provided)
 
@@ -160,8 +178,8 @@ type, it could front the same flows; nothing here prevents that.
 | SDK | parameter/set derivation from the config + DTM rendering | `crates/sdk/src/descriptor.rs` |
 | SDK runtime | `access` in samples, `write-batch` | `crates/sdk/src/runtime.rs` |
 | CLI | `tedge-dot describe [--set] [--device] [--compact]` | `src/main.rs` |
-| Flows | `ot-parameter-state` (new); `ot-command-forward` reshapes `ot_parameter_update`, `ot-command-result` honours `origin.command`; `ot-registration` advertises `ot_parameter_update` | `flows/` |
-| c8y glue | `c8y_ParameterUpdate` template | `operations/` |
+| Flows | `ot-parameter-state` (new); `ot-command-forward` reshapes `parameter_update`, `ot-command-result` honours `origin.command`; `ot-registration` advertises `parameter_update` | `flows/` |
+| c8y glue | none — the tedge-parameter-plugin's template (installed by the cloud e2e image) | |
 | Tests | offline flow checks incl. the chain through shared mapper state (`just test-flows`); e2e: `access` in samples, batch semantics, and the flows-driven parameter round-trip on a cloud-free flows runner (`just test-e2e modbus|opcua`); cloud: DTM registration → fragment → operation → measurement (`cloud/modbus/tests/parameters_c8y.robot`) | |
 
 A simplification pass removed an earlier retained point-descriptor topic and two dedicated
@@ -182,7 +200,7 @@ also the reason the demo image (2.0.1) only runs the flows inside the c8y mapper
 ## Sequence
 
 ```text
-Parameters tab ─ c8y_ParameterUpdate ─▶ c8y mapper ─▶ te/device/plc1///cmd/ot_parameter_update/<id> {operation:{...}}
+Parameters tab ─ c8y_ParameterUpdate ─▶ c8y mapper (plugin's template) ─▶ te/device/plc1///cmd/parameter_update/<id> {operation:{...}}
                                                             │ ot-command-forward (keys are point ids)
                                                             ▼
                                         te/device/plc1/ot/modbus/cmd/write-batch/ot--<id> {writes:[...], origin:{command:...}}
@@ -192,7 +210,7 @@ Parameters tab ─ c8y_ParameterUpdate ─▶ c8y mapper ─▶ te/device/plc1//
                           ┌─────────────────────────────────┴──────────────────────────────┐
                           │ ot-command-result (origin.command)                             │ ot-parameter-state
                           ▼                                                                ▼
-   te/device/plc1///cmd/ot_parameter_update/<id> {successful, c8y-mapper}   te/device/plc1///twin/modbus_parameters {...}
+   te/device/plc1///cmd/parameter_update/<id> {successful, c8y-mapper}   te/device/plc1///twin/modbus_parameters {...}
                           │ c8y mapper                                                     │ c8y mapper
                           ▼                                                                ▼
                  operation SUCCESSFUL                                            managed object fragment (UI refreshes)

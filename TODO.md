@@ -27,7 +27,8 @@
       last-commanded value of write-only parameters across mapper restarts; derive
       `meta.parameter.set` from the Cloud Fieldbus device type name in `c8y-fieldbus-import`;
       optional Modbus FC16 fast path for `write-batch` on contiguous registers; optional
-      `c8y_ParameterUpdate` audit event flow on top of the twin.
+      `c8y_ParameterUpdate` audit event flow on top of the twin; gateway-level connector
+      settings (poll_interval) as a tedge-parameter-plugin set script issuing `set-config`.
 * [ ] Legacy write-payload compatibility (gap G2): accept explicit-address
       (`register`/`coil`/`address`/`ipAddress`) and name-based `metrics[]` payloads for
       `c8y_SetRegister`/`c8y_SetCoil`, not only `{point, value}`.

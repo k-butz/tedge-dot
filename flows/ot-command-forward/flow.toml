@@ -10,7 +10,7 @@ input.mqtt.topics = [
   "te/+/+/+/+/cmd/ot_set_config/+",
   "te/+/+/+/+/cmd/ot_define_device/+",
   "te/+/+/+/+/cmd/ot_remove_device/+",
-  "te/+/+/+/+/cmd/ot_parameter_update/+",
+  "te/+/+/+/+/cmd/parameter_update/+",   # tedge-parameter-plugin's command type, on OT child devices
 ]
 
 [config]

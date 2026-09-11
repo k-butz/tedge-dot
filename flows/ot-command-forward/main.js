@@ -15,9 +15,11 @@
 //   ot_define_device -> define-device  (covers c8y_ModbusDevice / c8y_Coils / c8y_Registers)
 //   ot_remove_device -> remove-device
 //
-// One command type is reshaped rather than passed through: `ot_parameter_update` (device
-// parameters, e.g. a Cumulocity c8y_ParameterUpdate operation mapped by
-// operations/c8y_ParameterUpdate.template) becomes ONE connector `write-batch`. Two request shapes:
+// One command type is reshaped rather than passed through: `parameter_update` (device
+// parameters — the command type of the tedge-parameter-plugin, whose c8y_ParameterUpdate
+// template maps the Cumulocity operation onto it; on OT child devices nobody but this flow
+// handles it, since tedge-agent only runs workflows for its own entity) becomes ONE connector
+// `write-batch`. Two request shapes:
 //   1. Cumulocity: { "operation": { "c8y_ParameterUpdate":{}, "c8y_ParameterUpdate_<set>":{},
 //                                   "<set>": { "<point>": <value>, ... } }, "c8y-mapper": {...} }
 //   2. Direct:     { "set": "<set>", "parameters": { "<point>": <value>, ... } }
@@ -50,17 +52,17 @@ function parameterRequest(payload) {
   if (typeof payload?.set === "string" && payload.parameters && typeof payload.parameters === "object") {
     return { set: payload.set, values: payload.parameters };
   }
-  return { error: "unsupported ot_parameter_update payload (expected operation or set+parameters)" };
+  return { error: "unsupported parameter_update payload (expected operation or set+parameters)" };
 }
 
-// Reshape an ot_parameter_update request into a write-batch request. A request the flow cannot
+// Reshape an parameter_update request into a write-batch request. A request the flow cannot
 // interpret is still forwarded, with no writes: the connector rejects an empty batch and
 // ot-command-result completes the command as failed with the runtime's reason plus the note
 // recorded in origin.error. (This flow cannot publish the failure itself — its output would
 // match its own input filter.)
 function parameterBatch(payload) {
   const req = parameterRequest(payload);
-  const origin = { command: "ot_parameter_update", set: req.set ?? null, parameters: req.values ?? null };
+  const origin = { command: "parameter_update", set: req.set ?? null, parameters: req.values ?? null };
   if (req.error) origin.error = req.error;
   const writes = req.error ? [] : Object.entries(req.values).map(([point, value]) => ({ point, value }));
   const out = { status: "init", writes, origin };
@@ -74,8 +76,10 @@ export function onMessage(message, context) {
   const commandType = parts[parts.length - 2];
   const id = parts[parts.length - 1];
 
-  // Only forward generic OT commands (cmd type prefixed with `ot_`).
-  if (!commandType.startsWith("ot_")) return [];
+  // Only forward generic OT commands (cmd type prefixed with `ot_`) and the parameter
+  // plugin's `parameter_update` (reshaped below).
+  const PARAMETER_UPDATE = "parameter_update";
+  if (!commandType.startsWith("ot_") && commandType !== PARAMETER_UPDATE) return [];
 
   let payload;
   try {
@@ -89,7 +93,7 @@ export function onMessage(message, context) {
 
   let verb;
   let request;
-  if (commandType === "ot_parameter_update") {
+  if (commandType === PARAMETER_UPDATE) {
     verb = "write-batch";
     request = parameterBatch(payload);
   } else {

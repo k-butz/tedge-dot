@@ -49,9 +49,9 @@ export function onMessage(message, context) {
 
   // Advertise the generic OT command capabilities on the device so the cloud mapper routes the
   // matching operations (ot_write backs c8y_SetRegister, ot_write_coil backs c8y_SetCoil,
-  // ot_parameter_update backs c8y_ParameterUpdate). Each capability is a retained empty message
-  // on te/device/<device>///cmd/<type>.
-  const caps = context.config?.command_capabilities || "ot_write,ot_write_coil,ot_parameter_update";
+  // parameter_update backs c8y_ParameterUpdate through the tedge-parameter-plugin's template).
+  // Each capability is a retained empty message on te/device/<device>///cmd/<type>.
+  const caps = context.config?.command_capabilities || "ot_write,ot_write_coil,parameter_update";
   for (const cap of String(caps).split(",").map((c) => c.trim()).filter((c) => c)) {
     out.push({
       topic: `te/device/${device}///cmd/${cap}`,
