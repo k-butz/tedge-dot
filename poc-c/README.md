@@ -19,6 +19,21 @@ sample/command envelopes (including the `access` echo and the runtime-provided
 management verbs (`set-config`, `define-device`, `remove-device`) and push
 delivery (`subscribe`); the PoC polls only.
 
+## Tests
+
+The C build is held to the same coverage as the Rust one:
+
+- **golden decode vectors** — `ctest --test-dir poc-c/build` (shared with the Rust SDK);
+- **e2e Robot suites** — the per-protocol stacks under [connectors/](../connectors/) run
+  their Robot suite against the C connector with `just test-e2e-c <proto>` (the stack's
+  `connector` service is swapped for [`connectors/_shared/Dockerfile.connector-c`](../connectors/_shared/Dockerfile.connector-c));
+  CI runs it for every protocol (`e2e-c` matrix);
+- **smoke** — [`ci/smoke.sh <proto>`](ci/smoke.sh), a fast broker-and-simulator check
+  without Docker for the connector itself (used by the `c-poc` CI job).
+
+Not yet covered for C: the conformance harness's behavioural layer, whose B8 check needs the
+management verbs the PoC does not implement (see below).
+
 ## Packaging & releases
 
 `.github/workflows/release-c.yaml` builds, tests and packages the C build as a

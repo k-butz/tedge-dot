@@ -28,7 +28,8 @@ static void usage(void) {
         "[--poll] [--interval <dur>] [--count <n>] [--json]\n"
         "  tedge-dot write -c <config> -d <device> -p <point> --value <v>\n"
         "  tedge-dot run   -c <config> [--output stdout|mqtt] "
-        "[--duration <dur>]\n",
+        "[--duration <dur>]\n"
+        "  tedge-dot <config-or-dir> [run options]      (same as run)\n",
         stderr);
 }
 
@@ -364,22 +365,43 @@ static int cmd_run(const args_t *a) {
     return rc == 0 ? 0 : 1;
 }
 
+static bool is_subcommand(const char *s) {
+    return !strcmp(s, "read") || !strcmp(s, "write") || !strcmp(s, "run");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         usage();
         return 2;
     }
-    args_t a;
-    if (parse_args(argc, argv, &a) != 0) {
-        usage();
-        return 2;
+    /* Like the Rust binary: invoked with just config paths/options and no
+     * subcommand (`tedge-dot /etc/connector.toml`, the systemd unit and the e2e
+     * entrypoints do this), behave as `run`. */
+    char **args = argv;
+    int nargs = argc;
+    char **shifted = NULL;
+    if (!is_subcommand(argv[1]) && strcmp(argv[1], "-h") != 0 &&
+        strcmp(argv[1], "--help") != 0) {
+        shifted = calloc((size_t)argc + 2, sizeof *shifted);
+        shifted[0] = argv[0];
+        shifted[1] = "run";
+        for (int i = 1; i < argc; i++)
+            shifted[i + 1] = argv[i];
+        args = shifted;
+        nargs = argc + 1;
     }
-    if (!strcmp(argv[1], "read"))
-        return cmd_read(&a);
-    if (!strcmp(argv[1], "write"))
-        return cmd_write(&a);
-    if (!strcmp(argv[1], "run"))
-        return cmd_run(&a);
-    usage();
-    return 2;
+    args_t a;
+    int rc = 2;
+    if (parse_args(nargs, args, &a) != 0)
+        usage();
+    else if (!strcmp(args[1], "read"))
+        rc = cmd_read(&a);
+    else if (!strcmp(args[1], "write"))
+        rc = cmd_write(&a);
+    else if (!strcmp(args[1], "run"))
+        rc = cmd_run(&a);
+    else
+        usage();
+    free(shifted);
+    return rc;
 }

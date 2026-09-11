@@ -1,0 +1,44 @@
+# Build and run the C connector (poc-c/) for the e2e harness — the C counterpart of
+# connectors/<proto>/Dockerfile.connector, so the SAME Robot suites run against both
+# implementations. Build context is the repository root; PROTOCOL selects which
+# connector module is compiled in and which stack's config/entrypoint is installed.
+#
+# Base images come from the AWS ECR Public mirror of the Docker Official Images (see the
+# Rust Dockerfiles for why); override BASE_REGISTRY to go back to docker.io/library.
+ARG BASE_REGISTRY=public.ecr.aws/docker/library
+
+FROM ${BASE_REGISTRY}/debian:bookworm AS build
+ARG PROTOCOL=modbus
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build pkg-config git ca-certificates python3 \
+        libmodbus-dev libmosquitto-dev libcjson-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY poc-c /src/poc-c
+COPY crates/sdk/conformance /src/crates/sdk/conformance
+# Only the selected module is compiled in (open62541 is fetched and built from source for
+# opcua, which is the slow part; the other protocols skip it entirely).
+RUN --mount=type=cache,id=tedge-dot-c-build-${PROTOCOL},target=/src/build \
+    on() { [ "$1" = "${PROTOCOL}" ] && echo ON || echo OFF; } \
+    && cmake -S poc-c -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DTDOT_MODBUS=$(on modbus) -DTDOT_OPCUA=$(on opcua) -DTDOT_PROFIBUS=$(on profibus) \
+        -DTDOT_CANBUS=$(on canbus) -DTDOT_CANOPEN=$(on canopen) \
+    && cmake --build build --target tedge-dot \
+    && cp build/tedge-dot /usr/local/bin/tedge-dot
+
+FROM ${BASE_REGISTRY}/debian:bookworm-slim
+ARG PROTOCOL=modbus
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        netcat-openbsd ca-certificates iproute2 kmod libmodbus5 libmosquitto1 libcjson1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /usr/local/bin/tedge-dot /usr/bin/tedge-dot
+# Same config and entrypoint as the Rust image of this stack (the entrypoint's
+# `tedge-dot /etc/connector.toml` form is accepted by both binaries).
+COPY connectors/${PROTOCOL} /opt/connector
+RUN cp /opt/connector/connector.toml /etc/connector.toml \
+    && cp /opt/connector/entrypoint.sh /entrypoint.sh && chmod +x /entrypoint.sh \
+    && if [ -f /opt/connector/sim/test.dbc ]; then cp /opt/connector/sim/test.dbc /test.dbc; fi \
+    && rm -rf /opt/connector
+ENTRYPOINT ["/entrypoint.sh"]

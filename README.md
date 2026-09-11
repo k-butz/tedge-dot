@@ -119,6 +119,7 @@ just lint               # clippy -D warnings
 just conformance modbus # full conformance suite (no hardware/broker needed)
 just test-flows         # offline flow tests (tedge flows test)
 just test-e2e modbus    # Dockerised MQTT e2e suite for one protocol (incl. the flows-driven parameter bridge)
+just test-e2e-c modbus  # the same suite against the C connector (poc-c/)
 just fuzz config_toml   # fuzz one SDK target (nightly + cargo-fuzz)
 just build              # cross-compile + package everything (goreleaser)
 ```

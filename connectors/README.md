@@ -16,6 +16,8 @@ connectors/
     requirements.txt            # base Robot deps (robotframework, paho-mqtt)
     Dockerfile.flows            # cloud-free flows runner: tedge (main channel) as the
     flows-entrypoint.sh         #   user-defined mapper "ot" running ../flows against the broker
+    Dockerfile.connector-c      # the C implementation (poc-c/) built for any stack (ARG PROTOCOL)
+    docker-compose.c.yaml       # compose override swapping the stack's connector for the C build
 
   <proto>/                      # one directory per OT protocol
     sim/                        # simulator image (Dockerfile + server code)
@@ -65,6 +67,23 @@ just e2e-down modbus       # tear it down
 
 just test-e2e modbus       # stack up → run robot suite → stack down
 just test-e2e modbus --include smoke   # pass extra robot args
+just test-e2e-c modbus     # the SAME suite against the C connector (poc-c/)
+just e2e-up modbus c       # C variant of the stack, for manual inspection
+```
+
+### Rust and C: one suite, two connectors
+
+The Rust crates and the C proof of concept ([poc-c/](../poc-c/)) implement the same
+contract and are maintained to the same coverage. Every stack therefore runs its Robot suite
+against both: `test-e2e` builds the stack's `Dockerfile.connector` (Rust), `test-e2e-c` adds
+[`_shared/docker-compose.c.yaml`](_shared/docker-compose.c.yaml), which swaps the `connector`
+service for [`_shared/Dockerfile.connector-c`](_shared/Dockerfile.connector-c) — the C build
+with only that protocol's module compiled in, installed with the stack's own `connector.toml`
+and `entrypoint.sh`. Robot output goes to `output/` and `output-c/` respectively, and the
+suite receives `${IMPL}` (`rust`/`c`) should a case ever need to differ (none does today).
+CI runs both matrices (`e2e` and `e2e-c`).
+
+```sh
 
 just cloud-up modbus       # bring up cloud (Cumulocity) stack and bootstrap
 just cloud-down modbus     # tear it down

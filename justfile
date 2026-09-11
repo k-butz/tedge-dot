@@ -83,31 +83,60 @@ sim-down proto:
 # Run the MQTT end-to-end suite for a protocol (Docker stack up → robot → down).
 # Usage: just test-e2e modbus   just test-e2e opcua
 test-e2e proto *args="":
+    just _e2e {{proto}} rust "{{args}}"
+
+# Same suite, same stack, but the connector is the C implementation (poc-c/): the Rust and
+# C connectors are maintained to the same contract, so they get the same e2e coverage.
+# Usage: just test-e2e-c modbus
+test-e2e-c proto *args="":
+    just _e2e {{proto}} c "{{args}}"
+
+# Shared body of test-e2e / test-e2e-c. `impl` is "rust" (the stack's own Dockerfile.connector)
+# or "c" (connectors/_shared/docker-compose.c.yaml swaps in Dockerfile.connector-c).
+_e2e proto impl args:
     #!/usr/bin/env bash
     set -euo pipefail
+    compose=(docker compose -f connectors/{{proto}}/docker-compose.yaml)
+    outdir=connectors/{{proto}}/output
+    if [ "{{impl}}" = "c" ]; then
+        compose+=(-f connectors/_shared/docker-compose.c.yaml)
+        outdir=connectors/{{proto}}/output-c
+    fi
+    export PROTOCOL={{proto}}
     # build and up are split: `up -d --build` can hang after "resolving provenance"
     # with a docker-container buildx builder (observed with compose 2.x + colima).
-    docker compose -f connectors/{{proto}}/docker-compose.yaml build
-    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d
+    "${compose[@]}" build
+    "${compose[@]}" up -d
     [ -d connectors/{{proto}}/.venv ] || python3 -m venv connectors/{{proto}}/.venv
     connectors/{{proto}}/.venv/bin/pip install -q -r connectors/_shared/requirements.txt
     [ -f connectors/{{proto}}/requirements.txt ] && \
         connectors/{{proto}}/.venv/bin/pip install -q -r connectors/{{proto}}/requirements.txt || true
     rc=0
     connectors/{{proto}}/.venv/bin/python -m robot \
-        --outputdir connectors/{{proto}}/output {{args}} \
+        --outputdir "$outdir" --variable IMPL:{{impl}} {{args}} \
         connectors/{{proto}}/tests/ || rc=$?
-    docker compose -f connectors/{{proto}}/docker-compose.yaml down -v
+    "${compose[@]}" down -v
     exit $rc
 
 # Bring the e2e stack up without running tests (for manual inspection).
-e2e-up proto:
-    docker compose -f connectors/{{proto}}/docker-compose.yaml build
-    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d
+# Usage: just e2e-up modbus [c]
+e2e-up proto impl="rust":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PROTOCOL={{proto}}
+    compose=(docker compose -f connectors/{{proto}}/docker-compose.yaml)
+    [ "{{impl}}" = "c" ] && compose+=(-f connectors/_shared/docker-compose.c.yaml)
+    "${compose[@]}" build
+    "${compose[@]}" up -d
 
 # Tear the e2e stack down.
-e2e-down proto:
-    docker compose -f connectors/{{proto}}/docker-compose.yaml down -v
+e2e-down proto impl="rust":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PROTOCOL={{proto}}
+    compose=(docker compose -f connectors/{{proto}}/docker-compose.yaml)
+    [ "{{impl}}" = "c" ] && compose+=(-f connectors/_shared/docker-compose.c.yaml)
+    "${compose[@]}" down -v
 
 
 # Cross-compile + build all packages

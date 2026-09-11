@@ -225,7 +225,11 @@ static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
     mb_device_t *mb = dev->proto;
     disconnect_device(self, dev);
 
-    mb->ctx = mb->tcp ? modbus_new_tcp(mb->host, mb->port)
+    /* modbus_new_tcp() accepts IP literals only; the _pi variant resolves host
+     * names (docker service names, DNS) like the Rust connector does. */
+    char port_str[16];
+    snprintf(port_str, sizeof port_str, "%d", mb->port);
+    mb->ctx = mb->tcp ? modbus_new_tcp_pi(mb->host, port_str)
                       : modbus_new_rtu(mb->serial, mb->baudrate, mb->parity,
                                        mb->databits, mb->stopbits);
     if (!mb->ctx) {

@@ -1,0 +1,16 @@
+# Compose override that swaps the stack's `connector` service for the C implementation
+# (poc-c/), so the same Robot suite runs against the C connector:
+#
+#   PROTOCOL=modbus docker compose -f connectors/modbus/docker-compose.yaml \
+#       -f connectors/_shared/docker-compose.c.yaml up -d
+#
+# or simply `just test-e2e-c modbus`. Relative paths here resolve against this file's
+# directory, so `../..` is the repository root like in the per-protocol compose files.
+services:
+  connector:
+    image: tedge-dot-c-${PROTOCOL:?set PROTOCOL to the stack name}-connector
+    build:
+      context: ../..
+      dockerfile: connectors/_shared/Dockerfile.connector-c
+      args:
+        PROTOCOL: ${PROTOCOL:?set PROTOCOL to the stack name}

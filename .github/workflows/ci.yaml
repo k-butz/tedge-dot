@@ -139,3 +139,29 @@ jobs:
           name: robot-output-${{ matrix.protocol }}
           path: connectors/${{ matrix.protocol }}/output/
           if-no-files-found: ignore
+
+  e2e-c:
+    name: e2e, C connector (${{ matrix.protocol }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: [modbus, opcua, canbus, canopen, profibus]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load vcan kernel module (SocketCAN suites)
+        if: matrix.protocol == 'canbus' || matrix.protocol == 'canopen'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-modules-extra-$(uname -r)
+          sudo modprobe vcan
+      - uses: extractions/setup-just@v2
+      - name: Run e2e suite against the C connector
+        run: just test-e2e-c ${{ matrix.protocol }}
+      - name: Upload robot output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-output-c-${{ matrix.protocol }}
+          path: connectors/${{ matrix.protocol }}/output-c/
+          if-no-files-found: ignore
