@@ -25,7 +25,7 @@
 
 services:
   broker:
-    image: eclipse-mosquitto:2
+    image: public.ecr.aws/docker/library/eclipse-mosquitto:2
     volumes:
       - ../_shared/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     ports:

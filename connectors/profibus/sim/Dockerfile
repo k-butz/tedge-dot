@@ -12,7 +12,13 @@
 # The connector speaks serial-over-TCP natively (port = "tcp://<host>:9200"),
 # so nothing else is needed on the client side.
 
-FROM python:3.11-slim
+# Base images come from the AWS ECR Public mirror of the Docker Official
+# Images rather than Docker Hub: GitHub-hosted runners share Docker Hub's
+# anonymous pull quota, and CI has hit auth.docker.io connection resets
+# mid-build. Override BASE_REGISTRY to go back to docker.io/library.
+ARG BASE_REGISTRY=public.ecr.aws/docker/library
+
+FROM ${BASE_REGISTRY}/python:3.11-slim
 
 COPY connectors/profibus/sim/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
