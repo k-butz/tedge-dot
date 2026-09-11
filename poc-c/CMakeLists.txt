@@ -53,7 +53,16 @@ endif()
 if(TDOT_OPCUA)
   # Prefer an installed open62541; fall back to building v1.5.5 from source
   # (client-only, reduced feature set) so CI needs no distro package.
-  find_package(open62541 QUIET)
+  #
+  # Cross builds must skip the lookup entirely: find_package() searches the
+  # *host* and would hand a host library to the target linker. The cross
+  # toolchain (cross/toolchain.cmake) also sets CMAKE_FIND_ROOT_PATH_MODE_PACKAGE,
+  # but this option makes the intent explicit and independent of that.
+  option(TDOT_OPCUA_VENDORED
+         "Always build open62541 from source, never look for an installed one" OFF)
+  if(NOT TDOT_OPCUA_VENDORED)
+    find_package(open62541 QUIET)
+  endif()
   if(NOT open62541_FOUND)
     include(FetchContent)
     set(UA_ENABLE_SUBSCRIPTIONS ON CACHE BOOL "" FORCE)
@@ -67,6 +76,19 @@ if(TDOT_OPCUA)
       GIT_TAG v1.5.5
       GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(open62541)
+    # open62541 builds itself with -Werror, and clang (which is what `zig cc`
+    # is) rejects the __DATE__/__TIME__ expansion in ua_config_default.c that
+    # gcc lets through. Disable just that warning, per target.
+    #
+    # Do NOT do this by saving/restoring CMAKE_C_FLAGS around the call:
+    # open62541 appends its own required flags to that variable and caches it,
+    # so restoring the old value silently drops them and the build fails to
+    # link (undefined setMethodNode_callback).
+    foreach(_tdot_ua_target open62541 open62541-object open62541-plugins)
+      if(TARGET ${_tdot_ua_target})
+        target_compile_options(${_tdot_ua_target} PRIVATE -Wno-date-time)
+      endif()
+    endforeach()
   endif()
   target_sources(tedge_dot_sdk PRIVATE connectors/opcua/connector_opcua.c)
   target_link_libraries(tedge_dot_sdk PUBLIC open62541::open62541)
