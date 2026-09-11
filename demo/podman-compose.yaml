@@ -1,0 +1,99 @@
+# OT simulator stack for a REAL Linux device, runnable with podman-compose.
+#
+# Self-contained on purpose: no `build:` sections, no `depends_on` conditions,
+# no host networking for the TCP simulators — so it needs no repository
+# checkout, pulls only images published by this repo, and uses only compose
+# features that old podman-compose (1.0.x) actually implements. Copy this one
+# file onto the device and run it.
+#
+# It contains ONLY simulators — no MQTT broker and no connectors. The
+# connectors run natively on the device (from the tedge-dot / tedge-dot-c
+# package) and publish to the thin-edge.io mosquitto broker on 127.0.0.1:1883.
+#
+#   ┌────────────────────────── Linux device ─────────────────────────────┐
+#   │  podman-compose (this file)            tedge-dot.service (package)  │
+#   │  ┌────────────────────────┐             ┌──────────────────────────┐│
+#   │  │ modbus-sim    :5020    │◄── tcp ─────│ tedge-dot (modbus)       ││
+#   │  │ opcua-sim     :4840    │◄── tcp ─────│ tedge-dot (opcua)        ││
+#   │  │ profibus-sim  :9200    │◄── tcp ─────│ tedge-dot (profibus)     ││
+#   │  └────────────────────────┘             │                          ││
+#   │  podman run (see below)                 │                          ││
+#   │  ┌────────────────────────┐             │                          ││
+#   │  │ canbus-sim    vcan0    │◄─ socketcan─│ tedge-dot (canbus)       ││
+#   │  │ canopen-sim   vcan0    │◄─ socketcan─│ tedge-dot (canopen)      ││
+#   │  └────────────────────────┘             └──────────┬───────────────┘│
+#   │                          mosquitto :1883 ◄─────────┘ (thin-edge)    │
+#   └─────────────────────────────────────────────────────────────────────┘
+#
+# The ports above are exactly what the packaged demo configs in
+# /usr/share/tedge-dot/demo/ already point at, so no config editing is needed.
+#
+# Published images are linux/amd64 and linux/arm64 only — a 32-bit armhf device
+# can run the tedge-dot package but not these simulators.
+#
+# --- Usage -------------------------------------------------------------------
+#
+#   podman-compose -p tedge-dot-sims -f podman-compose.yaml pull
+#   podman-compose -p tedge-dot-sims -f podman-compose.yaml up -d
+#   podman-compose -p tedge-dot-sims -f podman-compose.yaml ps
+#   podman-compose -p tedge-dot-sims -f podman-compose.yaml down
+#
+# Pass -p explicitly: podman-compose 1.0.x ignores the compose-spec `name:`
+# key and would otherwise name the project after the enclosing directory.
+#
+# Runs rootless. `docker compose -f podman-compose.yaml ...` works too.
+#
+# --- The two CAN simulators --------------------------------------------------
+#
+# They are NOT in this file. SocketCAN is a property of a network namespace,
+# not a port, so they need `--network host` to put vcan0 where the native
+# connector can see it — and podman-compose 1.0.2/1.0.3 emit both
+# `--network host` and `--net <project>_default --network-alias <svc>`, which
+# podman rejects ("--network-alias can only be set when the network mode is
+# bridge"). Fixed in podman-compose 1.0.6. Run them directly instead:
+#
+#   sudo modprobe vcan
+#   sudo ip link add dev vcan0 type vcan
+#   sudo ip link set up vcan0
+#
+#   sudo podman run -d --name canbus-sim  --network host --privileged \
+#     --restart unless-stopped ghcr.io/reubenmiller/tedge-dot/canbus-sim:latest
+#   sudo podman run -d --name canopen-sim --network host --privileged \
+#     --restart unless-stopped ghcr.io/reubenmiller/tedge-dot/canopen-sim:latest
+#
+# Needs a kernel with CONFIG_CAN / CONFIG_CAN_RAW / CONFIG_CAN_VCAN. With vcan0
+# already up, both images are idempotent about creating it.
+#
+# Override the image source with SIM_IMAGE_REPO / SIM_IMAGE_TAG.
+
+services:
+  # --- Modbus TCP simulator (pymodbus) ---------------------------------------
+  # Serves Modbus TCP on device port 5020 (container port 502).
+  modbus-sim:
+    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/modbus-sim:${SIM_IMAGE_TAG:-latest}
+    ports:
+      - "5020:502"
+    restart: unless-stopped
+
+  # --- OPC-UA simulator (python-asyncua) -------------------------------------
+  # asyncua binds the address it advertises, so with a published port it has to
+  # bind 0.0.0.0 (the default) rather than 127.0.0.1: a 127.0.0.1 bind inside
+  # the container is not reachable from the device. Verified that both the Rust
+  # and the C connector still connect when dialling opc.tcp://127.0.0.1:4840/
+  # against a server advertising 0.0.0.0.
+  opcua-sim:
+    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/opcua-sim:${SIM_IMAGE_TAG:-latest}
+    environment:
+      OPCUA_ENDPOINT_HOST: "0.0.0.0"
+    ports:
+      - "4840:4840"
+    restart: unless-stopped
+
+  # --- PROFIBUS-DP slave simulator (Python DP-V0 slave + socat) --------------
+  # PTYs cannot cross the container boundary, so the slave's serial line is
+  # exposed over TCP; the connector dials tcp://127.0.0.1:9200.
+  profibus-sim:
+    image: ${SIM_IMAGE_REPO:-ghcr.io/reubenmiller/tedge-dot}/profibus-sim:${SIM_IMAGE_TAG:-latest}
+    ports:
+      - "9200:9200"
+    restart: unless-stopped
