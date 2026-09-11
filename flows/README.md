@@ -57,7 +57,7 @@ parameters. `ot-parameter-state` keeps one retained twin fragment per *parameter
 (`te/device/<device>///twin/<set>`, keyed by point id) current from the samples (which echo each
 point's `access`) and from acknowledged writes. `ot-command-forward` reshapes an
 `ot_parameter_update` command (e.g. a Cumulocity `c8y_ParameterUpdate` operation mapped by
-[operations/c8y_ParameterUpdate](../operations/c8y_ParameterUpdate)) into ONE connector
+[operations/c8y_ParameterUpdate.template](../operations/c8y_ParameterUpdate.template)) into ONE connector
 `write-batch`, and `ot-command-result` completes it through the batch request's `origin.command`.
 The set a point belongs to comes from `meta.parameter.set`; `tedge-dot describe` renders the
 same sets as Cumulocity DTM definitions for a tenant admin to register.

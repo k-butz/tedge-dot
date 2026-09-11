@@ -17,7 +17,7 @@
 //
 // One command type is reshaped rather than passed through: `ot_parameter_update` (device
 // parameters, e.g. a Cumulocity c8y_ParameterUpdate operation mapped by
-// operations/c8y_ParameterUpdate) becomes ONE connector `write-batch`. Two request shapes:
+// operations/c8y_ParameterUpdate.template) becomes ONE connector `write-batch`. Two request shapes:
 //   1. Cumulocity: { "operation": { "c8y_ParameterUpdate":{}, "c8y_ParameterUpdate_<set>":{},
 //                                   "<set>": { "<point>": <value>, ... } }, "c8y-mapper": {...} }
 //   2. Direct:     { "set": "<set>", "parameters": { "<point>": <value>, ... } }
