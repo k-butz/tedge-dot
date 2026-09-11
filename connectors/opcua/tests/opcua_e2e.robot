@@ -28,6 +28,11 @@ ${CMD_PREFIX}           te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write
 ${LINK_TOPIC}           te/device/${DEVICE}/ot/${PROTOCOL}/status/link
 ${CAPS_TOPIC}           te/device/main/service/${SERVICE}/ot/capabilities
 ${HEALTH_TOPIC}         te/device/main/service/${SERVICE}/status/health
+${BATCH_PREFIX}         te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write-batch
+${PARAM_CMD_PREFIX}     te/device/${DEVICE}///cmd/ot_parameter_update
+${PARAM_TWIN}           te/device/${DEVICE}///twin/${PROTOCOL}_parameters
+# The flows container installs thin-edge from the main channel at build time; give it time.
+${FLOWS_TIMEOUT}        120
 
 # Generous timeout: the connector waits for the simulator/broker before it starts.
 ${READY_TIMEOUT}        90
@@ -133,6 +138,121 @@ Polled Sample Carries The Device Name
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temperature    timeout=${SAMPLE_TIMEOUT}
     ${device}=    Get Json Field    ${payload}    device
     Should Be Equal    ${device}    ${DEVICE}
+
+
+Samples Carry The Point Access
+    [Documentation]    Every sample echoes the point's declared access, so flows can tell
+    ...                writable points (parameters) apart without reading the config file.
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/setpoint    timeout=${SAMPLE_TIMEOUT}
+    ${access}=    Get Json Field    ${payload}    access
+    Should Be Equal    ${access}    read_write
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temperature    timeout=${SAMPLE_TIMEOUT}
+    ${access}=    Get Json Field    ${payload}    access
+    Should Be Equal    ${access}    read
+
+Capability Descriptor Advertises Write Batch
+    [Documentation]    The runtime adds the write-batch verb for every module that implements write.
+    ${payload}=    Wait For Retained    ${CAPS_TOPIC}    timeout=${READY_TIMEOUT}
+    ${verbs}=    Get Json Field    ${payload}    command_verbs
+    List Should Contain Value    ${verbs}    write-batch
+
+Write Batch Writes Several Points In One Command
+    [Documentation]    One write-batch request writes an int32 and a boolean node in order and reports
+    ...                a per-point result; the next samples reflect both values.
+    Publish Message    ${BATCH_PREFIX}/batch-1
+    ...    {"status":"init","writes":[{"point":"setpoint","value":4243},{"point":"running","value":true}]}    retain=True
+    ${result}=    Wait For Message Containing    ${BATCH_PREFIX}/batch-1    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    ${results}=    Get Json Field    ${result}    results
+    Length Should Be    ${results}    2
+    Should Be Equal    ${results}[0][point]    setpoint
+    Should Be Equal    ${results}[0][status]    successful
+    Should Be Equal    ${results}[1][point]    running
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/setpoint    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal As Numbers    ${value}    4243
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/running    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal    ${value}    ${True}
+
+Write Batch Stops At The First Failure And Reports What Was Applied
+    [Documentation]    A batch with an unknown point fails, but the result lists the write that
+    ...                succeeded before it so the requester knows the device state.
+    Publish Message    ${BATCH_PREFIX}/batch-2
+    ...    {"status":"init","writes":[{"point":"setpoint","value":17001},{"point":"no_such_point","value":1},{"point":"running","value":false}]}    retain=True
+    ${result}=    Wait For Message Containing    ${BATCH_PREFIX}/batch-2    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    no_such_point
+    ${results}=    Get Json Field    ${result}    results
+    Length Should Be    ${results}    2
+    Should Be Equal    ${results}[0][status]    successful
+    Should Be Equal    ${results}[1][status]    failed
+    # the coil after the failing entry was never written
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/running    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal    ${value}    ${True}
+
+Write Batch Rejects An Empty Request
+    Publish Message    ${BATCH_PREFIX}/batch-3    {"status":"init","writes":[]}    retain=True
+    ${result}=    Wait For Message Containing    ${BATCH_PREFIX}/batch-3    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    no writes
+
+Flows Register The Device And Advertise The Parameter Capability
+    [Documentation]    (flows) ot-registration turns the link status into a child-device
+    ...                registration and advertises ot_parameter_update so a cloud mapper routes
+    ...                c8y_ParameterUpdate operations to it.
+    [Tags]    flows
+    ${payload}=    Wait For Retained    te/device/${DEVICE}//    timeout=${FLOWS_TIMEOUT}
+    ${type}=    Get Json Field    ${payload}    @type
+    Should Be Equal    ${type}    child-device
+    Wait For Retained    ${PARAM_CMD_PREFIX}    timeout=${FLOWS_TIMEOUT}
+
+Parameter Twin Follows The Device
+    [Documentation]    (flows) ot-parameter-state publishes the writable points of the device as
+    ...                one twin fragment per parameter set, fed by the connector's samples.
+    [Tags]    flows
+    ${payload}=    Wait For Message Containing    ${PARAM_TWIN}    "setpoint":    timeout=${FLOWS_TIMEOUT}
+    ${twin}=    Evaluate    json.loads($payload)    modules=json
+    Dictionary Should Contain Key    ${twin}    setpoint
+    Dictionary Should Contain Key    ${twin}    running
+    Dictionary Should Not Contain Key    ${twin}    temperature
+
+Parameter Update Command Writes The Points And Completes
+    [Documentation]    (flows) A Cumulocity-shaped ot_parameter_update command (as the c8y mapper
+    ...                would publish for a c8y_ParameterUpdate operation) is bridged to ONE
+    ...                connector write-batch, completes with the mapper metadata preserved, and
+    ...                the twin reflects the new values.
+    [Tags]    flows
+    Publish Message    ${PARAM_CMD_PREFIX}/c8y-mapper-1
+    ...    {"status":"init","operation":{"deviceId":"1","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_${PROTOCOL}_parameters":{},"${PROTOCOL}_parameters":{"setpoint":1234,"running":false}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}    retain=True
+    ${result}=    Wait For Message Containing    ${PARAM_CMD_PREFIX}/c8y-mapper-1    "status":"successful"    timeout=${FLOWS_TIMEOUT}
+    ${meta}=    Get Json Field    ${result}    c8y-mapper.on_fragment
+    Should Be Equal    ${meta}    c8y_ParameterUpdate
+    ${results}=    Get Json Field    ${result}    results
+    Length Should Be    ${results}    2
+    ${batch}=    Wait For Message Containing    ${BATCH_PREFIX}/ot--c8y-mapper-1    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    ${twin}=    Wait For Message Containing    ${PARAM_TWIN}    "setpoint":1234    timeout=${FLOWS_TIMEOUT}
+    ${coil}=    Get Json Field    ${twin}    running
+    Should Be Equal    ${coil}    ${False}
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/setpoint    timeout=${SAMPLE_TIMEOUT}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal As Numbers    ${value}    1234
+
+Parameter Update With An Unknown Key Fails With The Connector Reason
+    [Tags]    flows
+    Publish Message    ${PARAM_CMD_PREFIX}/c8y-mapper-2
+    ...    {"status":"init","operation":{"c8y_ParameterUpdate":{},"c8y_ParameterUpdate_${PROTOCOL}_parameters":{},"${PROTOCOL}_parameters":{"bogus":1}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}    retain=True
+    ${result}=    Wait For Message Containing    ${PARAM_CMD_PREFIX}/c8y-mapper-2    "status":"failed"    timeout=${FLOWS_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    bogus
+
+Generic Write Command Is Bridged By The Flows
+    [Documentation]    (flows) The pre-existing ot_write bridge (c8y_SetRegister path) still works
+    ...                alongside the parameter bridge.
+    [Tags]    flows
+    Publish Message    te/device/${DEVICE}///cmd/ot_write/w-1    {"status":"init","point":"setpoint","value":17001}    retain=True
+    ${result}=    Wait For Message Containing    te/device/${DEVICE}///cmd/ot_write/w-1    "status":"successful"    timeout=${FLOWS_TIMEOUT}
+    ${twin}=    Wait For Message Containing    ${PARAM_TWIN}    "setpoint":17001    timeout=${FLOWS_TIMEOUT}
 
 
 *** Keywords ***

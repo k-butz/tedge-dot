@@ -113,6 +113,7 @@ Read them roughly in this order:
 | 12 | [roadmap.md](roadmap.md) | A phased delivery plan from SDK to a community of connectors. |
 | 13 | [testing.md](testing.md) | The layered testing strategy: unit, property-based (proptest), fuzzing (cargo-fuzz), integration, simulator e2e, flow and cloud tests. |
 | 14 | [rfc/0002-cloud-fieldbus-integration.md](rfc/0002-cloud-fieldbus-integration.md) | Proposal: Cumulocity Cloud Fieldbus device types translated into `define-device` commands; the device stays config-file driven. |
+| 15 | [rfc/0003-parameter-writes.md](rfc/0003-parameter-writes.md) | Writing to devices from the cloud as *device parameters*: `write-batch` in the SDK, writable points published as twin fragments by one flow, Cumulocity `c8y_ParameterUpdate` bridged by the command flows, DTM definitions rendered from the config; why not the CLI or the parameter plugin. |
 
 ---
 

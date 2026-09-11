@@ -154,7 +154,7 @@ stacks) skips the behavioural layer with an explanatory note instead of failing.
 protocol  = "modbus"
 modes     = ["raw", "typed"]
 datatypes = ["bool", "int16", "uint16", "int32", "uint32", "float32", "float64"]
-verbs     = ["write"]
+verbs     = ["write"]        # module verbs only: the SDK's write-batch and management verbs are implied
 features  = ["polling", "bitfield"]
 subscribe = false
 

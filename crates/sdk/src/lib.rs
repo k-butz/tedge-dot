@@ -8,6 +8,7 @@ pub mod config;
 pub mod conformance;
 pub mod connector;
 pub mod decode;
+pub mod descriptor;
 pub mod model;
 pub mod runtime;
 
@@ -16,5 +17,6 @@ pub use connector::{
     Access, Capabilities, CommandRequest, CommandResult, ConfigError, Connector, ConnectorError,
     LinkReport, LinkStatus, PointRef, SampleSink,
 };
+pub use descriptor::{c8y_dtm_definitions, parameter_of, parameters, Parameter};
 pub use decode::{decode_primitive, encode_primitive, extract_bitfield, DecodeError, Endianness, WordOrder};
 pub use model::{DataType, DeviceId, Mode, PointId, Quality, Sample, Transform, Value};

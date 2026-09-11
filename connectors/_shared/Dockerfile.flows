@@ -1,0 +1,37 @@
+# Cloud-free flows runner for the e2e harness: thin-edge.io's flows engine as a user-defined
+# mapper (`tedge-mapper ot`, from /etc/tedge/mappers/ot/) running this repo's flows against the
+# stack's broker. It lets the e2e suites exercise the whole device-side chain — command
+# bridging, parameter bridge, twin/registration — without any cloud connection.
+#
+# User-defined mappers need a thin-edge build newer than the demo image's release, so tedge is
+# installed from the `main` channel here. Build context is the repo root.
+ARG BASE_REGISTRY=public.ecr.aws/docker/library
+FROM ${BASE_REGISTRY}/debian:bookworm-slim
+
+ARG TEDGE_CHANNEL=main
+# Protocol the command bridge targets (ot-command-forward fallback): modbus, opcua, ...
+ARG PROTOCOL=modbus
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates netcat-openbsd \
+    && curl -fsSL https://thin-edge.io/install.sh | sh -s -- --channel ${TEDGE_CHANNEL} \
+    && rm -rf /var/lib/apt/lists/*
+
+# The flows, deployed exactly as they would be into a mapper's flows directory.
+COPY flows/ot-measurement       /etc/tedge/mappers/ot/flows/ot-measurement
+COPY flows/ot-registration      /etc/tedge/mappers/ot/flows/ot-registration
+COPY flows/ot-alarm             /etc/tedge/mappers/ot/flows/ot-alarm
+COPY flows/ot-event             /etc/tedge/mappers/ot/flows/ot-event
+COPY flows/ot-command-forward   /etc/tedge/mappers/ot/flows/ot-command-forward
+COPY flows/ot-command-result    /etc/tedge/mappers/ot/flows/ot-command-result
+COPY flows/ot-parameter-state   /etc/tedge/mappers/ot/flows/ot-parameter-state
+
+# Point the command bridge at the stack's protocol.
+RUN printf 'protocol = "%s"\n' "${PROTOCOL}" > /etc/tedge/mappers/ot/flows/ot-command-forward/params.toml \
+    && tedge config set mqtt.client.host broker \
+    && tedge config set mqtt.client.port 1883 \
+    && chown -R tedge:tedge /etc/tedge
+
+COPY connectors/_shared/flows-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

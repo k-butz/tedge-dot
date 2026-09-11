@@ -69,7 +69,7 @@ channels:
     parameters:
       device: { description: thin-edge device entity id segment }
       protocol: { description: protocol module id }
-      verb: { description: command verb, e.g. write }
+      verb: { description: command verb, e.g. write, write-batch, set-config }
       id: { description: unique command instance id }
     messages:
       Command:

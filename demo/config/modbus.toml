@@ -46,11 +46,16 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 5020, unit_id
 default_mode     = "typed"
 
   # uint16 holding register (also used for the register write round-trip).
+  # Writable points are *parameters*: the ot-parameter-state flow publishes them as the
+  # `modbus_parameters` twin fragment and `tedge-dot describe` renders the matching Cumulocity
+  # Digital Twin Manager definition; meta.parameter enriches that schema
+  # (title/description/min/max/enum/order) or picks another set (set = "...").
   [[device.point]]
   id       = "temp_u16"
   datatype = "uint16"
   access   = "read_write"
   address  = { table = "holding", address = 3, count = 1 }
+  meta     = { parameter = { title = "Temperature setpoint", min = 0, max = 30000 } }
 
   # Same register, but with a per-point linear transform applied by the connector:
   # (17001 * 10^-3) + 0 = 17.001. Scaling is a property of the signal, not the flow.

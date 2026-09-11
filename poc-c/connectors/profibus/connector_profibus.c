@@ -118,7 +118,7 @@ static const char CAPABILITIES[] =
     "\"datatypes\":[\"bool\",\"int8\",\"uint8\",\"int16\",\"uint16\","
     "\"int32\",\"uint32\",\"float32\"],"
     "\"point_kinds\":[\"io_byte\",\"io_bit\"],"
-    "\"command_verbs\":[\"write\"],"
+    "\"command_verbs\":[\"write\",\"write-batch\"],"
     "\"features\":[\"polling\"],\"subscribe\":false}";
 
 /* ---- small utilities ------------------------------------------------------ */

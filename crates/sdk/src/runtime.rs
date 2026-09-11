@@ -257,6 +257,7 @@ pub async fn run_until(
         .map_err(|e| format!("configure failed: {e}"))?;
     let mut caps = connector.capabilities();
     augment_management_caps(&mut caps);
+    augment_batch_caps(&mut caps);
 
     // 2. MQTT setup.
     let health_topic = format!("te/device/main/service/{service}/status/health");
@@ -324,7 +325,6 @@ pub async fn run_until(
         Ok(reports) => links.publish_reports(&client, &reports).await?,
         Err(e) => warn!("initial connect failed: {e}"),
     }
-
     // 5. Set up push delivery for subscribe-capable connectors, then build the polling
     // schedule for everything that is not pushed. The runtime keeps `sample_tx` alive for
     // the whole run so re-subscribing after a config reload reuses the same channel.
@@ -556,7 +556,7 @@ pub async fn run_stdout_until(
 fn print_sample(
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
-    meta_index: &HashMap<(String, String), serde_json::Value>,
+    meta_index: &MetaIndex,
 ) {
     let counter = seq_counters
         .entry((sample.device.clone(), sample.point.clone()))
@@ -663,26 +663,50 @@ async fn setup_subscriptions(
 
 /// Per-point `meta` lookup, keyed by `(device name, point id)`; injected into every published
 /// sample envelope so flows can apply per-signal behaviour without their own config.
-fn build_meta_index(config: &ConnectorConfig) -> HashMap<(String, String), serde_json::Value> {
+/// Per-point configuration echoed into every sample envelope beyond what the driver produces:
+/// the free-form `meta` table and the declared `access` (so consumers can tell writable
+/// points — parameters — apart without the configuration file).
+#[derive(Clone, Debug)]
+struct PointExtras {
+    meta: Option<serde_json::Value>,
+    access: Access,
+}
+
+type MetaIndex = HashMap<(String, String), PointExtras>;
+
+fn build_meta_index(config: &ConnectorConfig) -> MetaIndex {
     let mut index = HashMap::new();
     for device in &config.devices {
         for point in &device.points {
-            if let Some(meta) = &point.meta {
-                index.insert((device.name.clone(), point.id.clone()), meta.clone());
-            }
+            index.insert(
+                (device.name.clone(), point.id.clone()),
+                PointExtras {
+                    meta: point.meta.clone(),
+                    access: Access::parse(point.access.as_deref()),
+                },
+            );
         }
     }
     index
 }
 
-/// The sample envelope as published: the contract envelope plus the point's `meta`, if any.
-fn envelope_with_meta(
-    sample: &Sample,
-    meta_index: &HashMap<(String, String), serde_json::Value>,
-) -> serde_json::Value {
+fn access_str(access: Access) -> &'static str {
+    match access {
+        Access::Read => "read",
+        Access::Write => "write",
+        Access::ReadWrite => "read_write",
+    }
+}
+
+/// The sample envelope as published: the contract envelope plus the point's `meta` (if any)
+/// and its `access`.
+fn envelope_with_meta(sample: &Sample, meta_index: &MetaIndex) -> serde_json::Value {
     let mut envelope = sample.to_envelope();
-    if let Some(meta) = meta_index.get(&(sample.device.clone(), sample.point.clone())) {
-        envelope["meta"] = meta.clone();
+    if let Some(extras) = meta_index.get(&(sample.device.clone(), sample.point.clone())) {
+        if let Some(meta) = &extras.meta {
+            envelope["meta"] = meta.clone();
+        }
+        envelope["access"] = serde_json::Value::String(access_str(extras.access).into());
     }
     envelope
 }
@@ -694,7 +718,7 @@ async fn publish_sample(
     protocol: &str,
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
-    meta_index: &HashMap<(String, String), serde_json::Value>,
+    meta_index: &MetaIndex,
 ) {
     let counter = seq_counters
         .entry((sample.device.clone(), sample.point.clone()))
@@ -770,6 +794,13 @@ async fn handle_command(
         .await;
     }
 
+    // `write-batch` (§6.4) is implemented once here on top of the module's `write`.
+    if verb == "write-batch" {
+        handle_write_batch(connector, client, topic, &device, &json).await?;
+        debug!(%device, %verb, "command handled");
+        return Ok(false);
+    }
+
     let point = json
         .get("point")
         .and_then(|p| p.as_str())
@@ -822,6 +853,137 @@ async fn handle_command(
     }
     debug!(%device, %verb, "command handled");
     Ok(false)
+}
+
+/// Advertise the runtime-provided `write-batch` verb for every module that implements
+/// `write` (the runtime executes the batch as a sequence of `write` calls).
+fn augment_batch_caps(caps: &mut Capabilities) {
+    if caps.command_verbs.iter().any(|v| v == "write")
+        && !caps.command_verbs.iter().any(|v| v == "write-batch")
+    {
+        caps.command_verbs.push("write-batch".to_string());
+    }
+}
+
+/// One entry of a `write-batch` request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchWrite {
+    pub point: String,
+    pub value: Option<serde_json::Value>,
+    pub raw: Option<String>,
+}
+
+/// Parse the `writes` array of a `write-batch` request (§6.4). Each entry needs a `point`
+/// and either a `value` (typed write) or `raw` (hex bytes); an empty batch is rejected so a
+/// malformed request cannot "succeed" without touching the device.
+pub fn parse_batch_writes(json: &serde_json::Value) -> Result<Vec<BatchWrite>, String> {
+    let writes = json
+        .get("writes")
+        .and_then(|w| w.as_array())
+        .ok_or_else(|| "write-batch request needs a `writes` array".to_string())?;
+    if writes.is_empty() {
+        return Err("write-batch request has no writes".into());
+    }
+    let mut out = Vec::with_capacity(writes.len());
+    for (i, w) in writes.iter().enumerate() {
+        let point = w
+            .get("point")
+            .and_then(|p| p.as_str())
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| format!("writes[{i}] has no `point`"))?
+            .to_string();
+        let value = w.get("value").cloned().filter(|v| !v.is_null());
+        let raw = w.get("raw").and_then(|r| r.as_str()).map(String::from);
+        if value.is_none() && raw.is_none() {
+            return Err(format!("writes[{i}] ({point}) has neither `value` nor `raw`"));
+        }
+        out.push(BatchWrite { point, value, raw });
+    }
+    Ok(out)
+}
+
+/// Execute a `write-batch`: the writes run sequentially in request order through the
+/// module's `write` verb and stop at the first failure (later points are left untouched).
+/// The result carries one entry per attempted write so a requester can tell what was
+/// applied before a failure.
+async fn handle_write_batch(
+    connector: &mut Box<dyn Connector>,
+    client: &AsyncClient,
+    topic: &str,
+    device: &str,
+    json: &serde_json::Value,
+) -> Result<(), BoxError> {
+    let writes = match parse_batch_writes(json) {
+        Ok(w) => w,
+        Err(reason) => {
+            publish_retained(
+                client,
+                topic,
+                serde_json::json!({ "status": "failed", "reason": reason, "results": [] })
+                    .to_string(),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let points: Vec<&str> = writes.iter().map(|w| w.point.as_str()).collect();
+    publish_retained(
+        client,
+        topic,
+        serde_json::json!({ "status": "executing", "points": points }).to_string(),
+    )
+    .await?;
+
+    let mut results: Vec<serde_json::Value> = Vec::with_capacity(writes.len());
+    let mut failure: Option<String> = None;
+    for w in &writes {
+        let request = CommandRequest {
+            point: w.point.clone(),
+            value: w.value.clone(),
+            value_repr: None,
+            raw: w.raw.clone(),
+        };
+        match connector.execute(&device.to_string(), "write", &request).await {
+            Ok(result) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("point".into(), serde_json::Value::String(result.point));
+                obj.insert("status".into(), serde_json::Value::String("successful".into()));
+                if let Some(v) = result.value {
+                    obj.insert("value".into(), v);
+                }
+                if let Some(r) = result.raw {
+                    obj.insert("raw".into(), serde_json::Value::String(r));
+                }
+                results.push(serde_json::Value::Object(obj));
+            }
+            Err(e) => {
+                let reason = format!("write to {} failed: {e}", w.point);
+                results.push(serde_json::json!({
+                    "point": w.point,
+                    "status": "failed",
+                    "reason": reason,
+                }));
+                failure = Some(reason);
+                break;
+            }
+        }
+    }
+    let payload = batch_result(failure, results);
+    publish_retained(client, topic, payload.to_string()).await?;
+    Ok(())
+}
+
+/// Shape the terminal `write-batch` envelope: `successful` with every result, or `failed`
+/// with the first failure's reason and the results up to and including it.
+pub fn batch_result(failure: Option<String>, results: Vec<serde_json::Value>) -> serde_json::Value {
+    match failure {
+        None => serde_json::json!({ "status": "successful", "results": results }),
+        Some(reason) => serde_json::json!({
+            "status": "failed",
+            "reason": reason,
+            "results": results,
+        }),
+    }
 }
 
 /// The protocol-neutral management verbs the SDK runtime implements for every connector.
@@ -1351,7 +1513,9 @@ protocol_address = { host = "127.0.0.1" }
         )
         .unwrap();
         let index = build_meta_index(&cfg);
-        let meta = index.get(&("plc-1".to_string(), "temp".to_string())).unwrap();
+        let extras = index.get(&("plc-1".to_string(), "temp".to_string())).unwrap();
+        let meta = extras.meta.as_ref().unwrap();
+        assert_eq!(extras.access, Access::Read);
         assert_eq!(meta["on_change"], serde_json::json!(true));
         assert_eq!(meta["min_interval"], serde_json::json!("5s"));
         assert_eq!(meta["room"], serde_json::json!("boiler"));
@@ -1378,13 +1542,18 @@ protocol_address = { host = "127.0.0.1" }
         let mut index = HashMap::new();
         index.insert(
             ("plc-1".to_string(), "temp".to_string()),
-            serde_json::json!({ "on_change": true }),
+            PointExtras {
+                meta: Some(serde_json::json!({ "on_change": true })),
+                access: Access::ReadWrite,
+            },
         );
         let env = envelope_with_meta(&sample, &index);
         assert_eq!(env["meta"]["on_change"], serde_json::json!(true));
-        // a sample without indexed meta has no meta key
+        assert_eq!(env["access"], serde_json::json!("read_write"));
+        // a sample of an unindexed point has neither meta nor access
         let env2 = envelope_with_meta(&sample, &HashMap::new());
         assert!(env2.get("meta").is_none());
+        assert!(env2.get("access").is_none());
     }
 
     #[test]
@@ -1427,6 +1596,76 @@ protocol_address = { host = "127.0.0.1" }
         // a device that never connected stays disconnected
         assert_eq!(next_link_state(Some(Disconnected), false), None);
         assert_eq!(next_link_state(None, false), None);
+    }
+
+    #[test]
+    fn batch_writes_parse_typed_and_raw_entries() {
+        let json = serde_json::json!({
+            "status": "init",
+            "writes": [
+                { "point": "setpoint", "value": 21.5 },
+                { "point": "mask", "raw": "00ff" }
+            ]
+        });
+        let writes = parse_batch_writes(&json).unwrap();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].point, "setpoint");
+        assert_eq!(writes[0].value, Some(serde_json::json!(21.5)));
+        assert_eq!(writes[1].raw.as_deref(), Some("00ff"));
+        assert_eq!(writes[1].value, None);
+    }
+
+    #[test]
+    fn batch_writes_reject_malformed_requests() {
+        let missing = serde_json::json!({ "status": "init" });
+        assert!(parse_batch_writes(&missing).unwrap_err().contains("`writes`"));
+        let empty = serde_json::json!({ "writes": [] });
+        assert!(parse_batch_writes(&empty).unwrap_err().contains("no writes"));
+        let no_point = serde_json::json!({ "writes": [{ "value": 1 }] });
+        assert!(parse_batch_writes(&no_point).unwrap_err().contains("`point`"));
+        let no_value = serde_json::json!({ "writes": [{ "point": "x" }] });
+        assert!(parse_batch_writes(&no_value).unwrap_err().contains("neither"));
+        let null_value = serde_json::json!({ "writes": [{ "point": "x", "value": null }] });
+        assert!(parse_batch_writes(&null_value).is_err());
+    }
+
+    #[test]
+    fn batch_result_shapes_success_and_failure() {
+        let ok = batch_result(None, vec![serde_json::json!({ "point": "a", "status": "successful" })]);
+        assert_eq!(ok["status"], "successful");
+        assert_eq!(ok["results"].as_array().unwrap().len(), 1);
+        let failed = batch_result(
+            Some("write to b failed: boom".into()),
+            vec![
+                serde_json::json!({ "point": "a", "status": "successful" }),
+                serde_json::json!({ "point": "b", "status": "failed", "reason": "write to b failed: boom" }),
+            ],
+        );
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["reason"], "write to b failed: boom");
+        assert_eq!(failed["results"][1]["status"], "failed");
+    }
+
+    #[test]
+    fn batch_caps_follow_write_support() {
+        let mut caps = Capabilities {
+            protocol: "x",
+            version: "0",
+            modes: vec![],
+            datatypes: vec![],
+            point_kinds: vec![],
+            command_verbs: vec!["write".into()],
+            features: vec![],
+            subscribe: false,
+        };
+        augment_batch_caps(&mut caps);
+        assert!(caps.command_verbs.iter().any(|v| v == "write-batch"));
+        augment_batch_caps(&mut caps); // idempotent
+        assert_eq!(caps.command_verbs.iter().filter(|v| *v == "write-batch").count(), 1);
+        let mut read_only = caps.clone();
+        read_only.command_verbs = vec![];
+        augment_batch_caps(&mut read_only);
+        assert!(read_only.command_verbs.is_empty());
     }
 
     #[test]

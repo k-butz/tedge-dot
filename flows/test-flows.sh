@@ -94,6 +94,32 @@ check_params() {
   fi
 }
 
+# check_multi <name> <flows (space-separated)> <stdin> <expected-substring> [--absent <substring>]
+# Runs several flows together in one mapper-like flows dir (each with its template params), so
+# cross-flow state through context.mapper is exercised the way a deployed mapper runs them.
+check_multi() {
+  local name="$1" flows="$2" input="$3" expect="$4" absent="${6:-}"
+  local tmp out f
+  tmp="$(mktemp -d)"
+  for f in $flows; do
+    mkdir -p "$tmp/$f"
+    cp "$f"/*.js "$f"/flow.toml "$tmp/$f/"
+    cp "$f/params.toml.template" "$tmp/$f/params.toml"
+  done
+  out="$(printf '%s\n' "$input" | tedge flows test --flows-dir "$tmp" 2>/dev/null)"
+  rm -rf "$tmp"
+  if [[ "$out" == *"$expect"* && ( -z "$absent" || "$out" != *"$absent"* ) ]]; then
+    echo "ok   - $name"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - $name"
+    echo "       expected to contain: $expect"
+    [[ -n "$absent" ]] && echo "       and NOT contain:     $absent"
+    echo "       got:                 $out"
+    fail=$((fail + 1))
+  fi
+}
+
 S='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":404.17,"value_repr":"number","raw":"43ca 15c3","quality":"good","addr":{}}'
 SBAD='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","quality":"bad","error":"timeout","addr":{}}'
 SBOOL='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"coil_rw","mode":"typed","datatype":"bool","value":true,"value_repr":"boolean","raw":"01","quality":"good","addr":{}}'
@@ -236,6 +262,111 @@ check_params "registration: publishes twin fragment from info" ot-registration \
   'twin_fragment = "c8y_ModbusDevice"' \
   '[te/device/plc1/ot/modbus/status/link] {"status":"connected","info":{"protocol":"modbus","transport":"tcp","host":"127.0.0.1","port":502,"unit_id":1}}' \
   '[te/device/plc1///twin/c8y_ModbusDevice] {"protocol":"modbus","transport":"tcp","host":"127.0.0.1","port":502,"unit_id":1}'
+
+# --- ot-parameter-state (samples + write results -> twin parameter sets) ---
+# Samples echo the point's access; writable points (or meta.parameter opt-ins) are parameters.
+ST='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temp_u16","mode":"typed","datatype":"uint16","value":17001,"value_repr":"number","raw":"4269","quality":"good","addr":{},"access":"read_write"}'
+SL='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"level_f32","mode":"typed","datatype":"float32","value":1.5,"value_repr":"number","raw":"3fc0 0000","quality":"good","addr":{},"access":"read"}'
+SW='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"status_word","mode":"typed","datatype":"uint16","value":7,"value_repr":"number","raw":"0007","quality":"good","addr":{},"access":"read","meta":{"parameter":true}}'
+SP='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"pump_speed","mode":"typed","datatype":"float32","value":10.5,"value_repr":"number","raw":"4128 0000","quality":"good","addr":{},"access":"read_write","meta":{"parameter":"pump"}}'
+SH='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"hidden_rw","mode":"typed","datatype":"uint16","value":1,"value_repr":"number","raw":"0001","quality":"good","addr":{},"access":"read_write","meta":{"parameter":false}}'
+STBAD='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temp_u16","mode":"typed","datatype":"uint16","quality":"bad","error":"timeout","addr":{},"access":"read_write"}'
+check "parameter-state: writable point sample -> twin set keyed by point id" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/temp_u16] $ST" \
+  '[te/device/plc1///twin/modbus_parameters] {"temp_u16":17001}'
+check_empty "parameter-state: read-only point ignored" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/level_f32] $SL"
+check_empty "parameter-state: bad-quality sample ignored" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/temp_u16] $STBAD"
+check_absent "parameter-state: unchanged value republishes nothing (single twin)" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $ST" \
+  '{"temp_u16":17001}' \
+  '{"temp_u16":17001}
+[te/device/plc1///twin/modbus_parameters] {"temp_u16":17001}'
+check "parameter-state: meta.parameter names another set" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/pump_speed] $SP" \
+  '[te/device/plc1///twin/pump] {"pump_speed":10.5}'
+check "parameter-state: opted-in read-only point is displayed" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/status_word] $SW" \
+  '[te/device/plc1///twin/modbus_parameters] {"status_word":7}'
+check_empty "parameter-state: meta.parameter=false opts a writable point out" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/hidden_rw] $SH"
+check "parameter-state: opted-out point stays out after a write" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/hidden_rw] $SH"$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n'"[te/device/plc1/ot/modbus/cmd/write/w1] {\"status\":\"successful\",\"point\":\"hidden_rw\",\"value\":2}" \
+  '[te/device/plc1///twin/modbus_parameters] {"temp_u16":17001}'
+check "parameter-state: write-only point takes the last acknowledged batch write" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}]}' \
+  '[te/device/plc1///twin/modbus_parameters] {"valve_cmd":true}'
+check "parameter-state: single write result updates a read/write point optimistically" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/temp_u16] $ST"$'\n'"[te/device/plc1/ot/modbus/cmd/write/abc] {\"status\":\"successful\",\"point\":\"temp_u16\",\"value\":4242}" \
+  '[te/device/plc1///twin/modbus_parameters] {"temp_u16":4242}'
+check "parameter-state: written point keeps the set learned from its samples" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/pump_speed] $SP"$'\n'"[te/device/plc1/ot/modbus/cmd/write/abc] {\"status\":\"successful\",\"point\":\"pump_speed\",\"value\":12}" \
+  '[te/device/plc1///twin/pump] {"pump_speed":12}'
+check_empty "parameter-state: failed write leaves the twin alone" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/cmd/write/abc] {"status":"failed","point":"temp_u16","reason":"boom"}'
+check_params "parameter-state: default_set param renames the default set" ot-parameter-state \
+  'default_set = "plc_settings"' \
+  "[te/device/plc1/ot/modbus/sample/temp_u16] $ST" \
+  '[te/device/plc1///twin/plc_settings] {"temp_u16":17001}'
+check "parameter-state: opcua samples -> opcua_parameters (generic)" ot-parameter-state \
+  '[te/device/opc1/ot/opcua/sample/setpoint] {"device":"opc1","protocol":"opcua","point":"setpoint","mode":"typed","datatype":"int32","value":42,"value_repr":"number","raw":"0000 002a","quality":"good","addr":{},"access":"read_write"}' \
+  '[te/device/opc1///twin/opcua_parameters] {"setpoint":42}'
+
+# --- ot-command-forward: ot_parameter_update -> write-batch ---
+C8YOP='{"status":"init","operation":{"deviceId":"123","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_modbus_parameters":{},"modbus_parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
+check "command-forward: c8y parameter update -> one write-batch with origin + mapper metadata" ot-command-forward \
+  "[te/device/plc1///cmd/ot_parameter_update/c8y-mapper-1] $C8YOP" \
+  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--c8y-mapper-1] {"status":"init","writes":[{"point":"temp_u16","value":4242},{"point":"coil_rw","value":true}],"origin":{"command":"ot_parameter_update","set":"modbus_parameters","parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
+check "command-forward: direct parameter update shape" ot-command-forward \
+  '[te/device/plc1///cmd/ot_parameter_update/x1] {"status":"init","set":"pump","parameters":{"pump_speed":12}}' \
+  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--x1] {"status":"init","writes":[{"point":"pump_speed","value":12}],"origin":{"command":"ot_parameter_update","set":"pump","parameters":{"pump_speed":12}}}'
+check_params "command-forward: protocol recorded by ot-parameter-state wins over params" ot-command-forward '' \
+  '[te/device/opc1///cmd/ot_parameter_update/x1] {"status":"init","set":"opcua_parameters","parameters":{"setpoint":7}}' \
+  '[te/device/opc1/ot/opcua/cmd/write-batch/ot--x1]' \
+  --context '{"ot-protocol:opc1":"opcua"}'
+check "command-forward: unintelligible parameter update forwarded as an empty batch with the error noted" ot-command-forward \
+  '[te/device/plc1///cmd/ot_parameter_update/x2] {"status":"init","operation":{"c8y_ParameterUpdate":{}}}' \
+  '"writes":[],"origin":{"command":"ot_parameter_update","set":null,"parameters":null,"error":"c8y_ParameterUpdate operation names no parameter set"}'
+
+# --- ot-command-result: origin.command routes reshaped commands back ---
+BINIT='{"status":"init","writes":[{"point":"temp_u16","value":4242}],"origin":{"command":"ot_parameter_update","set":"modbus_parameters","parameters":{"temp_u16":4242}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
+BRESULT="[te/device/plc1/ot/modbus/cmd/write-batch/ot--c8y-mapper-1] $BINIT"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--c8y-mapper-1] {\"status\":\"successful\",\"results\":[{\"point\":\"temp_u16\",\"status\":\"successful\",\"value\":4242}]}"
+check "command-result: batch result completes the originating command type" ot-command-result "$BRESULT" \
+  '[te/device/plc1///cmd/ot_parameter_update/c8y-mapper-1] {'
+check "command-result: batch result keeps the c8y-mapper metadata" ot-command-result "$BRESULT" \
+  '"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}'
+check "command-result: batch result carries status + per-point results" ot-command-result "$BRESULT" \
+  '"status":"successful","results":[{"point":"temp_u16","status":"successful","value":4242}]}'
+check_absent "command-result: batch request body (writes) is not echoed" ot-command-result "$BRESULT" \
+  '"status":"successful"' '"writes"'
+check "command-result: failed batch combines the origin note and the connector reason" ot-command-result \
+  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--x2] {"status":"init","writes":[],"origin":{"command":"ot_parameter_update","error":"no parameter set"}}'$'\n''[te/device/plc1/ot/modbus/cmd/write-batch/ot--x2] {"status":"failed","reason":"write-batch request has no writes","results":[]}' \
+  '[te/device/plc1///cmd/ot_parameter_update/x2] {"origin":{"command":"ot_parameter_update","error":"no parameter set"},"status":"failed","reason":"no parameter set; write-batch request has no writes","results":[]}'
+check "command-result: batch without origin mirrors as ot_write_batch" ot-command-result \
+  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--b1] {"status":"successful","results":[]}' \
+  '[te/device/plc1///cmd/ot_write_batch/b1] {"status":"successful","results":[]}'
+check "registration: advertises the ot_parameter_update capability" ot-registration \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected"}' \
+  '[te/device/plc1///cmd/ot_parameter_update] {}'
+
+# --- the parameter bridge in one mapper: state records the protocol, forward uses it, result completes, state updates the twin ---
+CHAIN="[te/device/opc1/ot/opcua/sample/setpoint] {\"device\":\"opc1\",\"protocol\":\"opcua\",\"point\":\"setpoint\",\"mode\":\"typed\",\"datatype\":\"int32\",\"value\":0,\"value_repr\":\"number\",\"raw\":\"0000 0000\",\"quality\":\"good\",\"addr\":{},\"access\":\"read_write\"}
+[te/device/opc1///cmd/ot_parameter_update/c8y-mapper-9] {\"status\":\"init\",\"operation\":{\"c8y_ParameterUpdate\":{},\"c8y_ParameterUpdate_opcua_parameters\":{},\"opcua_parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
+[te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {\"status\":\"init\",\"writes\":[{\"point\":\"setpoint\",\"value\":42}],\"origin\":{\"command\":\"ot_parameter_update\",\"set\":\"opcua_parameters\",\"parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
+[te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {\"status\":\"successful\",\"results\":[{\"point\":\"setpoint\",\"status\":\"successful\",\"value\":42}]}"
+check_multi "parameter bridge: forward targets the protocol the state flow recorded (no params needed)" \
+  "ot-parameter-state ot-command-forward ot-command-result" "$CHAIN" \
+  '[te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {"status":"init","writes":[{"point":"setpoint","value":42}]'
+check_multi "parameter bridge: result completes the cloud-bound command" \
+  "ot-parameter-state ot-command-forward ot-command-result" "$CHAIN" \
+  '[te/device/opc1///cmd/ot_parameter_update/c8y-mapper-9] {'
+check_multi "parameter bridge: completed command keeps the mapper metadata and result" \
+  "ot-parameter-state ot-command-forward ot-command-result" "$CHAIN" \
+  '"status":"successful","results":[{"point":"setpoint","status":"successful","value":42}]}'
+check_multi "parameter bridge: acknowledged write updates the twin, no ot_write_batch echo" \
+  "ot-parameter-state ot-command-forward ot-command-result" "$CHAIN" \
+  '[te/device/opc1///twin/opcua_parameters] {"setpoint":42}' --absent 'ot_write_batch'
 
 # --- ot-command-forward (thin-edge cmd -> connector write) ---
 check "command-forward: init forwarded" ot-command-forward \

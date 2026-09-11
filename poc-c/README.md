@@ -12,8 +12,12 @@ class-1 master, TCP transport) — exploring two questions:
 It speaks the same [OT Connector Contract](../doc/contract/) as the Rust
 implementation: same TOML config files (the untouched configs in
 [demo/config/](../demo/config/) work as-is), same MQTT topics, same JSON
-sample/command envelopes, same decode semantics (validated against the Rust
-SDK's golden vectors).
+sample/command envelopes (including the `access` echo and the runtime-provided
+`write-batch` verb that the device-parameter flows rely on, see
+[RFC 0003](../doc/rfc/0003-parameter-writes.md)), same decode semantics
+(validated against the Rust SDK's golden vectors). Not implemented here: the
+management verbs (`set-config`, `define-device`, `remove-device`) and push
+delivery (`subscribe`); the PoC polls only.
 
 ## Packaging & releases
 

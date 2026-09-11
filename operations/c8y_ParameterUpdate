@@ -1,0 +1,27 @@
+# c8y_ParameterUpdate -> generic `ot_parameter_update` command (device parameters).
+#
+# The Cumulocity "Parameters" tab (Digital Twin Manager property definitions with the
+# "operation" context) sends one operation per edited parameter set:
+#
+#   { "c8y_ParameterUpdate": {}, "c8y_ParameterUpdate_<set>": {}, "<set>": { "<key>": <value>, ... } }
+#
+# The set name is dynamic (it is the DTM identifier, e.g. modbus_parameters), so the whole
+# operation is handed to the thin-edge command as `operation`; ot-command-forward picks the set
+# out of the marker fragment (its keys are the connector point ids) and issues ONE connector
+# `write-batch`; ot-command-result completes the command (and thus the operation), and
+# ot-parameter-state refreshes the twin fragment from the acknowledged writes.
+#
+# The parameter sets themselves (which points are editable, their types and limits) are
+# declared once in the tenant by an admin, from the connector config:
+#   tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml
+#
+# Installed as a `.template` so every registered OT child device gets it once ot-registration
+# advertises the ot_parameter_update capability. On the main device the tedge-parameter-plugin
+# (command `parameter_update`) can coexist: templates are bound per device by capability.
+[exec]
+  topic = "c8y/devicecontrol/notifications"
+  on_fragment = "c8y_ParameterUpdate"
+
+[exec.workflow]
+operation = "ot_parameter_update"
+input.operation = "${.payload}"

@@ -42,7 +42,7 @@ Grab a `.deb`/`.rpm`/`.apk` (or a plain binary archive) from the
 [releases page](https://github.com/thin-edge/tedge-dot/releases). The package
 installs:
 
-- `tedge-dot` — the connector binary (also a standalone `read`/`write` CLI);
+- `tedge-dot` — the connector binary (also a standalone `read`/`write`/`describe` CLI);
 - one default config per protocol in `/etc/tedge/plugins/ot/` (no devices
   configured, so the service starts and idles until you add some);
 - `tedge-dot.service` — a single systemd service: one `tedge-dot` process runs
@@ -73,6 +73,25 @@ See [demo/](demo/) for the local exploration guide and the full
 all-protocols demo on a real device — both use the same configs in
 [demo/config/](demo/config/).
 
+## Writing to devices
+
+Writable points (`access = "read_write"` / `"write"`) are written through retained
+thin-edge commands, never through a second protocol session:
+
+```sh
+# one point (the contract `write` verb)
+tedge mqtt pub -r te/device/plc1/ot/modbus/cmd/write/w1 '{"status":"init","point":"temp_u16","value":4242}'
+# several points, in order, one result (the SDK `write-batch` verb)
+tedge mqtt pub -r te/device/plc1/ot/modbus/cmd/write-batch/b1 '{"status":"init","writes":[{"point":"temp_u16","value":4242},{"point":"coil_rw","value":true}]}'
+```
+
+From Cumulocity, writable points are **device parameters**: the `ot-parameter-state` flow
+keeps one twin fragment per parameter set current, and the command flows turn a
+`c8y_ParameterUpdate` operation from the device's *Parameters* tab into one `write-batch`.
+A tenant admin declares the sets once with the definition `tedge-dot describe` prints from
+the same config. See [RFC 0003](doc/rfc/0003-parameter-writes.md), [flows/](flows/) and
+[operations/](operations/).
+
 ## Repository layout
 
 | Path | Contents |
@@ -82,7 +101,7 @@ all-protocols demo on a real device — both use the same configs in
 | [crates/ot-conformance](crates/ot-conformance/) | `ot-conformance` — the connector conformance harness (schema, decode vectors, behavioural checks) |
 | [src/](src/) | the `tedge-dot` binary (run service, `read`/`write` CLI) |
 | [flows/](flows/) | protocol-neutral thin-edge.io flows (sample→measurement, alarms, registration, commands) |
-| [operations/](operations/) | Cumulocity operation shims (legacy `c8y_*` operations → generic OT commands) |
+| [operations/](operations/) | Cumulocity operation shims (legacy `c8y_*` operations and `c8y_ParameterUpdate` → generic OT commands) |
 | [connectors/](connectors/) | per-protocol e2e test stacks: simulator, Docker compose, Robot suites |
 | [cloud/](cloud/) | Cumulocity cloud e2e suites (live tenant) |
 | [packaging/](packaging/) | installed default configs, systemd unit, package scripts |
@@ -99,7 +118,7 @@ just test               # unit + integration + property tests
 just lint               # clippy -D warnings
 just conformance modbus # full conformance suite (no hardware/broker needed)
 just test-flows         # offline flow tests (tedge flows test)
-just test-e2e modbus    # Dockerised MQTT e2e suite for one protocol
+just test-e2e modbus    # Dockerised MQTT e2e suite for one protocol (incl. the flows-driven parameter bridge)
 just fuzz config_toml   # fuzz one SDK target (nightly + cargo-fuzz)
 just build              # cross-compile + package everything (goreleaser)
 ```

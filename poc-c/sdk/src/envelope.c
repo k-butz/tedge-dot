@@ -70,6 +70,12 @@ char *tdot_envelope_sample(const tdot_config_t *cfg, const tdot_device_t *dev,
     cJSON_AddStringToObject(obj, "quality", tdot_quality_str(s->quality));
     if (pt->unit)
         cJSON_AddStringToObject(obj, "unit", pt->unit);
+    /* Declared access, so flows can tell writable points (parameters) apart. */
+    cJSON_AddStringToObject(obj, "access",
+                            (pt->access & TDOT_ACCESS_WRITE)
+                                ? ((pt->access & TDOT_ACCESS_READ) ? "read_write"
+                                                                   : "write")
+                                : "read");
     if (pt->addr_json) {
         cJSON *addr = cJSON_Parse(pt->addr_json);
         if (addr)

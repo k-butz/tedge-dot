@@ -53,7 +53,7 @@ static const char CAPABILITIES[] =
     "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\"],"
     "\"point_kinds\":[\"coil\",\"discrete_input\",\"holding_register\","
     "\"input_register\"],"
-    "\"command_verbs\":[\"write\"],"
+    "\"command_verbs\":[\"write\",\"write-batch\"],"
     "\"features\":[\"polling\"],\"subscribe\":false}";
 
 static int parse_table(const char *s, mb_table_t *out) {

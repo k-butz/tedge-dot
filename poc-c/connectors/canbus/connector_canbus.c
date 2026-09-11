@@ -60,7 +60,7 @@ static const char CAPABILITIES[] =
     "\"datatypes\":[\"bool\",\"int8\",\"uint8\",\"int16\",\"uint16\","
     "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\"],"
     "\"point_kinds\":[\"signal\"],"
-    "\"command_verbs\":[\"write\"],"
+    "\"command_verbs\":[\"write\",\"write-batch\"],"
     "\"features\":[\"polling\"],\"subscribe\":false}";
 
 /* ---- CAN signal bit extraction / encoding (matches can-dbc / Vector) ---- */

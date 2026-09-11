@@ -1,0 +1,4 @@
+# Parameter set (twin fragment name / Cumulocity DTM identifier) for points that do not name
+# their own via meta.parameter.set. Empty -> derived from the protocol as "<protocol>_parameters"
+# (e.g. modbus_parameters). Must match `tedge-dot describe --set <name>`.
+default_set = ""

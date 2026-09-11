@@ -40,7 +40,7 @@ static const char CAPABILITIES[] =
     "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\","
     "\"string\"],"
     "\"point_kinds\":[\"node\"],"
-    "\"command_verbs\":[\"write\"],"
+    "\"command_verbs\":[\"write\",\"write-batch\"],"
     "\"features\":[\"polling\"],\"subscribe\":false}";
 
 static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,

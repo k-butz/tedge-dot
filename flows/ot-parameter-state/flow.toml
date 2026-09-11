@@ -1,0 +1,17 @@
+# ot-parameter-state: connector samples + write results -> device twin (parameter sets)
+#
+# Maintains one twin fragment per parameter set (te/device/<device>///twin/<set>) holding the
+# current value of every parameter (writable point) of the device, so a cloud UI such as
+# Cumulocity's device "Parameters" tab shows the live state.
+input.mqtt.topics = [
+  "te/+/+/ot/+/sample/+",
+  "te/+/+/ot/+/cmd/write/+",
+  "te/+/+/ot/+/cmd/write-batch/+",
+]
+
+[config]
+# Parameter set for points without meta.parameter.set. Empty -> "<protocol>_parameters".
+default_set = "${params.default_set}"
+
+[[steps]]
+script = "main.js"

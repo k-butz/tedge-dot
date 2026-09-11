@@ -320,6 +320,9 @@ async fn check_b1_startup(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) -> Opti
 /// treated as implicitly declared by every manifest.
 const SDK_VERBS: [&str; 3] = ["set-config", "define-device", "remove-device"];
 const SDK_FEATURE: &str = "management";
+/// The SDK runtime implements `write-batch` on top of a module's `write`, so every manifest
+/// that declares `write` implicitly declares `write-batch` too.
+const SDK_BATCH_VERB: &str = "write-batch";
 
 /// Compare a manifest's claims against a capability descriptor that already carries the SDK
 /// management augmentation (the live retained descriptor, or raw module capabilities passed
@@ -369,6 +372,9 @@ pub(crate) fn manifest_caps_mismatches(
     );
     let mut claimed_verbs: BTreeSet<String> = manifest.connector.verbs.iter().cloned().collect();
     claimed_verbs.extend(SDK_VERBS.iter().map(|s| s.to_string()));
+    if claimed_verbs.contains("write") {
+        claimed_verbs.insert(SDK_BATCH_VERB.to_string());
+    }
     compare("command_verbs", claimed_verbs, set("command_verbs"), &mut mismatches);
     let mut claimed_features: BTreeSet<String> =
         manifest.connector.features.iter().cloned().collect();
@@ -405,6 +411,13 @@ pub(crate) fn augment_caps(caps: &mut serde_json::Value) {
         }
     };
     add(&mut caps["command_verbs"], &SDK_VERBS);
+    let has_write = caps["command_verbs"]
+        .as_array()
+        .map(|a| a.iter().any(|v| v == "write"))
+        .unwrap_or(false);
+    if has_write {
+        add(&mut caps["command_verbs"], &[SDK_BATCH_VERB]);
+    }
     add(&mut caps["features"], &[SDK_FEATURE]);
 }
 

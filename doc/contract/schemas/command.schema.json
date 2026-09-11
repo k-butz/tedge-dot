@@ -4,18 +4,37 @@
   "title": "OT Connector Command Message",
   "description": "Request/result messages on te/device/<device>/ot/<protocol>/cmd/<verb>/<id> (retained). The 'init' state is set by the requester; the connector advances the state machine on the same topic.",
   "type": "object",
-  "required": ["status"],
+  "required": [
+    "status"
+  ],
   "properties": {
-    "status": { "enum": ["init", "executing", "successful", "failed"] },
+    "status": {
+      "enum": [
+        "init",
+        "executing",
+        "successful",
+        "failed"
+      ]
+    },
     "point": {
       "type": "string",
       "description": "Target point id. Required for the 'write' verb."
     },
     "value": {
-      "type": ["number", "boolean", "string"],
+      "type": [
+        "number",
+        "boolean",
+        "string"
+      ],
       "description": "Logical value for a typed write."
     },
-    "value_repr": { "enum": ["number", "boolean", "string"] },
+    "value_repr": {
+      "enum": [
+        "number",
+        "boolean",
+        "string"
+      ]
+    },
     "raw": {
       "type": "string",
       "description": "Hex bytes for a raw write, written verbatim."
@@ -30,21 +49,116 @@
     },
     "device": {
       "description": "Management verbs: a device definition object (for 'define-device') or a device name string (for 'remove-device').",
-      "type": ["object", "string"]
+      "type": [
+        "object",
+        "string"
+      ]
     },
     "result": {
       "description": "Optional verb-specific output on success.",
-      "type": ["object", "number", "boolean", "string", "array", "null"]
+      "type": [
+        "object",
+        "number",
+        "boolean",
+        "string",
+        "array",
+        "null"
+      ]
     },
     "reason": {
       "type": "string",
       "description": "Failure reason. Required when status=failed."
+    },
+    "writes": {
+      "type": "array",
+      "minItems": 1,
+      "description": "'write-batch' verb request: the writes to apply in order, each a {point, value|raw} object.",
+      "items": {
+        "type": "object",
+        "required": [
+          "point"
+        ],
+        "properties": {
+          "point": {
+            "type": "string"
+          },
+          "value": {
+            "type": [
+              "number",
+              "boolean",
+              "string"
+            ]
+          },
+          "raw": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "points": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "'write-batch' executing transition: the points about to be written."
+    },
+    "results": {
+      "type": "array",
+      "description": "'write-batch' result: one entry per attempted write, in order (the failing write is the last entry of a failed batch).",
+      "items": {
+        "type": "object",
+        "required": [
+          "point",
+          "status"
+        ],
+        "properties": {
+          "point": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "successful",
+              "failed"
+            ]
+          },
+          "value": {
+            "type": [
+              "number",
+              "boolean",
+              "string"
+            ]
+          },
+          "raw": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "origin": {
+      "type": "object",
+      "description": "Opaque requester correlation data. Ignored by the connector; flows read it back from the retained init message."
     }
   },
   "allOf": [
     {
-      "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
-      "then": { "required": ["reason"] }
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "reason"
+        ]
+      }
     }
   ],
   "examples": [
@@ -59,8 +173,15 @@
       "point": "run_command",
       "raw": "0001"
     },
-    { "status": "executing", "point": "setpoint" },
-    { "status": "successful", "point": "setpoint", "value": 21.5 },
+    {
+      "status": "executing",
+      "point": "setpoint"
+    },
+    {
+      "status": "successful",
+      "point": "setpoint",
+      "value": 21.5
+    },
     {
       "status": "failed",
       "point": "setpoint",
@@ -69,19 +190,81 @@
     {
       "status": "init",
       "target": "connector",
-      "config": { "poll_interval": "5s" }
+      "config": {
+        "poll_interval": "5s"
+      }
     },
     {
       "status": "init",
       "device": {
         "name": "plc-9",
-        "protocol_address": { "transport": "tcp", "host": "10.0.0.9", "port": 502, "unit_id": 1 },
+        "protocol_address": {
+          "transport": "tcp",
+          "host": "10.0.0.9",
+          "port": 502,
+          "unit_id": 1
+        },
         "default_mode": "typed",
         "point": [
-          { "id": "temp", "datatype": "float32", "address": { "table": "holding", "address": 7, "count": 2 } }
+          {
+            "id": "temp",
+            "datatype": "float32",
+            "address": {
+              "table": "holding",
+              "address": 7,
+              "count": 2
+            }
+          }
         ]
       }
     },
-    { "status": "init", "device": "plc-9" }
+    {
+      "status": "init",
+      "device": "plc-9"
+    },
+    {
+      "status": "init",
+      "writes": [
+        {
+          "point": "setpoint",
+          "value": 21.5
+        },
+        {
+          "point": "run_command",
+          "value": true
+        }
+      ]
+    },
+    {
+      "status": "successful",
+      "results": [
+        {
+          "point": "setpoint",
+          "status": "successful",
+          "value": 21.5
+        },
+        {
+          "point": "run_command",
+          "status": "successful",
+          "value": true
+        }
+      ]
+    },
+    {
+      "status": "failed",
+      "reason": "write to run_command failed: access denied: point run_command is not writable",
+      "results": [
+        {
+          "point": "setpoint",
+          "status": "successful",
+          "value": 21.5
+        },
+        {
+          "point": "run_command",
+          "status": "failed",
+          "reason": "write to run_command failed: access denied: point run_command is not writable"
+        }
+      ]
+    }
   ]
 }

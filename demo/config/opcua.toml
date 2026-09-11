@@ -62,12 +62,15 @@ default_mode     = "typed"
   datatype = "uint32"
   address  = { node_id = "ns=2;s=Count" }
 
-  # Int32 used for the numeric write round-trip.
+  # Int32 used for the numeric write round-trip. Writable points are *parameters* (see the
+  # ot-parameter-state flow and `tedge-dot describe`); meta.parameter enriches the generated
+  # schema.
   [[device.point]]
   id       = "setpoint"
   datatype = "int32"
   access   = "read_write"
   address  = { node_id = "ns=2;s=Setpoint" }
+  meta     = { parameter = { title = "Setpoint", min = -1000, max = 1000 } }
 
   # Boolean used for the boolean write round-trip.
   [[device.point]]

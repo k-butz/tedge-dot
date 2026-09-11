@@ -21,6 +21,11 @@
 * [ ] c8y-fieldbus-import deferred items (script header TODOs): alarm/event/status mappings
       (gap G4), RTU serial-port resolution from `[connection.serial]`, signed and
       multi-register bit fields.
+* [ ] Device parameters (RFC 0003, prototype implemented): persist the
+      last-commanded value of write-only parameters across mapper restarts; derive
+      `meta.parameter.set` from the Cloud Fieldbus device type name in `c8y-fieldbus-import`;
+      optional Modbus FC16 fast path for `write-batch` on contiguous registers; optional
+      `c8y_ParameterUpdate` audit event flow on top of the twin.
 * [ ] Legacy write-payload compatibility (gap G2): accept explicit-address
       (`register`/`coil`/`address`/`ipAddress`) and name-based `metrics[]` payloads for
       `c8y_SetRegister`/`c8y_SetCoil`, not only `{point, value}`.

@@ -32,6 +32,9 @@ COPY flows/ot-command-forward /etc/tedge/mappers/c8y/flows/ot-command-forward
 COPY flows/ot-command-result  /etc/tedge/mappers/c8y/flows/ot-command-result
 COPY flows/ot-alarm           /etc/tedge/mappers/c8y/flows/ot-alarm
 COPY flows/ot-event           /etc/tedge/mappers/c8y/flows/ot-event
+# Device parameters: writable points as twin fragments (c8y_ParameterUpdate is bridged by the
+# command flows above).
+COPY flows/ot-parameter-state   /etc/tedge/mappers/c8y/flows/ot-parameter-state
 
 # Enable the c8y_ModbusDevice twin fragment on registration.
 COPY cloud/modbus/params/ot-registration.params.toml /etc/tedge/mappers/c8y/flows/ot-registration/params.toml
@@ -42,6 +45,7 @@ COPY operations/c8y_SetCoil              /etc/tedge/operations/c8y/c8y_SetCoil.t
 COPY operations/c8y_ModbusConfiguration  /etc/tedge/operations/c8y/c8y_ModbusConfiguration.template
 COPY operations/c8y_SerialConfiguration  /etc/tedge/operations/c8y/c8y_SerialConfiguration.template
 COPY operations/c8y_ModbusDevice         /etc/tedge/operations/c8y/c8y_ModbusDevice.template
+COPY operations/c8y_ParameterUpdate      /etc/tedge/operations/c8y/c8y_ParameterUpdate.template
 
 # Cloud Fieldbus import shim executed by the c8y_ModbusDevice template: creates the child's
 # external identity, fetches the c8y_ModbusDeviceType MO via the mapper's local c8y proxy, and

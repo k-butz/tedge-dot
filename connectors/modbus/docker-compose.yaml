@@ -37,3 +37,15 @@ services:
         condition: service_started
       simulator:
         condition: service_healthy
+
+  # thin-edge flows engine (user-defined mapper, no cloud) running this repo's flows against
+  # the same broker, so the suite can drive the device-side command/parameter bridge end to end.
+  flows:
+    build:
+      context: ../..
+      dockerfile: connectors/_shared/Dockerfile.flows
+      args:
+        PROTOCOL: modbus
+    depends_on:
+      broker:
+        condition: service_started

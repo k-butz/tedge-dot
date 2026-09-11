@@ -32,3 +32,15 @@ services:
     depends_on:
       - broker
       - simulator
+
+  # thin-edge flows engine (user-defined mapper, no cloud) running this repo's flows against
+  # the same broker, so the suite can drive the device-side command/parameter bridge end to end.
+  flows:
+    build:
+      context: ../..
+      dockerfile: connectors/_shared/Dockerfile.flows
+      args:
+        PROTOCOL: opcua
+    depends_on:
+      broker:
+        condition: service_started

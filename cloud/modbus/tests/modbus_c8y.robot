@@ -12,6 +12,10 @@ Documentation       Full end-to-end test for the Rust tedge-dot against Cumuloci
 Library             Cumulocity
 Library             Collections
 
+# Measurement assertions filter with value=<fragment> (valueFragmentType), not fragment=
+# (fragmentType): Cumulocity rejects fragmentType combined with valueFragmentSeries with an
+# HTTP 500 "Value Fragment filter already provided" (observed 2026-09-11).
+
 Suite Setup         Set Main Device
 
 
@@ -45,7 +49,7 @@ Measurements Are Sent To Cumulocity
     [Documentation]    The uint16 holding register (17001) arrives as a modbus measurement.
     Cumulocity.Device Should Exist    ${CHILD_EXTERNAL_ID}
     Cumulocity.Device Should Have Measurements
-    ...    minimum=1    type=modbus    fragment=modbus    series=temp_u16    timeout=${MEAS_TIMEOUT}
+    ...    minimum=1    type=modbus    value=modbus    series=temp_u16    timeout=${MEAS_TIMEOUT}
 
 Set Register Operation Round-Trips
     [Documentation]    c8y_SetRegister writes 4242 to temp_u16; the next reading reflects it.
@@ -56,7 +60,7 @@ Set Register Operation Round-Trips
     ...    description=Set temp_u16 to 4242
     Cumulocity.Operation Should Be SUCCESSFUL    ${operation}    timeout=${OP_TIMEOUT}
     ${measurements}=    Cumulocity.Device Should Have Measurements
-    ...    minimum=1    type=modbus    fragment=modbus    series=temp_u16
+    ...    minimum=1    type=modbus    value=modbus    series=temp_u16
     ...    sort_newest=${True}    timeout=${MEAS_TIMEOUT}
     Should Be Equal As Integers    ${measurements[0]["modbus"]["temp_u16"]["value"]}    4242
 
@@ -69,7 +73,7 @@ Set Coil Operation Round-Trips
     Cumulocity.Operation Should Be SUCCESSFUL    ${operation}    timeout=${OP_TIMEOUT}
     Sleep    1s
     ${measurements}    Cumulocity.Device Should Have Measurements
-    ...    minimum=1    type=modbus    fragment=modbus    series=coil_rw
+    ...    minimum=1    type=modbus    value=modbus    series=coil_rw
     ...    timeout=${MEAS_TIMEOUT}
     Should Be Equal As Numbers    ${measurements[0]["modbus"]["coil_rw"]["value"]}    1.0    precision=1
 

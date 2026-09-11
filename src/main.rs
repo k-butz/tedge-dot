@@ -6,6 +6,9 @@
 //!   `*.toml`), and run every connector concurrently in this one process: each config gets its
 //!   own protocol module + SDK runtime instance, supervised with an in-process restart loop.
 //!   Samples go to the MQTT broker by default, or to stdout as JSON lines (`--output stdout`).
+//! * `describe` — render the Cumulocity Digital Twin Manager property definitions that declare
+//!   a configuration's writable points as editable device parameters (for a tenant admin to
+//!   register; the device itself never talks to the DTM service).
 //! * `read` / `write` — connect directly to configured devices and read or write points, then
 //!   exit. Devices and points accept `*`/`?` wildcards, and `read` can keep polling
 //!   (`--poll` / `--interval` / `--count`). These need no broker or running connector; they
@@ -43,6 +46,39 @@ enum Command {
     Read(ReadArgs),
     /// Write a value to a point directly on a device, then exit (no broker required).
     Write(WriteArgs),
+    /// Render the Cumulocity DTM property definitions for a configuration's parameter sets
+    /// (no device or broker required).
+    Describe(DescribeArgs),
+}
+
+/// Output format of `describe`.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum DescribeFormat {
+    /// Cumulocity Digital Twin Manager property definitions, one per parameter set
+    /// (writable points grouped by meta.parameter.set). A tenant admin posts each element
+    /// to POST /service/dtm/definitions/properties once to make the set editable in the
+    /// device "Parameters" tab.
+    C8yDtm,
+}
+
+#[derive(Args)]
+struct DescribeArgs {
+    /// Path to the connector configuration file.
+    #[arg(short, long, default_value = DEFAULT_CONFIG)]
+    config: String,
+    /// What to print.
+    #[arg(short, long, value_enum, default_value_t = DescribeFormat::C8yDtm)]
+    format: DescribeFormat,
+    /// Device name or wildcard pattern to restrict the output to.
+    #[arg(short, long, default_value = "*")]
+    device: String,
+    /// Default parameter set for points without meta.parameter.set
+    /// (default: <protocol>_parameters). Must match the ot-parameter-state flow setting.
+    #[arg(long, value_name = "NAME")]
+    set: Option<String>,
+    /// Print compact JSON (one document per line) instead of pretty-printed.
+    #[arg(long)]
+    compact: bool,
 }
 
 /// Where the `run` command publishes samples.
@@ -140,6 +176,7 @@ async fn main() -> ExitCode {
         Command::Run(args) => run(args).await,
         Command::Read(args) => report(cmd_read(args).await),
         Command::Write(args) => report(cmd_write(args).await),
+        Command::Describe(args) => report(cmd_describe(args)),
     }
 }
 
@@ -159,7 +196,7 @@ fn report(result: Result<(), String>) -> ExitCode {
 /// flag (`-h`/`--help`/`-V`/`--version`).
 fn normalized_args() -> Vec<String> {
     let mut args: Vec<String> = std::env::args().collect();
-    const SUBCOMMANDS: &[&str] = &["run", "read", "write", "help"];
+    const SUBCOMMANDS: &[&str] = &["run", "read", "write", "describe", "help"];
     let needs_run = match args.get(1) {
         None => true,
         Some(a) => !(SUBCOMMANDS.contains(&a.as_str()) || a.starts_with('-')),
@@ -716,6 +753,43 @@ async fn cmd_write(args: WriteArgs) -> Result<(), String> {
 
     if failures > 0 {
         return Err(format!("{failures} write(s) failed"));
+    }
+    Ok(())
+}
+
+/// Print the Cumulocity DTM definitions derived from a configuration.
+fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
+    let mut config = load_config(&args.config)?;
+    if args.device != "*" {
+        config
+            .devices
+            .retain(|d| wildcard_match(&args.device, &d.name));
+        if config.devices.is_empty() {
+            return Err(format!("no device matches '{}'", args.device));
+        }
+    }
+    // Parameter ids become fragment keys on the device twin, so they must be plain identifiers.
+    let default_set = args
+        .set
+        .clone()
+        .unwrap_or_else(|| tedge_dot_sdk::descriptor::default_set(&config.connector.protocol));
+    let bad = tedge_dot_sdk::descriptor::invalid_keys(&config, &default_set);
+    if !bad.is_empty() {
+        return Err(format!(
+            "parameter keys must match [A-Za-z0-9_]: {}",
+            bad.join(", ")
+        ));
+    }
+    let docs: Vec<serde_json::Value> = match args.format {
+        DescribeFormat::C8yDtm => tedge_dot_sdk::c8y_dtm_definitions(&config, args.set.as_deref()),
+    };
+    if args.compact {
+        for doc in &docs {
+            println!("{doc}");
+        }
+    } else {
+        let out = serde_json::to_string_pretty(&docs).map_err(|e| e.to_string())?;
+        println!("{out}");
     }
     Ok(())
 }

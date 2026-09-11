@@ -151,6 +151,140 @@ static int json_to_value(const cJSON *jv, tdot_value_t *out) {
     return 0;
 }
 
+static void publish_retained(rt_t *rt, const char *topic, cJSON *obj) {
+    char *payload = cJSON_PrintUnformatted(obj);
+    mosquitto_publish(rt->mosq, NULL, topic, (int)strlen(payload), payload, 0,
+                      true);
+    free(payload);
+}
+
+/* Execute one point write; returns 0 on success, else fills `reason`. */
+static int do_write(rt_t *rt, tdot_device_t *dev, const char *dev_name,
+                    const char *point_id, const cJSON *jvalue, char *reason,
+                    size_t reason_len) {
+    tdot_point_t *pt = (dev && point_id) ? tdot_device_point(dev, point_id) : NULL;
+    tdot_value_t value;
+    if (!dev) {
+        snprintf(reason, reason_len, "unknown device: %s", dev_name);
+    } else if (!pt) {
+        snprintf(reason, reason_len, "unknown point: %s",
+                 point_id ? point_id : "(missing)");
+    } else if (!(pt->access & TDOT_ACCESS_WRITE)) {
+        snprintf(reason, reason_len, "point %s is not writable", pt->id);
+    } else if (json_to_value(jvalue, &value) != 0) {
+        snprintf(reason, reason_len, "missing or invalid value");
+    } else if (rt->conn->write_point(rt->conn, dev, pt, &value, reason,
+                                     reason_len) == 0) {
+        return 0;
+    }
+    return -1;
+}
+
+/* `write`: {"status":"init","point":...,"value":...} -> executing -> successful|failed */
+static void handle_write(rt_t *rt, const char *topic, const char *dev_name,
+                         tdot_device_t *dev, const cJSON *req) {
+    const cJSON *jpoint = cJSON_GetObjectItem(req, "point");
+    const char *point_id = cJSON_IsString(jpoint) ? jpoint->valuestring : NULL;
+    const cJSON *jv = cJSON_GetObjectItem(req, "value");
+
+    cJSON *exec = cJSON_CreateObject();
+    cJSON_AddStringToObject(exec, "status", "executing");
+    if (point_id)
+        cJSON_AddStringToObject(exec, "point", point_id);
+    publish_retained(rt, topic, exec);
+    cJSON_Delete(exec);
+
+    char reason[TDOT_ERR_MAX] = "";
+    bool ok = do_write(rt, dev, dev_name, point_id, jv, reason, sizeof reason) == 0;
+
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddStringToObject(res, "status", ok ? "successful" : "failed");
+    if (point_id)
+        cJSON_AddStringToObject(res, "point", point_id);
+    if (ok) {
+        if (jv)
+            cJSON_AddItemToObject(res, "value", cJSON_Duplicate(jv, 1));
+        logmsg("info", "cmd write %s/%s: ok", dev_name,
+               point_id ? point_id : "?");
+    } else {
+        cJSON_AddStringToObject(res, "reason", reason);
+        logmsg("warn", "cmd write %s/%s: %s", dev_name,
+               point_id ? point_id : "?", reason);
+    }
+    publish_retained(rt, topic, res);
+    cJSON_Delete(res);
+}
+
+/* `write-batch` (contract §6.4): {"status":"init","writes":[{point,value},...]}.
+ * Writes run sequentially in request order and stop at the first failure; the
+ * terminal message lists one result per attempted write. Implemented once
+ * here on top of the connector's write_point, like the Rust SDK runtime. */
+static void handle_write_batch(rt_t *rt, const char *topic,
+                               const char *dev_name, tdot_device_t *dev,
+                               const cJSON *req) {
+    const cJSON *writes = cJSON_GetObjectItem(req, "writes");
+    cJSON *results = cJSON_CreateArray();
+    char reason[TDOT_ERR_MAX] = "";
+    bool failed = false;
+
+    if (!cJSON_IsArray(writes)) {
+        snprintf(reason, sizeof reason,
+                 "write-batch request needs a `writes` array");
+        failed = true;
+    } else if (cJSON_GetArraySize(writes) == 0) {
+        snprintf(reason, sizeof reason, "write-batch request has no writes");
+        failed = true;
+    }
+
+    if (!failed) {
+        cJSON *exec = cJSON_CreateObject();
+        cJSON_AddStringToObject(exec, "status", "executing");
+        cJSON *points = cJSON_AddArrayToObject(exec, "points");
+        const cJSON *w;
+        cJSON_ArrayForEach(w, writes) {
+            const cJSON *jp = cJSON_GetObjectItem(w, "point");
+            cJSON_AddItemToArray(points, cJSON_CreateString(
+                                             cJSON_IsString(jp) ? jp->valuestring
+                                                                : ""));
+        }
+        publish_retained(rt, topic, exec);
+        cJSON_Delete(exec);
+
+        cJSON_ArrayForEach(w, writes) {
+            const cJSON *jp = cJSON_GetObjectItem(w, "point");
+            const char *point_id = cJSON_IsString(jp) ? jp->valuestring : NULL;
+            const cJSON *jv = cJSON_GetObjectItem(w, "value");
+            char why[TDOT_ERR_MAX] = "";
+            cJSON *r = cJSON_CreateObject();
+            cJSON_AddStringToObject(r, "point", point_id ? point_id : "");
+            if (do_write(rt, dev, dev_name, point_id, jv, why, sizeof why) == 0) {
+                cJSON_AddStringToObject(r, "status", "successful");
+                if (jv)
+                    cJSON_AddItemToObject(r, "value", cJSON_Duplicate(jv, 1));
+                cJSON_AddItemToArray(results, r);
+            } else {
+                snprintf(reason, sizeof reason, "write to %s failed: %s",
+                         point_id ? point_id : "(missing)", why);
+                cJSON_AddStringToObject(r, "status", "failed");
+                cJSON_AddStringToObject(r, "reason", reason);
+                cJSON_AddItemToArray(results, r);
+                failed = true;
+                break;
+            }
+        }
+    }
+
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddStringToObject(res, "status", failed ? "failed" : "successful");
+    if (failed)
+        cJSON_AddStringToObject(res, "reason", reason);
+    cJSON_AddItemToObject(res, "results", results);
+    logmsg(failed ? "warn" : "info", "cmd write-batch %s: %s", dev_name,
+           failed ? reason : "ok");
+    publish_retained(rt, topic, res);
+    cJSON_Delete(res);
+}
+
 static void on_message(struct mosquitto *mosq, void *ud,
                        const struct mosquitto_message *msg) {
     (void)mosq;
@@ -179,51 +313,21 @@ static void on_message(struct mosquitto *mosq, void *ud,
         return;
     }
 
-    char reason[TDOT_ERR_MAX] = "";
     tdot_device_t *dev = tdot_config_device(rt->cfg, dev_name);
-    const cJSON *jpoint = cJSON_GetObjectItem(req, "point");
-    const char *point_id =
-        cJSON_IsString(jpoint) ? jpoint->valuestring : NULL;
-    tdot_point_t *pt =
-        (dev && point_id) ? tdot_device_point(dev, point_id) : NULL;
-    tdot_value_t value;
-    bool ok = false;
-
-    if (strcmp(verb, "write") != 0)
-        snprintf(reason, sizeof reason, "unsupported verb: %s", verb);
-    else if (!dev)
-        snprintf(reason, sizeof reason, "unknown device: %s", dev_name);
-    else if (!pt)
-        snprintf(reason, sizeof reason, "unknown point: %s",
-                 point_id ? point_id : "(missing)");
-    else if (!(pt->access & TDOT_ACCESS_WRITE))
-        snprintf(reason, sizeof reason, "point %s is not writable", pt->id);
-    else if (json_to_value(cJSON_GetObjectItem(req, "value"), &value) != 0)
-        snprintf(reason, sizeof reason, "missing or invalid value");
-    else if (rt->conn->write_point(rt->conn, dev, pt, &value, reason,
-                                   sizeof reason) == 0)
-        ok = true;
-
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddStringToObject(res, "status", ok ? "successful" : "failed");
-    if (point_id)
-        cJSON_AddStringToObject(res, "point", point_id);
-    if (ok) {
-        cJSON *jv = cJSON_GetObjectItem(req, "value");
-        if (jv)
-            cJSON_AddItemToObject(res, "value", cJSON_Duplicate(jv, 1));
-        logmsg("info", "cmd write %s/%s: ok", dev_name,
-               point_id ? point_id : "?");
+    if (strcmp(verb, "write") == 0) {
+        handle_write(rt, msg->topic, dev_name, dev, req);
+    } else if (strcmp(verb, "write-batch") == 0) {
+        handle_write_batch(rt, msg->topic, dev_name, dev, req);
     } else {
+        cJSON *res = cJSON_CreateObject();
+        cJSON_AddStringToObject(res, "status", "failed");
+        char reason[TDOT_ERR_MAX];
+        snprintf(reason, sizeof reason, "unsupported verb: %s", verb);
         cJSON_AddStringToObject(res, "reason", reason);
-        logmsg("warn", "cmd write %s/%s: %s", dev_name,
-               point_id ? point_id : "?", reason);
+        logmsg("warn", "cmd %s %s: unsupported verb", verb, dev_name);
+        publish_retained(rt, msg->topic, res);
+        cJSON_Delete(res);
     }
-    char *payload = cJSON_PrintUnformatted(res);
-    mosquitto_publish(rt->mosq, NULL, msg->topic, (int)strlen(payload),
-                      payload, 0, true);
-    free(payload);
-    cJSON_Delete(res);
     cJSON_Delete(req);
 }
 

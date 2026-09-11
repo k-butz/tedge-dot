@@ -14,6 +14,8 @@ connectors/
     MqttClient.py               # Robot keyword library (paho-mqtt subscribe/assert)
     mosquitto.conf              # mosquitto config used by every e2e stack
     requirements.txt            # base Robot deps (robotframework, paho-mqtt)
+    Dockerfile.flows            # cloud-free flows runner: tedge (main channel) as the
+    flows-entrypoint.sh         #   user-defined mapper "ot" running ../flows against the broker
 
   <proto>/                      # one directory per OT protocol
     sim/                        # simulator image (Dockerfile + server code)
@@ -21,7 +23,7 @@ connectors/
       ...
     tests/
       <proto>_e2e.robot         # Robot Framework e2e suite
-    docker-compose.yaml         # 3-service stack: broker, simulator, connector
+    docker-compose.yaml         # stack: broker, simulator, connector (+ optional flows runner)
     Dockerfile.connector        # builds the Rust connector binary for e2e
     connector.toml              # connector config used inside the container
     entrypoint.sh               # waits for deps, then execs tedge-dot
@@ -90,7 +92,10 @@ The `test-e2e` recipe installs Python deps automatically:
 
 3. **Docker stack** — create `connectors/<proto>/docker-compose.yaml`,
    `Dockerfile.connector`, `connector.toml`, and `entrypoint.sh`.
-   Pick the next free host port from the table above.
+   Pick the next free host port from the table above. Add the `flows` service
+   (see `connectors/modbus/docker-compose.yaml`, build arg `PROTOCOL`) to run the
+   repo's flows in the stack and test the command/parameter bridges end to end;
+   tag those Robot cases `flows`.
 
 4. **Tests** — create `connectors/<proto>/tests/<proto>_e2e.robot`.
    Import the shared library:
