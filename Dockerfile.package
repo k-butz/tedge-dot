@@ -12,7 +12,7 @@
 ARG PKG_ARCH=amd64
 
 # ---- Build and Package: goreleaser cross-compiles and packages ----------------------------
-FROM goreleaser/goreleaser:latest AS packager
+FROM ghcr.io/goreleaser/goreleaser:latest AS packager
 ARG PKG_ARCH
 ARG TARGETOS
 ARG TARGETARCH
