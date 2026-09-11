@@ -14,10 +14,13 @@ implementation: same TOML config files (the untouched configs in
 [demo/config/](../demo/config/) work as-is), same MQTT topics, same JSON
 sample/command envelopes (including the `access` echo and the runtime-provided
 `write-batch` verb that the device-parameter flows rely on, see
-[RFC 0003](../doc/rfc/0003-parameter-writes.md)), same decode semantics
-(validated against the Rust SDK's golden vectors). Not implemented here: the
-management verbs (`set-config`, `define-device`, `remove-device`) and push
-delivery (`subscribe`); the PoC polls only.
+[RFC 0003](../doc/rfc/0003-parameter-writes.md)), the SDK management verbs
+(`set-config`, `define-device`, `remove-device`: the runtime patches the
+config document, validates it with the loader and the module, persists it and
+live-reloads — comments are not preserved, tomlc99 being read-only), `raw`
+mode and Modbus bit fields, same decode semantics (validated against the Rust
+SDK's golden vectors). The one deliberate gap is push delivery (`subscribe`):
+the PoC polls only, which its conformance manifests declare.
 
 ## Tests
 
@@ -31,8 +34,13 @@ The C build is held to the same coverage as the Rust one:
 - **smoke** — [`ci/smoke.sh <proto>`](ci/smoke.sh), a fast broker-and-simulator check
   without Docker for the connector itself (used by the `c-poc` CI job).
 
-Not yet covered for C: the conformance harness's behavioural layer, whose B8 check needs the
-management verbs the PoC does not implement (see below).
+- **conformance** — the contract conformance suite (layers 1-3, built-in broker and
+  simulators) runs against the C binary as an external connector:
+  `just conformance-c modbus|opcua` (manifests `connectors/<proto>/conformance-c.toml`,
+  same claims as the Rust ones except `subscribe`); CI runs it in the `c-poc` job. Both
+  connectors are fully conformant, hot reload through the management verbs included.
+
+Debugging: `TDOT_OPCUA_DEBUG=1` keeps open62541's client handshake log on stdout.
 
 ## Packaging & releases
 

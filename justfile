@@ -24,6 +24,13 @@ test-properties:
 conformance protocol="modbus" *args="":
     cargo run -p ot-conformance -- check --spec connectors/{{protocol}}/conformance.toml {{args}}
 
+# The same conformance suite against the C build (poc-c/), launched as an external connector
+# through the `[harness] command` of connectors/<proto>/conformance-c.toml. Build the C binary
+# first: cmake -S poc-c -B poc-c/build && cmake --build poc-c/build
+# Usage: just conformance-c modbus
+conformance-c protocol="modbus" *args="":
+    cargo run -p ot-conformance -- check --spec connectors/{{protocol}}/conformance-c.toml {{args}}
+
 # Compile-check the Linux-only code paths (SocketCAN connectors are cfg-gated and silently
 # skipped by a macOS `cargo build`). profibus is excluded: its serial dependency has a native
 # build script that needs Linux headers — it is covered by the Docker e2e build instead.

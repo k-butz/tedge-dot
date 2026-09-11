@@ -35,11 +35,11 @@ typedef struct {
 
 static const char CAPABILITIES[] =
     "{\"protocol\":\"opcua\",\"version\":\"0.1.0-poc\","
-    "\"modes\":[\"typed\"],"
+    "\"modes\":[\"raw\",\"typed\"],"
     "\"datatypes\":[\"bool\",\"int8\",\"uint8\",\"int16\",\"uint16\","
     "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\","
     "\"string\"],"
-    "\"point_kinds\":[\"node\"],"
+    "\"point_kinds\":[\"variable\"],"
     "\"command_verbs\":[\"write\",\"write-batch\"],"
     "\"features\":[\"polling\"],\"subscribe\":false}";
 
@@ -99,17 +99,36 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
 
         for (size_t j = 0; j < dev->npoints; j++) {
             tdot_point_t *pt = &dev->points[j];
-            toml_datum_t nd = toml_string_in(pt->address, "node_id");
-            if (!nd.ok) {
-                snprintf(err, errlen,
-                         "point %s/%s: address requires node_id", dev->name,
-                         pt->id);
-                return -1;
-            }
+            /* Two address forms, like the Rust module: `node_id = "ns=2;s=X"`
+             * or structured `namespace = 2, identifier = "X" | 1001`. */
             ua_point_t *up = calloc(1, sizeof *up);
             pt->proto = up;
-            snprintf(up->node_id, sizeof up->node_id, "%s", nd.u.s);
-            free(nd.u.s);
+            toml_datum_t nd = toml_string_in(pt->address, "node_id");
+            if (nd.ok) {
+                snprintf(up->node_id, sizeof up->node_id, "%s", nd.u.s);
+                free(nd.u.s);
+            } else {
+                toml_datum_t ns = toml_int_in(pt->address, "namespace");
+                toml_datum_t sid = toml_string_in(pt->address, "identifier");
+                toml_datum_t iid = toml_int_in(pt->address, "identifier");
+                if (!ns.ok || (!sid.ok && !iid.ok)) {
+                    if (sid.ok)
+                        free(sid.u.s);
+                    snprintf(err, errlen,
+                             "point %s/%s: address requires node_id, or "
+                             "namespace + identifier",
+                             dev->name, pt->id);
+                    return -1;
+                }
+                if (sid.ok) {
+                    snprintf(up->node_id, sizeof up->node_id, "ns=%d;s=%s",
+                             (int)ns.u.i, sid.u.s);
+                    free(sid.u.s);
+                } else {
+                    snprintf(up->node_id, sizeof up->node_id, "ns=%d;i=%lld",
+                             (int)ns.u.i, (long long)iid.u.i);
+                }
+            }
 
             cJSON *addr = cJSON_CreateObject();
             cJSON_AddStringToObject(addr, "node_id", up->node_id);
@@ -139,6 +158,14 @@ static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
     ua->client = UA_Client_new();
     UA_ClientConfig *cc = UA_Client_getConfig(ua->client);
     UA_ClientConfig_setDefault(cc);
+    /* Ask for the None/None endpoint explicitly. The default leaves the mode
+     * "invalid" (= pick any endpoint), which some servers (async-opcua) reject
+     * at session activation with BadSecurityChecksFailed. The PoC supports
+     * security policy None only anyway (checked in configure()). */
+    cc->securityMode = UA_MESSAGESECURITYMODE_NONE;
+    UA_String_clear(&cc->securityPolicyUri);
+    cc->securityPolicyUri =
+        UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#None");
     cc->timeout = (UA_UInt32)st->request_timeout_s * 1000;
     UA_LocaleId locale = UA_STRING_ALLOC("en");
     UA_String name = UA_STRING_ALLOC(st->application_name);
@@ -148,8 +175,10 @@ static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
     cc->clientDescription.applicationName.text = name;
     UA_String_clear(&cc->clientDescription.applicationUri);
     cc->clientDescription.applicationUri = uri;
-    /* keep the client quiet unless debugging */
-    cc->logging->log = NULL;
+    /* keep the client quiet unless debugging (TDOT_OPCUA_DEBUG=1 keeps
+     * open62541's own handshake log on stdout) */
+    if (!getenv("TDOT_OPCUA_DEBUG"))
+        cc->logging->log = NULL;
 
     UA_StatusCode rc = UA_Client_connect(ua->client, ua->endpoint);
     if (rc != UA_STATUSCODE_GOOD) {

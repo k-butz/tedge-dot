@@ -167,10 +167,11 @@ type, it could front the same flows; nothing here prevents that.
 A simplification pass removed an earlier retained point-descriptor topic and two dedicated
 parameter flows in favour of the `access` sample field and the existing command flows.
 
-The C proof of concept ([poc-c/](../../poc-c/)) implements the same two runtime pieces
-(`access` in samples, `write-batch` with the `executing` transition) in ~120 lines of C, so the
-flows and the Cumulocity glue work unchanged with either binary; its smoke tests
-(`poc-c/ci/smoke.sh`) assert both.
+The C proof of concept ([poc-c/](../../poc-c/)) implements the same runtime pieces
+(`access` in samples, `write-batch` with the `executing` transition, and the management verbs
+with persist + live reload), so the flows and the Cumulocity glue work unchanged with either
+binary. The C build runs the same Robot e2e suites (`just test-e2e-c`) and the same conformance
+suite (`just conformance-c`) as the Rust build.
 
 The e2e stacks gained a `flows` service: thin-edge from the `main` channel running this repo's
 flows as a user-defined mapper (`tedge-mapper ot`) against the stack's broker, so the full

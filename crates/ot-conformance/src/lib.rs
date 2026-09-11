@@ -89,6 +89,17 @@ fn static_capability_agreement(manifest: &Manifest) -> Layer {
     let mut layer = Layer::new("Manifest — capability agreement (static)");
     let id = "S1-capabilities";
     let name = "manifest agrees with the compiled module's capability descriptor";
+    // An external connector (`[harness] command`) is not the compiled-in module, so its
+    // descriptor can only be checked live (B9) — comparing the manifest against the Rust
+    // module here would judge the wrong implementation.
+    if !manifest.harness.command.is_empty() {
+        layer.skip(
+            id,
+            name,
+            "external connector under test; the live descriptor is checked by B9".into(),
+        );
+        return layer;
+    }
     match host::build_connector(&manifest.connector.protocol) {
         Ok(connector) => {
             let mut caps = connector.capabilities().to_json();

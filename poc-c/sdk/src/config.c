@@ -1,4 +1,5 @@
 #include "tedge_dot/config.h"
+#include <stdbool.h>
 
 #include <ctype.h>
 #include <stdio.h>
@@ -104,8 +105,24 @@ static tdot_order_t parse_order(toml_table_t *t, const char *key) {
     return o;
 }
 
+static int parse_mode(toml_table_t *t, const char *key, tdot_mode_t *out) {
+    toml_datum_t d = toml_string_in(t, key);
+    if (!d.ok)
+        return 1; /* absent */
+    int rc = 0;
+    if (strcmp(d.u.s, "raw") == 0)
+        *out = TDOT_MODE_RAW;
+    else if (strcmp(d.u.s, "typed") == 0)
+        *out = TDOT_MODE_TYPED;
+    else
+        rc = -1;
+    free(d.u.s);
+    return rc;
+}
+
 static int parse_point(toml_table_t *pt, tdot_point_t *point,
-                       double device_interval, char *err, size_t errlen) {
+                       double device_interval, tdot_mode_t device_mode,
+                       char *err, size_t errlen) {
     memset(point, 0, sizeof *point);
     toml_datum_t d = toml_string_in(pt, "id");
     if (!d.ok) {
@@ -113,6 +130,13 @@ static int parse_point(toml_table_t *pt, tdot_point_t *point,
         return -1;
     }
     point->id = d.u.s;
+
+    point->mode = device_mode;
+    if (parse_mode(pt, "mode", &point->mode) < 0) {
+        snprintf(err, errlen, "point %s: invalid mode (expected raw|typed)",
+                 point->id);
+        return -1;
+    }
 
     d = toml_string_in(pt, "datatype");
     if (d.ok) {
@@ -192,6 +216,12 @@ static int parse_point(toml_table_t *pt, tdot_point_t *point,
             return -1;
         }
         free(d.u.s);
+    }
+
+    if (point->mode == TDOT_MODE_TYPED && point->datatype == TDOT_DT_NONE) {
+        snprintf(err, errlen, "point %s: typed point requires a datatype",
+                 point->id);
+        return -1;
     }
 
     point->address = toml_table_in(pt, "address");
@@ -286,6 +316,13 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
                      path, dev->name);
             goto fail;
         }
+        tdot_mode_t device_mode = TDOT_MODE_TYPED;
+        if (parse_mode(dt, "default_mode", &device_mode) < 0) {
+            snprintf(err, errlen, "%s: device %s: invalid default_mode", path,
+                     dev->name);
+            goto fail;
+        }
+
         dev->poll_interval_s = cfg->poll_interval_s;
         d = toml_string_in(dt, "poll_interval");
         if (d.ok) {
@@ -304,7 +341,8 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
             calloc(dev->npoints ? dev->npoints : 1, sizeof(tdot_point_t));
         for (size_t j = 0; j < dev->npoints; j++) {
             toml_table_t *ptt = toml_table_at(points, (int)j);
-            if (parse_point(ptt, &dev->points[j], dev->poll_interval_s, err,
+            if (parse_point(ptt, &dev->points[j], dev->poll_interval_s,
+                            device_mode, err,
                             errlen) != 0)
                 goto fail;
         }
@@ -316,9 +354,45 @@ fail:
     return NULL;
 }
 
+static void free_contents(tdot_config_t *cfg, bool keep_path);
+
+void tdot_config_release_protos(tdot_config_t *cfg) {
+    for (size_t i = 0; i < cfg->ndevices; i++) {
+        tdot_device_t *dev = &cfg->devices[i];
+        for (size_t j = 0; j < dev->npoints; j++) {
+            free(dev->points[j].proto);
+            dev->points[j].proto = NULL;
+            free(dev->points[j].addr_json);
+            dev->points[j].addr_json = NULL;
+        }
+        free(dev->proto);
+        dev->proto = NULL;
+    }
+}
+
+void tdot_config_replace(tdot_config_t *dst, tdot_config_t *src) {
+    char *path = dst->path;
+    free_contents(dst, true);
+    *dst = *src;
+    dst->path = path;
+    free(src->path);
+    free(src);
+}
+
+char *tdot_config_root_json(const tdot_config_t *cfg) {
+    if (!cfg->root)
+        return strdup("{}");
+    return toml_table_to_json_string(cfg->root);
+}
+
 void tdot_config_free(tdot_config_t *cfg) {
     if (!cfg)
         return;
+    free_contents(cfg, false);
+    free(cfg);
+}
+
+static void free_contents(tdot_config_t *cfg, bool keep_path) {
     for (size_t i = 0; i < cfg->ndevices; i++) {
         tdot_device_t *dev = &cfg->devices[i];
         for (size_t j = 0; j < dev->npoints; j++) {
@@ -335,14 +409,14 @@ void tdot_config_free(tdot_config_t *cfg) {
                              release transports in disconnect_device() */
     }
     free(cfg->devices);
-    free(cfg->path);
+    if (!keep_path)
+        free(cfg->path);
     free(cfg->protocol);
     free(cfg->service_name);
     free(cfg->log_level);
     free(cfg->mqtt_host);
     if (cfg->root)
         toml_free(cfg->root);
-    free(cfg);
 }
 
 tdot_device_t *tdot_config_device(tdot_config_t *cfg, const char *name) {

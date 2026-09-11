@@ -16,8 +16,10 @@
       harness not built yet).
 * [ ] Per-point `meta` support for the remaining flows: `ot-alarm` should read thresholds
       from `sample.meta`/measurement context so alarm limits can live next to the signal.
-* [ ] File the upstream async-opcua issue (draft ready in
-      `doc/upstream/async-opcua-stranded-sample.md`).
+* [ ] File the upstream async-opcua issues (drafts ready in
+      `doc/upstream/async-opcua-stranded-sample.md` and
+      `doc/upstream/async-opcua-null-session-nonce.md`); drop `vendor/async-opcua-crypto`
+      and the `[patch.crates-io]` entry once the nonce fix ships.
 * [ ] c8y-fieldbus-import deferred items (script header TODOs): alarm/event/status mappings
       (gap G4), RTU serial-port resolution from `[connection.serial]`, signed and
       multi-register bit fields.

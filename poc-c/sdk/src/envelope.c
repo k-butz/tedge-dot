@@ -57,11 +57,13 @@ char *tdot_envelope_sample(const tdot_config_t *cfg, const tdot_device_t *dev,
     cJSON_AddStringToObject(obj, "device", dev->name);
     cJSON_AddStringToObject(obj, "protocol", cfg->protocol);
     cJSON_AddStringToObject(obj, "point", pt->id);
-    cJSON_AddStringToObject(obj, "mode", "typed");
-    if (pt->datatype != TDOT_DT_NONE)
+    bool raw_mode = pt->mode == TDOT_MODE_RAW;
+    cJSON_AddStringToObject(obj, "mode", raw_mode ? "raw" : "typed");
+    if (!raw_mode && pt->datatype != TDOT_DT_NONE)
         cJSON_AddStringToObject(obj, "datatype",
                                 tdot_datatype_str(pt->datatype));
-    if (s->quality != TDOT_Q_BAD)
+    /* raw mode publishes the wire bytes only: no decoded value (contract §5) */
+    if (!raw_mode && s->quality != TDOT_Q_BAD)
         add_value(obj, &s->value);
 
     char hex[TDOT_RAW_MAX * 3 + 1];

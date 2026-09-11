@@ -106,7 +106,10 @@ container-based end-to-end tests.
 
 The connector under test runs in-process by default (the protocol module under the real SDK
 runtime — the identical code path the shipped binary links). An out-of-tree connector binary
-is tested instead via `[harness] command` in its manifest.
+is tested instead via `[harness] command` in its manifest — this is how the C build
+([poc-c/](../../poc-c/)) is checked: `connectors/<proto>/conformance-c.toml` points the
+harness at `poc-c/build/tedge-dot` (`just conformance-c <proto>`), and the static S1 check is
+skipped for external connectors because only the live descriptor (B9) describes them.
 
 ### 3.1 Required behavioural checks
 

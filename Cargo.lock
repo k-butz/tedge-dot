@@ -195,8 +195,6 @@ dependencies = [
 [[package]]
 name = "async-opcua-crypto"
 version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "191907b348a30a2f02b910704a0a18a46de78ee32c71efceac6da459104b4d2b"
 dependencies = [
  "aes",
  "async-opcua-types",

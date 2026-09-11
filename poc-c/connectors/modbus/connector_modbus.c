@@ -23,6 +23,8 @@ typedef enum {
 typedef struct {
     mb_table_t table;
     uint16_t address;
+    uint32_t start_bit; /* bit-field refinement (contract §4); bit_count 0 = whole value */
+    uint32_t bit_count;
     uint16_t count; /* registers or bits */
 } mb_point_t;
 
@@ -48,13 +50,13 @@ typedef struct {
 
 static const char CAPABILITIES[] =
     "{\"protocol\":\"modbus\",\"version\":\"0.1.0-poc\","
-    "\"modes\":[\"typed\"],"
-    "\"datatypes\":[\"bool\",\"int8\",\"uint8\",\"int16\",\"uint16\","
+    "\"modes\":[\"raw\",\"typed\"],"
+    "\"datatypes\":[\"bool\",\"int16\",\"uint16\","
     "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\"],"
     "\"point_kinds\":[\"coil\",\"discrete_input\",\"holding_register\","
     "\"input_register\"],"
-    "\"command_verbs\":[\"write\",\"write-batch\"],"
-    "\"features\":[\"polling\"],\"subscribe\":false}";
+    "\"command_verbs\":[\"write\",\"write-coil\",\"write-batch\"],"
+    "\"features\":[\"polling\",\"bitfield\"],\"subscribe\":false}";
 
 static int parse_table(const char *s, mb_table_t *out) {
     if (strcmp(s, "coil") == 0)
@@ -178,6 +180,11 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
             free(ts.u.s);
             mp->address = (uint16_t)ad.u.i;
 
+            toml_datum_t bd;
+            if ((bd = toml_int_in(pt->address, "start_bit")).ok)
+                mp->start_bit = (uint32_t)bd.u.i;
+            if ((bd = toml_int_in(pt->address, "bit_count")).ok)
+                mp->bit_count = (uint32_t)bd.u.i;
             toml_datum_t cn = toml_int_in(pt->address, "count");
             if (cn.ok) {
                 mp->count = (uint16_t)cn.u.i;
@@ -304,8 +311,8 @@ static int read_point(tdot_connector_t *self, tdot_device_t *dev,
         return -1; /* transport down -> runtime reconnects */
     }
 
-    if (pt->datatype == TDOT_DT_NONE) {
-        out->value.kind = TDOT_VAL_NONE;
+    if (pt->mode == TDOT_MODE_RAW || pt->datatype == TDOT_DT_NONE) {
+        out->value.kind = TDOT_VAL_NONE; /* raw mode: wire bytes only */
         return 0;
     }
 
@@ -317,8 +324,16 @@ static int read_point(tdot_connector_t *self, tdot_device_t *dev,
         out->value.b = out->raw[0] != 0;
         return 0;
     }
-    if (tdot_decode(pt->datatype, out->raw, out->raw_len, pt->endianness,
-                    pt->word_order, &out->value, err, sizeof err) != 0) {
+    if (mp->bit_count > 0) {
+        /* Bit-field refinement: extract the declared bits of the (reordered)
+         * integer instead of decoding the whole word. */
+        out->value.kind = TDOT_VAL_NUM;
+        out->value.num = (double)tdot_bitfield_extract(
+            out->raw, out->raw_len, pt->endianness, pt->word_order,
+            mp->start_bit, mp->bit_count);
+    } else if (tdot_decode(pt->datatype, out->raw, out->raw_len,
+                           pt->endianness, pt->word_order, &out->value, err,
+                           sizeof err) != 0) {
         tdot_sample_bad(out, "decode error: %s", err);
         return 0;
     }
