@@ -83,6 +83,9 @@ Setup OT Stack
     Log    Connector under test: ${impl} implementation (container ${container})
     Connector Implementation Should Be    ${impl}
 
+    # Before BROKER_PORT is set below: Robot variable names ignore case, so setting that suite
+    # variable also overwrites this keyword's own `${broker_port}` argument.
+    Set Suite Variable    $BROKER_PORT_PINNED    ${broker_port}
     IF    "${broker_port}" == "${EMPTY}"
         ${host}    ${port}=    DeviceLibrary.Get Service Port
         ...    service=broker    port=${BROKER_CONTAINER_PORT}
@@ -155,6 +158,39 @@ Thaw Stack Service
     [Documentation]    Resume a service frozen with `Freeze Stack Service`.
     [Arguments]    ${service}
     Run Compose    unpause ${service}
+
+Stop Stack Service
+    [Documentation]    Stop one service of the stack; it stays down until `Start Stack Service`.
+    [Arguments]    ${service}
+    Run Compose    stop ${service}
+
+Start Stack Service
+    [Documentation]    Start a service stopped with `Stop Stack Service`.
+    [Arguments]    ${service}
+    Run Compose    start ${service}
+
+Restart Broker
+    [Documentation]    Restart the stack's MQTT broker and reconnect the suite's client to it.
+    ...    The test broker has no persistence, so the restarted broker holds no retained
+    ...    messages: any retained state seen afterwards was published again by a client that
+    ...    noticed the restart.
+    Restart Stack Service    broker
+    Reconnect To Broker
+
+Reconnect To Broker
+    [Documentation]    Drop the suite's client, forget everything it recorded and connect again.
+    ...    A restarted broker container can be published on a different ephemeral host port, so
+    ...    the port is resolved again unless the stack pinned it.
+    Run Keyword And Ignore Error    Disconnect Broker
+    Clear Messages
+    IF    "${BROKER_PORT_PINNED}" == "${EMPTY}"
+        ${host}    ${port}=    DeviceLibrary.Get Service Port
+        ...    service=broker    port=${BROKER_CONTAINER_PORT}
+        Set Suite Variable    $BROKER_HOST    ${host}
+        Set Suite Variable    $BROKER_PORT    ${port}
+    END
+    Wait Until Keyword Succeeds    30s    1s    Connect Broker    ${BROKER_HOST}    ${BROKER_PORT}
+    Subscribe    te/#
 
 Collect Stack Logs
     [Documentation]    Container logs of every service of the stack (docker compose logs).
