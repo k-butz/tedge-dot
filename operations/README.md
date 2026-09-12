@@ -110,11 +110,12 @@ roles anyway).
 # groups its parameters (§5.2) renders several. `</dev/null` matters: without it c8y reads the
 # loop's stdin as its own input pipeline and the remaining definitions are never registered.
 tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
 tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact | while read -r definition; do
     printf '%s' "$definition" > "$tmp"
-    C8Y_SETTINGS_CI=true c8y api POST /service/dtm/definitions/properties --data "@$tmp" </dev/null
+    C8Y_SETTINGS_CI=true c8y api POST /service/dtm/definitions/properties --data "@$tmp" </dev/null ||
+        exit 1   # stop at the first rejected definition rather than reporting only the last
 done
-rm -f "$tmp"
 ```
 
 (or create it by hand in the DTM UI: identifier = the set name, one property per point id).

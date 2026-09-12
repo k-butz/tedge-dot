@@ -61,9 +61,16 @@ function sanitize(s) {
 // How this device's sets are named: by its declared type, else by the protocol. `forced` is the
 // flow's default_set (and `tedge-dot describe --set`): one name for every point that does not
 // give an absolute one.
+// Trimmed with the SDKs' definition of whitespace (C's isspace, which `tedge-dot describe`
+// applies to --set) rather than JS's Unicode-aware trim: the flow and the CLI must agree on
+// what a blank `default_set` is, and on the exact spelling of a padded one.
+function trimC(s) {
+  return String(s).replace(/^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g, "");
+}
+
 function naming(context, device, protocol) {
   return {
-    forced: String(context.config?.default_set || "").trim(),
+    forced: trimC(context.config?.default_set || ""),
     qualifier: context.mapper.get(`ot-device-type:${device}`) || protocol,
   };
 }
@@ -166,7 +173,9 @@ export function onMessage(message, context) {
   // The device type qualifies every set name below. It arrives on the retained link status
   // (before any sample) and on every sample, so a device with only write-only points — which
   // never samples — still gets its sets named after its type.
-  if (typeof payload.type === "string" && payload.type) {
+  // Only where the contract puts it (§5, §8): a command payload that ever grew a top-level
+  // `type` must not be able to redefine the device's type.
+  if ((kind === "sample" || kind === "status") && typeof payload.type === "string" && payload.type) {
     context.mapper.set(`ot-device-type:${device}`, payload.type);
   } else if (kind === "status") {
     // The link status describes the whole device and is republished on every config reload, so

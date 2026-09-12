@@ -21,3 +21,27 @@ protocol_address = { transport = "tcp", host = "127.0.0.2", port = 502, unit_id 
   datatype = "bool"
   access = "read_write"
   address = { table = "coil", address = 1, count = 1 }
+
+# A type that ends in punctuation folds into the same name as the two above — the case where
+# the two builds' grouping keys used to differ (one warned, the other stayed silent).
+[[device]]
+name = "d3"
+type = "acme-meter-"
+protocol_address = { transport = "tcp", host = "127.0.0.3", port = 502, unit_id = 1 }
+  [[device.point]]
+  id = "p3"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 3, count = 1 }
+
+# A comma inside ONE type is not two types: the C build used to infer "more than one" by
+# looking for a comma in the rendered message and warned about this device on its own.
+[[device]]
+name = "d4"
+type = "Acme, Inc. Meter"
+protocol_address = { transport = "tcp", host = "127.0.0.4", port = 502, unit_id = 1 }
+  [[device.point]]
+  id = "p4"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 4, count = 1 }

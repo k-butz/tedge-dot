@@ -120,7 +120,8 @@ compare_run() {
         echo "FAIL $name: the two binaries print different diagnostics:" >&2
         diff -u "$rust_errs" "$c_errs" >&2 || true
         fail=1
-        return
+        # Deliberately no early return: a stdout divergence must still be reported, or a
+        # differing diagnostic would mask the definitions differing too.
     fi
     if ! NAME="$name" RUST_OUT="$rust_out" C_OUT="$c_out" python3 "$compare"; then
         fail=1

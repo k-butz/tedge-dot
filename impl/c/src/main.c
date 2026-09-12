@@ -460,6 +460,11 @@ static int cmd_describe(const args_t *a) {
      * shared with every other device type that speaks it. Declaring the device
      * type is what keeps them apart. */
     if (!forced) {
+        char *collisions = tdot_param_type_collisions(cfg);
+        if (collisions) {
+            fprintf(stderr, "%s\n", collisions);
+            free(collisions);
+        }
         char *untyped = tdot_param_untyped_devices(cfg);
         if (untyped) {
             fprintf(stderr,
@@ -470,12 +475,6 @@ static int cmd_describe(const args_t *a) {
                     untyped, cfg->protocol, cfg->protocol);
             free(untyped);
         }
-    }
-
-    char *collisions = tdot_param_type_collisions(cfg);
-    if (collisions) {
-        fprintf(stderr, "%s\n", collisions);
-        free(collisions);
     }
 
     cJSON *docs = tdot_c8y_dtm_definitions(cfg, forced);

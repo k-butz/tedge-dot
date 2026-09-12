@@ -136,6 +136,63 @@ static double num_of(const cJSON *obj, const char *key) {
     return cJSON_IsNumber(v) ? v->valuedouble : -1e300;
 }
 
+/* Device types that derive the SAME set names are warned about; a type that
+ * merely contains a comma, or the same type on two devices, is not a collision.
+ * Mirrors descriptor.rs::folded_device_types_are_warned_about. */
+static void check_type_collisions(void) {
+    static const struct {
+        const char *a;
+        const char *b;
+        int want;
+        const char *needle;
+    } cases[] = {
+        {"acme-boiler-v2", "acme boiler v2", 1, "acme_boiler_v2_control_parameters"},
+        {"acme-boiler-v2", "acme-boiler-v2", 0, NULL}, /* one type, two devices */
+        {"acme-boiler-v2", "acme-boiler-v2-", 1, NULL}, /* trailing separator folds in */
+        {"Acme, Inc. Meter", NULL, 0, NULL},           /* a comma is not two types */
+        {"acme-boiler-v2", "other-type", 0, NULL},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        char body[2048];
+        char second[512] = "";
+        if (cases[i].b)
+            snprintf(second, sizeof second,
+                     "[[device]]\nname = \"d2\"\ntype = \"%s\"\n"
+                     "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+                     "port = 502, unit_id = 2 }\n"
+                     "  [[device.point]]\n  id = \"p2\"\n  datatype = \"uint16\"\n"
+                     "  access = \"read_write\"\n"
+                     "  address = { table = \"holding\", address = 2, count = 1 }\n",
+                     cases[i].b);
+        snprintf(body, sizeof body,
+                 "[connector]\nprotocol = \"modbus\"\n"
+                 "[[device]]\nname = \"d1\"\ntype = \"%s\"\n"
+                 "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+                 "port = 502, unit_id = 1 }\n"
+                 "  [[device.point]]\n  id = \"p1\"\n  datatype = \"uint16\"\n"
+                 "  access = \"read_write\"\n"
+                 "  address = { table = \"holding\", address = 1, count = 1 }\n%s",
+                 cases[i].a, second);
+        char *path = write_temp_config(body);
+        char err[256];
+        tdot_config_t *cfg = tdot_config_load(path, err, sizeof err);
+        if (!cfg) {
+            CHECK(false, "case %zu did not load: %s", i, err);
+            continue;
+        }
+        char *warning = tdot_param_type_collisions(cfg);
+        CHECK((warning != NULL) == (cases[i].want != 0),
+              "case %zu ('%s' vs '%s'): warning=%s", i, cases[i].a,
+              cases[i].b ? cases[i].b : "<none>", warning ? warning : "<none>");
+        if (warning && cases[i].needle)
+            CHECK(strstr(warning, cases[i].needle) != NULL,
+                  "case %zu must name the derived set, got: %s", i, warning);
+        free(warning);
+        tdot_config_free(cfg);
+        unlink(path);
+    }
+}
+
 int main(void) {
     char *path = write_temp_config(CONFIG);
     char err[256];
@@ -347,6 +404,8 @@ int main(void) {
 
     tdot_config_free(cfg);
     unlink(path);
+    check_type_collisions();
+
     if (failures) {
         printf("describe: %d check(s) failed\n", failures);
         return 1;

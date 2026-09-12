@@ -216,55 +216,86 @@ char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced) {
 }
 
 char *tdot_param_type_collisions(const tdot_config_t *cfg) {
-    char *buf = NULL;
-    size_t len = 0;
-    /* For each distinct folded qualifier, the raw types that produced it. */
+    /* Grouped by the set name the types actually derive -- the same string the
+     * Rust build groups and displays by, so there is no second notion of
+     * "qualifier" for the two to disagree about. Everything here is heap-built:
+     * a device type is an arbitrary configured string, and a truncated warning
+     * would name a type that is not in the configuration. */
+    struct group {
+        char *key;    /* representative set name */
+        char **types; /* distinct raw types deriving it */
+        size_t ntypes;
+    } *groups = NULL;
+    size_t ngroups = 0;
+
     for (size_t i = 0; i < cfg->ndevices; i++) {
         const char *declared = cfg->devices[i].type;
         if (!declared || !*declared)
             continue;
         char *key = tdot_param_set_name(declared, TDOT_PARAM_DEFAULT_GROUP);
-        /* Only report the first device of each folded group, so each collision
-         * is named once (the Rust build reports in the same order). */
-        bool first = true;
-        char *names = NULL;
-        size_t nlen = 0;
-        for (size_t j = 0; j < cfg->ndevices; j++) {
-            const char *other = cfg->devices[j].type;
-            if (!other || !*other)
-                continue;
-            char *other_key = tdot_param_set_name(other, TDOT_PARAM_DEFAULT_GROUP);
-            bool same_key = strcmp(key, other_key) == 0;
-            free(other_key);
-            if (!same_key)
-                continue;
-            if (j < i && strcmp(other, declared) != 0)
-                first = false; /* an earlier device already reported this group */
-            if (j < i && strcmp(other, declared) == 0)
-                first = false; /* this exact type was already seen */
-            char item[280];
-            snprintf(item, sizeof item, "'%s'", other);
-            if (!strstr(names ? names : "", item))
-                append(&names, &nlen, ", ", item);
+        struct group *g = NULL;
+        for (size_t k = 0; k < ngroups; k++)
+            if (strcmp(groups[k].key, key) == 0) {
+                g = &groups[k];
+                break;
+            }
+        if (!g) {
+            groups = realloc(groups, (ngroups + 1) * sizeof *groups);
+            g = &groups[ngroups++];
+            g->key = key;
+            g->types = NULL;
+            g->ntypes = 0;
+        } else {
+            free(key);
         }
-        if (first && names && strchr(names, ',')) {
-            /* Trim the "_control_parameters" suffix: the message names the
-             * qualifier, not one set. */
-            char *suffix = strstr(key, "_" TDOT_PARAM_DEFAULT_GROUP "_parameters");
-            if (suffix)
-                *suffix = '\0';
-            char msg[1024];
-            snprintf(msg, sizeof msg,
-                     "warning: device types %s all name their parameter sets "
-                     "'%s_...', so they share one tenant-wide definition and the "
-                     "first one rendered wins; give them names that differ by "
-                     "more than punctuation",
-                     names, key);
-            append(&buf, &len, "\n", msg);
+        bool seen = false;
+        for (size_t t = 0; t < g->ntypes; t++)
+            if (strcmp(g->types[t], declared) == 0) {
+                seen = true; /* the same type on two devices is one device type */
+                break;
+            }
+        if (!seen) {
+            g->types = realloc(g->types, (g->ntypes + 1) * sizeof *g->types);
+            g->types[g->ntypes++] = strdup(declared);
         }
-        free(names);
-        free(key);
     }
+
+    static const char *FMT =
+        "warning: device types %s derive the same parameter set names (e.g. "
+        "'%s'), so they share one tenant-wide definition and the first one "
+        "rendered wins; give them names that differ by more than punctuation";
+    char *buf = NULL;
+    size_t len = 0;
+    for (size_t k = 0; k < ngroups; k++) {
+        /* More than one DISTINCT type is the collision -- counted, never
+         * inferred from the rendered text (a type may contain a comma). */
+        if (groups[k].ntypes > 1) {
+            char *names = NULL;
+            size_t nlen = 0;
+            for (size_t t = 0; t < groups[k].ntypes; t++) {
+                size_t qlen = strlen(groups[k].types[t]) + 3;
+                char *quoted = malloc(qlen);
+                if (quoted) {
+                    snprintf(quoted, qlen, "'%s'", groups[k].types[t]);
+                    append(&names, &nlen, ", ", quoted);
+                    free(quoted);
+                }
+            }
+            size_t mlen = strlen(FMT) + nlen + strlen(groups[k].key) + 1;
+            char *msg = malloc(mlen);
+            if (msg) {
+                snprintf(msg, mlen, FMT, names ? names : "", groups[k].key);
+                append(&buf, &len, "\n", msg);
+                free(msg);
+            }
+            free(names);
+        }
+        for (size_t t = 0; t < groups[k].ntypes; t++)
+            free(groups[k].types[t]);
+        free(groups[k].types);
+        free(groups[k].key);
+    }
+    free(groups);
     return buf;
 }
 

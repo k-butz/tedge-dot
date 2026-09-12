@@ -264,21 +264,25 @@ pub fn devices_without_type(config: &ConnectorConfig) -> Vec<String> {
         .collect()
 }
 
-/// Warnings about device types that *fold* to the same set-name qualifier — `"acme meter"` and
-/// `"acme-meter"` both sanitize to `acme_meter`, so their sets share one tenant-wide identifier
-/// and the first definition silently wins over the second (which is this feature's own failure
-/// mode, one scope down). One message per colliding qualifier, in configuration order.
+/// Warnings about device types that produce the *same* set names — `"acme meter"` and
+/// `"acme-meter"` both give `acme_meter_control_parameters`, so their sets share one
+/// tenant-wide definition and the first one rendered silently wins, which is this feature's own
+/// failure mode one scope down.
+///
+/// Types are grouped and displayed by the set name [`set_name`] actually derives for them, so
+/// there is no second notion of "qualifier" to drift from the real one — the C implementation
+/// compares the same strings. One message per colliding group, in configuration order.
 ///
 /// Deliberately not reported for an absolute `meta.parameter.set` shared by several device
 /// types: that is the documented way to share a set on purpose (§5.2).
 pub fn type_collision_warnings(config: &ConnectorConfig) -> Vec<String> {
-    // sanitized qualifier -> the distinct raw types that produced it
+    // representative set name -> the distinct raw types that derive it
     let mut folded: Vec<(String, Vec<String>)> = Vec::new();
     for device in &config.devices {
         let Some(declared) = device.device_type.as_deref().filter(|t| !t.is_empty()) else {
             continue;
         };
-        let key = sanitize(declared);
+        let key = set_name(declared, DEFAULT_GROUP);
         match folded.iter_mut().find(|(k, _)| *k == key) {
             Some((_, types)) => {
                 if !types.iter().any(|t| t == declared) {
@@ -294,9 +298,9 @@ pub fn type_collision_warnings(config: &ConnectorConfig) -> Vec<String> {
         .map(|(key, types)| {
             let names: Vec<String> = types.iter().map(|t| format!("'{t}'")).collect();
             format!(
-                "warning: device types {} all name their parameter sets '{}_...', so they \
-                 share one tenant-wide definition and the first one rendered wins; give them \
-                 names that differ by more than punctuation",
+                "warning: device types {} derive the same parameter set names (e.g. '{}'), so \
+                 they share one tenant-wide definition and the first one rendered wins; give \
+                 them names that differ by more than punctuation",
                 names.join(", "),
                 key
             )
@@ -696,9 +700,23 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
         let warnings = type_collision_warnings(&c);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("'acme-boiler-v2', 'acme boiler v2'"), "{}", warnings[0]);
-        assert!(warnings[0].contains("acme_boiler_v2_..."), "{}", warnings[0]);
+        // Named by the set the two actually derive, not by a separately-computed qualifier —
+        // a type ending in punctuation folds differently in the two, which is how the C and
+        // Rust messages drifted apart the first time.
+        assert!(
+            warnings[0].contains("acme_boiler_v2_control_parameters"),
+            "{}",
+            warnings[0]
+        );
         // The same type twice is one device type, not a collision.
         c.devices[1].device_type = Some("acme-boiler-v2".into());
+        assert!(type_collision_warnings(&c).is_empty());
+        // A trailing separator folds into the same name: 'acme-boiler-v2-' collides too.
+        c.devices[1].device_type = Some("acme-boiler-v2-".into());
+        assert_eq!(type_collision_warnings(&c).len(), 1);
+        // A type containing a comma is one type, not two.
+        c.devices[0].device_type = Some("Acme, Inc. Meter".into());
+        c.devices[1].device_type = None;
         assert!(type_collision_warnings(&c).is_empty());
     }
 
