@@ -68,18 +68,18 @@ Setup Cloud Device
 Connector Implementation Should Be
     [Documentation]    Guard against a silent fallback: the compose file defaults IMPL to rust,
     ...    so a mistyped or unexported variable would quietly test the wrong binary and report a
-    ...    green C run. The Rust connector is installed as a package; the C one is copied into
+    ...    green C run. The Rust connector is installed as the tedge-dot-rs package; the C one is copied into
     ...    the image by its build stage, with no package behind it.
     [Arguments]    ${impl}
     ${packaged}=    DeviceLibrary.Execute Command
-    ...    cmd=dpkg -s tedge-dot >/dev/null 2>&1 && echo packaged || echo unpackaged
+    ...    cmd=dpkg -s tedge-dot-rs >/dev/null 2>&1 && echo packaged || echo unpackaged
     ...    strip=${True}
     IF    "${impl}" == "rust"
         Should Be Equal    ${packaged}    packaged
-        ...    msg=IMPL=rust but no tedge-dot package is installed in the image
+        ...    msg=IMPL=rust but no tedge-dot-rs package is installed in the image
     ELSE
         Should Be Equal    ${packaged}    unpackaged
-        ...    msg=IMPL=${impl} but the Rust tedge-dot package is installed in the image
+        ...    msg=IMPL=${impl} but the Rust tedge-dot-rs package is installed in the image
     END
 
 Bootstrap Device

@@ -21,7 +21,7 @@ description = "Connector under test: the Rust build (default)"
 IMPL = "rust"
 
 [profiles.c]
-description = "Connector under test: the C build (poc-c/)"
+description = "Connector under test: the C build (impl/c/)"
 
 [profiles.c.env]
 IMPL = "c"

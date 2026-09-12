@@ -12,6 +12,28 @@ Documentation       Stack lifecycle for the connector e2e suites: DeviceLibrary 
 ...                 isolated; the containers of each test are reclaimed when the suite ends):
 ...                 | Test Setup        Setup OT Stack    modbus
 ...                 | Test Teardown     Teardown OT Stack
+...
+...                 IMPLEMENTATION PARITY
+...
+...                 The same suites run against both implementations (IMPL=rust|c, see
+...                 `just test-e2e` / `just test-e2e-c` and the robot.toml profiles). That is
+...                 how parity is proven, so a test belongs to BOTH unless the feature it
+...                 covers genuinely cannot exist in one of them.
+...
+...                 When that happens, tag the test with the capability it needs:
+...                 | [Tags]    requires:subscribe
+...
+...                 The runner turns the capabilities an implementation lacks into
+...                 `robot --skip requires:<capability>`, so the test is reported as SKIPPED
+...                 for that implementation instead of failing or being silently dropped. The
+...                 list of what each implementation lacks lives in ONE place — the
+...                 C_MISSING_CAPABILITIES variable in the justfile — and is mirrored by the
+...                 parity table in impl/c/README.md.
+...
+...                 Two rules for such a test: it must FAIL (not pass) on an implementation
+...                 lacking the capability if the tag were removed — otherwise it is not really
+...                 testing the feature — and the capability must be a genuine limitation, not
+...                 a shortcut around a bug.
 
 Library             DeviceLibrary
 Library             MqttClient.py
@@ -54,6 +76,7 @@ Setup OT Stack
     ${impl}=    Get Environment Variable    IMPL    rust
     ${container}=    DeviceLibrary.Get Container Name
     Log    Connector under test: ${impl} implementation (container ${container})
+    Connector Implementation Should Be    ${impl}
 
     IF    "${broker_port}" == "${EMPTY}"
         ${host}    ${port}=    DeviceLibrary.Get Service Port
@@ -74,6 +97,59 @@ Teardown OT Stack
     ...    project (containers, network, volumes) itself when the suite ends.
     Run Keyword And Ignore Error    Collect Stack Logs
     Run Keyword And Ignore Error    Disconnect Broker
+
+Connector Implementation Should Be
+    [Documentation]    Assert the container really runs the implementation under test.
+    ...
+    ...    Without this the fallback is silent: the compose file defaults IMPL to `rust` and
+    ...    CONNECTOR_DOCKERFILE to the stack's own Rust Dockerfile, so any path where the
+    ...    variables do not reach compose (an editor profile, a stale shell, a wrapper that
+    ...    forgets to export) builds the Rust connector and reports a green run as coverage of
+    ...    the other implementation. The cloud harness has had this guard for the same reason
+    ...    (cloud/_shared/device.resource); the connector suites had only a Log line.
+    ...
+    ...    The two are told apart by linkage rather than by version — both deliberately report
+    ...    the same capability `version`, because they implement the same contract revision.
+    ...    The C build dynamically links libcjson (see impl/c/README.md); the Rust build is
+    ...    self-contained.
+    [Arguments]    ${impl}
+    ${links_cjson}=    DeviceLibrary.Execute Command
+    ...    cmd=ldd /usr/bin/tedge-dot 2>/dev/null | grep -c libcjson || true    strip=${True}
+    IF    "${impl}" == "c"
+        Should Not Be Equal    ${links_cjson}    0
+        ...    msg=IMPL=c but /usr/bin/tedge-dot does not link libcjson - this is the Rust build
+    ELSE
+        Should Be Equal    ${links_cjson}    0
+        ...    msg=IMPL=${impl} but /usr/bin/tedge-dot links libcjson - this is the C build
+    END
+
+Run Compose
+    [Documentation]    Run a docker compose subcommand against THIS suite's stack (the project
+    ...    name is random per suite, so it has to be resolved at runtime).
+    [Arguments]    ${args}
+    ${project}=    DeviceLibrary.Get Compose Project Name
+    ${rc}=    Run And Return Rc    docker compose -p ${project} ${args}
+    Should Be Equal As Integers    ${rc}    ${0}
+    ...    msg=`docker compose -p ${project} ${args}` failed
+    RETURN    ${project}
+
+Restart Stack Service
+    [Documentation]    Restart one service of the stack — the peer goes away and comes back,
+    ...    dropping the transport with it. Use it to exercise the connector's reconnect path.
+    [Arguments]    ${service}
+    Run Compose    restart ${service}
+
+Freeze Stack Service
+    [Documentation]    SIGSTOP one service of the stack. Unlike a restart this leaves the TCP
+    ...    connection ESTABLISHED and simply stops all answers, which is the harder failure to
+    ...    detect: nothing tells the client the peer is gone. Thaw it with `Thaw Stack Service`.
+    [Arguments]    ${service}
+    Run Compose    pause ${service}
+
+Thaw Stack Service
+    [Documentation]    Resume a service frozen with `Freeze Stack Service`.
+    [Arguments]    ${service}
+    Run Compose    unpause ${service}
 
 Collect Stack Logs
     [Documentation]    Container logs of every service of the stack (docker compose logs).

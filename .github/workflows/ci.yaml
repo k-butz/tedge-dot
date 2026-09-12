@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   test:
-    name: Build & unit/property tests
+    name: Rust build & unit/property tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,12 +22,27 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: impl/rust
+      # The cargo workspace lives in impl/rust/; go through `just` so CI and a local run
+      # use exactly the same --manifest-path.
+      - uses: extractions/setup-just@v2
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --manifest-path impl/rust/Cargo.toml --workspace
       - name: Unit + integration + property tests
-        run: cargo test --workspace
+        run: just test
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: just lint
+
+  # Cheap guard on the parity mechanism itself: a mistyped `requires:` tag is never skipped,
+  # and a capability nothing is tagged with makes the skip a no-op.
+  capability-tags:
+    name: Capability tag consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - run: just check-capability-tags
 
   flows:
     name: Flow tests (tedge flows test)
@@ -47,18 +62,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/sdk/fuzz
+          workspaces: impl/rust/crates/sdk/fuzz
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Fuzz all targets briefly
-        working-directory: crates/sdk
+        working-directory: impl/rust/crates/sdk
         run: |
           for t in decode_primitive config_toml transform sample_envelope; do
             cargo +nightly fuzz run "$t" -- -max_total_time=30
           done
 
-  c-poc:
-    name: C PoC (${{ matrix.protocol }})
+  c:
+    name: C build & conformance (${{ matrix.protocol }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -82,10 +97,10 @@ jobs:
           sudo modprobe vcan
       - name: Build
         run: |
-          cmake -B poc-c/build -S poc-c -G Ninja
-          cmake --build poc-c/build
+          cmake -B impl/c/build -S impl/c -G Ninja
+          cmake --build impl/c/build
       - name: Golden decode vectors (shared with the Rust SDK)
-        run: ctest --test-dir poc-c/build --output-on-failure
+        run: ctest --test-dir impl/c/build --output-on-failure
       - name: Start MQTT broker
         run: |
           sudo systemctl start mosquitto || mosquitto -d -p 1883
@@ -95,16 +110,18 @@ jobs:
       - name: Start protocol simulator
         run: just sim ${{ matrix.protocol }}
       - name: Smoke test against simulator + broker
-        run: ./poc-c/ci/smoke.sh ${{ matrix.protocol }}
+        run: ./impl/c/ci/smoke.sh ${{ matrix.protocol }}
       # The contract conformance suite (layers 1-3) against the C build, for the protocols the
       # harness has a built-in simulator for. Same checks as the Rust `conformance` job.
       - uses: dtolnay/rust-toolchain@stable
         if: matrix.protocol == 'modbus' || matrix.protocol == 'opcua'
       - uses: Swatinem/rust-cache@v2
         if: matrix.protocol == 'modbus' || matrix.protocol == 'opcua'
+        with:
+          workspaces: impl/rust
       - name: Conformance suite against the C build
         if: matrix.protocol == 'modbus' || matrix.protocol == 'opcua'
-        run: cargo run -p ot-conformance -- check --spec connectors/${{ matrix.protocol }}/conformance-c.toml
+        run: just conformance-c ${{ matrix.protocol }}
       # `tedge-dot describe` must render the same Cumulocity DTM definitions in both builds;
       # runs once (it covers every config in the repo) where the Rust toolchain is set up.
       - name: Describe parity (Rust vs C)
@@ -127,6 +144,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: impl/rust
       - uses: extractions/setup-just@v2
       - name: Run conformance suite
         run: just conformance ${{ matrix.protocol }}

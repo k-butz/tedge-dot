@@ -1,6 +1,6 @@
 # Conformance manifest for the PROFIBUS-DP connector.
 #
-#   cargo run -p ot-conformance -- check --spec connectors/profibus/conformance.toml \
+#   cargo run --manifest-path impl/rust/Cargo.toml -p ot-conformance -- check --spec connectors/profibus/conformance.toml \
 #       --features profibus   # module is not compiled into the harness by default
 #
 # Runs the static layers (schema examples, golden decode vectors, manifest ↔ compiled

@@ -6,13 +6,36 @@ class of bug the others cannot.
 
 | Layer | Where | Catches | Run with |
 |---|---|---|---|
-| Unit tests | `crates/*/src` (inline `#[cfg(test)]`) | Known-answer regressions, spec acceptance vectors | `just test` |
-| Property-based tests | `crates/sdk/tests/properties.rs` | Invariant violations across the whole input space | `just test-properties` |
-| Fuzzing | `crates/sdk/fuzz/` | Panics/crashes on hostile or malformed input | `just fuzz <target>` |
-| Integration tests | `crates/connector-*/tests/` | Protocol framing against an in-process or scripted peer | `just test` |
+| Unit tests | `impl/rust/crates/*/src` (inline `#[cfg(test)]`), `impl/c/tests/` | Known-answer regressions, spec acceptance vectors | `just test` / `just c-test` |
+| Property-based tests | `impl/rust/crates/sdk/tests/properties.rs` | Invariant violations across the whole input space | `just test-properties` |
+| Fuzzing | `impl/rust/crates/sdk/fuzz/` | Panics/crashes on hostile or malformed input | `just fuzz <target>` |
+| Integration tests | `impl/rust/crates/connector-*/tests/` | Protocol framing against an in-process or scripted peer | `just test` |
 | Simulator e2e | `connectors/<proto>/` (sim, compose, Robot suite) | Real protocol stacks end to end, both implementations | `just test-e2e <proto>` / `just test-e2e-c <proto>` |
 | Flow tests | `flows/test-flows.sh` (`tedge flows test`) | Sample→measurement/alarm/event mapping, offline | `just test-flows` |
-| Cloud e2e | `cloud/<proto>/tests/*.robot` | Cumulocity operation round-trips on a live tenant | `just test-cloud <proto>` |
+| Cloud e2e | `cloud/<proto>/tests/*.robot` | Cumulocity operation round-trips on a live tenant, both implementations | `just test-cloud <proto>` / `just test-cloud-c <proto>` |
+| Conformance | `connectors/<proto>/conformance{,-c}.toml` | Contract compliance (schema, decode vectors, behaviour), both implementations | `just conformance <proto>` / `just conformance-c <proto>` |
+| Describe parity | `impl/c/ci/describe-parity.sh` | The two binaries rendering different Cumulocity DTM definitions | `just c-describe-parity` |
+
+### Parity between the two implementations
+
+`tedge-dot` ships as two implementations of one contract (see the root README). They are kept
+honest by *sharing* test assets rather than by having parallel suites: the same Robot suites,
+the same conformance manifests, the same golden decode vectors, and a `describe` output
+comparison. `IMPL=rust|c` selects which binary the stack is built with.
+
+A capability one implementation genuinely cannot support is the only exception. The test that
+covers it is tagged `requires:<capability>` and the runner turns the capabilities an
+implementation lacks into `robot --skip requires:<capability>`, so it is reported as SKIPPED
+rather than failing or being quietly dropped. The list lives in one place —
+`C_MISSING_CAPABILITIES` in the justfile — and is mirrored by the parity table in
+`impl/c/README.md`.
+
+Two rules for such a test, documented next to the convention in
+`connectors/_shared/stack.resource`: it must *fail* on an implementation lacking the capability
+if the tag were removed (otherwise it is not testing the feature), and the capability must be a
+real limitation, not a shortcut around a bug. The OPC UA push tests are the worked example —
+proving push delivery needed a point on a *static* node, because a rate check cannot tell push
+from polling when the runtime hands the connector the same interval for both.
 
 ### The suites own their stack and device
 
@@ -36,7 +59,7 @@ hand (`just e2e-up`, `just sim`).
 
 ## Property-based tests (proptest)
 
-`crates/sdk/tests/properties.rs` pins the invariants of the shared decode/transform layer —
+`impl/rust/crates/sdk/tests/properties.rs` pins the invariants of the shared decode/transform layer —
 the layer where a bug corrupts *every* protocol at once:
 
 - encode → decode is the identity for all integer/float datatypes × endianness × word order;
@@ -52,7 +75,7 @@ alongside the fix.
 
 ## Fuzzing (cargo-fuzz / libFuzzer)
 
-`crates/sdk/fuzz/` has four targets, runnable with `just fuzz <target> [seconds]` or all
+`impl/rust/crates/sdk/fuzz/` has four targets, runnable with `just fuzz <target> [seconds]` or all
 briefly via `just fuzz-all` (requires the nightly toolchain and `cargo install cargo-fuzz`):
 
 - `decode_primitive` — arbitrary wire bytes × datatype × byte orders; asserts integer
@@ -71,9 +94,9 @@ permanent `#[test]` so the fuzz corpus is not the only memory of the bug.
 ## Platform-gated code
 
 The SocketCAN connectors (`canbus`, `canopen`) hide their transport behind
-`#[cfg(target_os = "linux")]`, so a macOS `cargo build` silently skips them — Linux-only
+`#[cfg(target_os = "linux")]`, so a macOS `cargo build --manifest-path impl/rust/Cargo.toml` silently skips them — Linux-only
 compile errors then surface only inside the Docker e2e build. Run `just check-linux` (cross
-`cargo check`) after touching cfg-gated code; it caught the canopen Linux path failing to
+`cargo check --manifest-path impl/rust/Cargo.toml`) after touching cfg-gated code; it caught the canopen Linux path failing to
 compile while the host build was green.
 
 ## What a new connector must ship with

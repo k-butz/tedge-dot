@@ -36,7 +36,7 @@ services:
   connector:
     # Stable image name so every (randomly named) project reuses the built image instead of
     # rebuilding it. IMPL/CONNECTOR_DOCKERFILE select the implementation under test:
-    # the Rust build by default, the C build (poc-c/) via `just test-e2e-c profibus`.
+    # the Rust build by default, the C build (impl/c/) via `just test-e2e-c profibus`.
     image: tedge-dot-${IMPL:-rust}-profibus-connector
     build:
       context: ../..

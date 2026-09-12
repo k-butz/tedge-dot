@@ -4,7 +4,7 @@
 | --- | --- |
 | Status | Analysis (2026-07) |
 | Legacy | [thin-edge/modbus-plugin](https://github.com/thin-edge/modbus-plugin) (Python, `tedge_modbus.reader` + `tedge_modbus.operations`) |
-| Replacement | [`crates/connector-modbus`](../../crates/connector-modbus/src/lib.rs) + [`flows/`](../../flows/) + [`operations/`](../../operations/) shims |
+| Replacement | [`impl/rust/crates/connector-modbus`](../../impl/rust/crates/connector-modbus/src/lib.rs) + [`flows/`](../../flows/) + [`operations/`](../../operations/) shims |
 | Related | [Migration guide](migration-guide.md), [Modbus connector spec](../connectors/modbus-connector-spec.md), [RFC 0002](../rfc/0002-cloud-fieldbus-integration.md) |
 
 This document compares the legacy Python plugin feature-by-feature against what tedge-dot
@@ -22,7 +22,7 @@ exists but a translation/behaviour piece is missing; **missing** — no equivale
 
 | modbus-plugin | tedge-dot equivalent | Status |
 | --- | --- | --- |
-| `modbus.toml [modbus].pollinterval` (global, per-device override) | `connector.poll_interval`, plus per-device and per-point `poll_interval` ([`crates/sdk/src/config.rs`](../../crates/sdk/src/config.rs)) | covered |
+| `modbus.toml [modbus].pollinterval` (global, per-device override) | `connector.poll_interval`, plus per-device and per-point `poll_interval` ([`impl/rust/crates/sdk/src/config.rs`](../../impl/rust/crates/sdk/src/config.rs)) | covered |
 | `[modbus].transmitinterval` (stored by `c8y_ModbusConfiguration`, **never enforced** by the reader) | `ot-measurement` `min_interval` / `combine_interval` params (actually enforced) | covered |
 | `[modbus].loglevel` | `connector.log_level` | covered |
 | `[modbus].combinemeasurements` (+ per-device, per-mapping override) | `ot-measurement` `combine` + `combine_interval` (flow-wide). Per-signal override via `point.meta` exists for `on_change`/`deadband`/`min_interval`/`debounce` but **not** for `combine` | partial |
@@ -32,7 +32,7 @@ exists but a translation/behaviour piece is missing; **missing** — no equivale
 | `devices.toml [[device]]` (name, address, ip, port, protocol, littlewordendian) | `[[device]]` + `protocol_address` (tcp/rtu, `unit_id`), per-point `word_order` | covered |
 | `[[device.registers]]` number/startbit/nobits/signed/input | `point.address` (`table`, `address`, `count`, `start_bit`, `bit_count`) + `datatype` (`bitfield` feature) | covered |
 | Per-register `littleendian` | `point.endianness` | covered |
-| Scaling `multiplier`/`divisor`/`decimalshiftright`/`offset` | `point.transform` `{multiplier, divisor, decimal_shift, offset}` applied by the connector ([`crates/sdk/src/model.rs`](../../crates/sdk/src/model.rs)) | covered |
+| Scaling `multiplier`/`divisor`/`decimalshiftright`/`offset` | `point.transform` `{multiplier, divisor, decimal_shift, offset}` applied by the connector ([`impl/rust/crates/sdk/src/model.rs`](../../impl/rust/crates/sdk/src/model.rs)) | covered |
 | `measurementmapping.templatestring` (`{"G":{"S":%%}}`) | `ot-measurement` `group`/`series`/`target_topic`/`point_separator` params | covered |
 | Per-register `on_change` | `point.meta.on_change` honoured by `ot-measurement` (plus `deadband`, `min_interval`, `debounce` — superset) | covered |
 | `alarmmapping` (raise on 0→1 edge, never clears) | [`ot-alarm`](../../flows/ot-alarm/) flow (threshold + hysteresis, raises **and clears**); requires the point to be mapped as a measurement first (`include_boolean`) | covered |
@@ -84,7 +84,7 @@ does more than tedge-dot.
 | Command capability advertisement (`cmd/modbus_SetRegister`, `cmd/modbus_SetCoil`) | reader publishes empty retained capability topics | `ot-registration` `command_capabilities = "ot_write,ot_write_coil"` | covered |
 | Service registration (`te/device/main/service/...`) | `tedge-modbus-plugin` | `tedge-dot` service health (asserted in the robot suite) | covered |
 | Modbus TCP | pymodbus `ModbusTcpClient` | `tokio-modbus` tcp | covered |
-| Modbus RTU (serial) | pymodbus `ModbusSerialClient` + `[serial]` defaults merged per device | `tokio-modbus` rtu + `tokio-serial`, `[connection.serial]` defaults ([`crates/connector-modbus/src/lib.rs`](../../crates/connector-modbus/src/lib.rs) `build_context`) | covered |
+| Modbus RTU (serial) | pymodbus `ModbusSerialClient` + `[serial]` defaults merged per device | `tokio-modbus` rtu + `tokio-serial`, `[connection.serial]` defaults ([`impl/rust/crates/connector-modbus/src/lib.rs`](../../impl/rust/crates/connector-modbus/src/lib.rs) `build_context`) | covered |
 | Contiguous-range read batching | `_build_query_model` | spec §5 batching | covered |
 | Failed reads visible | logged only (silently dropped downstream) | `quality: "bad"` samples with `error` | covered (superset) |
 | deb/rpm packaging | nfpm, package `tedge-modbus-plugin`, systemd `tedge-modbus-plugin.service`, config under `/etc/tedge/plugins/modbus/` | goreleaser deb/rpm (`.goreleaser.yaml`), `packaging/tedge-dot.service`, config `/etc/tedge/plugins/ot/modbus.toml` | covered |
@@ -121,7 +121,7 @@ shim assumes a connector-shaped `device` object that no stock UI produces.
      `noUpdateIfEqual`/send-on-change → `meta.on_change`, alarm/event/status mappings →
      `meta` fields read by `ot-alarm`/`ot-event`;
    - emit one `ot_define_device` command; the SDK runtime persists it into the TOML
-     (`crates/sdk/src/runtime.rs` `apply_define_device`) and live-reloads.
+     (`impl/rust/crates/sdk/src/runtime.rs` `apply_define_device`) and live-reloads.
 3. Round-trip Robot test in `cloud/modbus/tests/` (RFC 0002 increment 2, keywords in §4).
 
 > **Update (2026-07): closed** — but in the c8y shim layer, not a flow: the tedge flows JS

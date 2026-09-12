@@ -1,5 +1,5 @@
 *** Settings ***
-Documentation       End-to-end tests for the Rust tedge-dot CAN bus connector against a virtual
+Documentation       End-to-end tests for the tedge-dot CAN bus connector against a virtual
 ...                 CAN interface (vcan0). The connector subscribes to CAN frames sent by the
 ...                 Python simulator and publishes samples to a local MQTT broker; these tests
 ...                 assert on that output. No cloud (Cumulocity) is involved.

@@ -1,11 +1,39 @@
-# Build / package recipes for the Rust tedge-dot.
+# Build / package recipes for tedge-dot.
+#
+# Both implementations live under impl/: the Rust workspace in impl/rust/ and the C one in
+# impl/c/. Recipes always run from the repository root (where the shared connectors/,
+# cloud/, flows/, demo/ and packaging/ trees live), so cargo is pointed at the workspace
+# with --manifest-path rather than by changing directory.
 
 set dotenv-load := true
 
 # Default cross-compilation target and matching package architecture.
 TARGET := "aarch64-unknown-linux-musl"
 PKG_ARCH := "arm64"
-VERSION := `awk -F '"' '/^version = /{print $2; exit}' Cargo.toml`
+VERSION := `awk -F '"' '/^version = /{print $2; exit}' impl/rust/Cargo.toml`
+
+# Points cargo at the Rust workspace without leaving the repository root.
+MANIFEST := "--manifest-path impl/rust/Cargo.toml"
+
+# --- implementation capabilities ------------------------------------------------------------
+#
+# The Rust and C implementations run the SAME system tests, which is how parity is proven.
+# Where one of them genuinely cannot support a feature, the test that covers it is tagged
+# `requires:<capability>` and is SKIPPED for that implementation -- reported as a skip, with a
+# reason, rather than quietly dropped or (worse) passing for the wrong reason.
+#
+# Every capability name a `requires:<capability>` tag may use. Declaring the vocabulary in one
+# place is what turns a mistyped tag into an error instead of a test that quietly runs against
+# a build that cannot pass it (see `just check-capability-tags`).
+KNOWN_CAPABILITIES := "subscribe opcua-security canbus-fd profibus-serial"
+
+# This list is the single source of truth for what the C build still lacks. Keep it in sync
+# with the parity table in impl/c/README.md. Adding a capability here is a deliberate act:
+# prefer implementing the feature.
+#
+# NOTE: a capability listed here only becomes ENFORCED once a test is tagged with it;
+# `just check-capability-tags` reports the ones that are still inert.
+C_MISSING_CAPABILITIES := "opcua-security canbus-fd profibus-serial"
 
 # Create/refresh the single Python virtualenv used by every system test (and by the editor,
 # see .vscode/settings.json).
@@ -35,44 +63,48 @@ venv:
 
 # Run the Rust unit + integration tests
 test *args="":
-    cargo test --workspace {{args}}
+    cargo test {{MANIFEST}} --workspace {{args}}
 
 # Lint
 lint:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy {{MANIFEST}} --workspace --all-targets -- -D warnings
 
 # Run the SDK property-based tests only (proptest; part of `just test` too).
 test-properties:
-    cargo test -p tedge-dot-sdk --test properties
+    cargo test {{MANIFEST}} -p tedge-dot-sdk --test properties
 
 # Run the OT connector conformance suite (layers 1-3; built-in broker + simulator, no
 # hardware). Usage: just conformance modbus [extra ot-conformance flags]
 conformance protocol="modbus" *args="":
-    cargo run -p ot-conformance -- check --spec connectors/{{protocol}}/conformance.toml {{args}}
+    cargo run {{MANIFEST}} -p ot-conformance -- check --spec connectors/{{protocol}}/conformance.toml {{args}}
 
-# The same conformance suite against the C build (poc-c/), launched as an external connector
+# The same conformance suite against the C build (impl/c/), launched as an external connector
 # through the `[harness] command` of connectors/<proto>/conformance-c.toml. Build the C binary
-# first: cmake -S poc-c -B poc-c/build && cmake --build poc-c/build
+# first: cmake -S impl/c -B impl/c/build && cmake --build impl/c/build
 # Usage: just conformance-c modbus
 conformance-c protocol="modbus" *args="":
-    cargo run -p ot-conformance -- check --spec connectors/{{protocol}}/conformance-c.toml {{args}}
+    cargo run {{MANIFEST}} -p ot-conformance -- check --spec connectors/{{protocol}}/conformance-c.toml {{args}}
 
 # Compile-check the Linux-only code paths (SocketCAN connectors are cfg-gated and silently
 # skipped by a macOS `cargo build`). profibus is excluded: its serial dependency has a native
 # build script that needs Linux headers — it is covered by the Docker e2e build instead.
 check-linux target=TARGET:
-    cargo check -p connector-canbus -p connector-canopen --target {{target}}
+    cargo check {{MANIFEST}} -p connector-canbus -p connector-canopen --target {{target}}
 
 # Fuzz one SDK target (decode_primitive, config_toml, transform, sample_envelope).
 # Requires: rustup nightly + `cargo install cargo-fuzz`.
 # Usage: just fuzz decode_primitive 60
 fuzz target="decode_primitive" seconds="60":
-    cd crates/sdk && cargo +nightly fuzz run {{target}} -- -max_total_time={{seconds}}
+    cd impl/rust/crates/sdk && cargo +nightly fuzz run {{target}} -- -max_total_time={{seconds}}
 
 # Fuzz every SDK target briefly (CI smoke; ~2 min total).
 fuzz-all seconds="30":
-    cd crates/sdk && for t in decode_primitive config_toml transform sample_envelope; do \
+    cd impl/rust/crates/sdk && for t in decode_primitive config_toml transform sample_envelope; do \
         cargo +nightly fuzz run $t -- -max_total_time={{seconds}} || exit 1; done
+
+# Cross-check the `requires:<capability>` test tags against the declared capability lists.
+check-capability-tags:
+    ./connectors/_shared/check-capability-tags.sh
 
 # Validate the thin-edge flows offline with `tedge flows test` (no broker/device/cloud).
 test-flows:
@@ -110,6 +142,9 @@ sim proto:
     #!/usr/bin/env bash
     set -euo pipefail
     export $(just _sim-port {{proto}})
+    # Same retried pre-pull the e2e suites use: a bare `compose up` here fails the whole CI job
+    # on `toomanyrequests: Rate exceeded`, which the shared runner egress makes routine.
+    just _pull-stack-images connectors/{{proto}}/docker-compose.yaml
     docker compose -p tedge-dot-sim-{{proto}} -f connectors/{{proto}}/docker-compose.yaml up -d --build --wait simulator
     echo "{{proto}} simulator ready — see demo/config/{{proto}}.toml for usage"
 
@@ -137,27 +172,53 @@ _sim-port proto:
 test-e2e proto *args="":
     just _e2e {{proto}} rust "{{args}}"
 
-# Same suite, same stack, but the connector is the C implementation (poc-c/): the Rust and
+# Same suite, same stack, but the connector is the C implementation (impl/c/): the Rust and
 # C connectors are maintained to the same contract, so they get the same e2e coverage.
 # Usage: just test-e2e-c modbus
 test-e2e-c proto *args="":
     just _e2e {{proto}} c "{{args}}"
+
+# Capabilities the named implementation does NOT provide, one per line, so the suite runners
+# can turn them into `robot --skip requires:<capability>` arguments. An unknown implementation
+# is an error rather than an empty list: a typo must not silently run every test.
+_missing-capabilities impl:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{impl}}" in
+        rust) : ;;
+        c)    for cap in {{C_MISSING_CAPABILITIES}}; do echo "$cap"; done ;;
+        *)    echo "unknown implementation '{{impl}}' (expected rust or c)" >&2; exit 1 ;;
+    esac
 
 # Shared body of test-e2e / test-e2e-c. `impl` is "rust" (the stack's own Dockerfile.connector)
 # or "c" (connectors/_shared/Dockerfile.connector-c, selected via CONNECTOR_DOCKERFILE).
 _e2e proto impl args:
     #!/usr/bin/env bash
     set -euo pipefail
-    outdir=connectors/{{proto}}/output
+    case "{{impl}}" in
+        rust) outdir=connectors/{{proto}}/output ;;
+        c)    outdir=connectors/{{proto}}/output-c
+              export CONNECTOR_DOCKERFILE=connectors/_shared/Dockerfile.connector-c ;;
+        # Without this the stack would fall through to the Rust Dockerfile and report a
+        # fully green run as coverage of the OTHER implementation.
+        *)    echo "unknown implementation '{{impl}}' (expected rust or c)" >&2; exit 1 ;;
+    esac
     export IMPL={{impl}}
-    if [ "{{impl}}" = "c" ]; then
-        outdir=connectors/{{proto}}/output-c
-        export CONNECTOR_DOCKERFILE=connectors/_shared/Dockerfile.connector-c
-    fi
+    # Tests covering a capability this implementation lacks are skipped, not dropped: they
+    # show up in the report as skips so the parity gap stays visible.
+    #
+    # Assign first, THEN loop: a `while read < <(cmd)` swallows cmd's exit status entirely --
+    # neither `set -e` nor `pipefail` sees it -- so a failing lookup would silently produce an
+    # empty skip list instead of stopping the run.
+    caps=$(just _missing-capabilities {{impl}})
+    skips=()
+    while read -r cap; do
+        [ -n "$cap" ] && skips+=(--skip "requires:$cap")
+    done <<< "$caps"
     just venv
     just _pull-stack-images connectors/{{proto}}/docker-compose.yaml
     ./.venv/bin/python -m robot \
-        --outputdir "$outdir" --variable IMPL:{{impl}} {{args}} \
+        --outputdir "$outdir" --variable IMPL:{{impl}} "${skips[@]+"${skips[@]}"}" {{args}} \
         connectors/{{proto}}/tests/
 
 # Pull the stack's registry images once, with backoff, before any suite starts.
@@ -199,6 +260,10 @@ _pull-stack-images compose_file:
 e2e-up proto impl="rust":
     #!/usr/bin/env bash
     set -euo pipefail
+    # Same guard as the suites: an unrecognised impl would otherwise export IMPL=<typo>,
+    # leave CONNECTOR_DOCKERFILE unset, and quietly bring up the RUST connector under a
+    # tedge-dot-<typo>-<proto>-connector image tag.
+    just _missing-capabilities {{impl}} >/dev/null
     export IMPL={{impl}} BROKER_PORT=1884
     export $(just _sim-port {{proto}})
     [ "{{impl}}" = "c" ] && export CONNECTOR_DOCKERFILE=connectors/_shared/Dockerfile.connector-c || true
@@ -212,7 +277,9 @@ e2e-down proto impl="rust":
     export IMPL={{impl}}
     docker compose -p tedge-dot-{{proto}}-manual -f connectors/{{proto}}/docker-compose.yaml down -v
 
-# Cross-compile + build all packages
+# The C implementation is packaged separately, by `just c-cross-all` + `just c-package`
+# (a different toolchain entirely); release.yaml runs both and publishes one release.
+# Cross-compile + package the RUST implementation (the `tedge-dot-rs` package).
 build:
     goreleaser release --snapshot --clean
 
@@ -235,7 +302,7 @@ shell proto *args='bash':
 test-cloud proto *args="":
     just _cloud {{proto}} rust "{{args}}"
 
-# The same cloud suites against the C implementation (poc-c/), which the image compiles itself —
+# The same cloud suites against the C implementation (impl/c/), which the image compiles itself —
 # no `just build` needed, since dist/ is not read on this path.
 # Usage: just test-cloud-c modbus
 test-cloud-c proto *args="":
@@ -246,12 +313,22 @@ test-cloud-c proto *args="":
 _cloud proto impl args:
     #!/usr/bin/env bash
     set -euo pipefail
-    outdir=cloud/{{proto}}/output
+    case "{{impl}}" in
+        rust) outdir=cloud/{{proto}}/output ;;
+        c)    outdir=cloud/{{proto}}/output-c ;;
+        *)    echo "unknown implementation '{{impl}}' (expected rust or c)" >&2; exit 1 ;;
+    esac
     export IMPL={{impl}}
-    if [ "{{impl}}" != "rust" ]; then outdir=cloud/{{proto}}/output-{{impl}}; fi
+    # Same capability skipping as the connector suites, and the same reason for assigning
+    # before looping (see _e2e).
+    caps=$(just _missing-capabilities {{impl}})
+    skips=()
+    while read -r cap; do
+        [ -n "$cap" ] && skips+=(--skip "requires:$cap")
+    done <<< "$caps"
     just venv
     ./.venv/bin/python -m robot \
-        --outputdir "$outdir" --variable IMPL:{{impl}} {{args}} \
+        --outputdir "$outdir" --variable IMPL:{{impl}} "${skips[@]+"${skips[@]}"}" {{args}} \
         cloud/{{proto}}/tests/
 
 # Bring a cloud stack up manually for inspection (fixed project name, DEVICE_ID from the env),
@@ -285,40 +362,40 @@ cleanup PATTERN="TST_*" $CI="true":
     c8y users list -n --tenant "$tenant" --filter "userName like device_{{PATTERN}}" --pageSize 2000 \
         | c8y users delete --tenant "$tenant" --silentStatusCodes 404 || true
 
-# --- C proof of concept (poc-c/) ---------------------------------------------
+# --- C implementation (impl/c/) -----------------------------------------------
 #
 # The C build is cross-compiled with zig inside a Debian multiarch container
-# (poc-c/cross/), so one host builds every architecture and the binaries carry
+# (impl/c/cross/), so one host builds every architecture and the binaries carry
 # a glibc floor we choose (2.17 by default) rather than the build host's.
 
-# Build the C PoC natively and run its unit tests: the golden decode vectors shared with
+# Build the C implementation natively and run its unit tests: the golden decode vectors shared with
 # the Rust SDK, plus the device-parameter/`describe` checks.
 # Usage: just c-test [extra ctest flags]
 c-test *args="":
-    cmake -B poc-c/build -S poc-c
-    cmake --build poc-c/build
-    ctest --test-dir poc-c/build --output-on-failure {{args}}
+    cmake -B impl/c/build -S impl/c
+    cmake --build impl/c/build
+    ctest --test-dir impl/c/build --output-on-failure {{args}}
 
 # Check that `tedge-dot describe` renders identical Cumulocity DTM definitions in the Rust
 # and C builds. With no argument every connector config in the repo is compared.
 # Usage: just c-describe-parity [config.toml ...]
 c-describe-parity *configs="":
-    ./poc-c/ci/describe-parity.sh {{configs}}
+    ./impl/c/ci/describe-parity.sh {{configs}}
 
-# Debian architectures the C PoC is built and packaged for.
+# Debian architectures the C implementation is built and packaged for.
 C_ARCHS := "amd64 arm64 armhf"
 C_GLIBC_MIN := "2.17"
 
 # Build the zig cross-compilation image.
 c-cross-image:
-    docker build -t tedge-dot-cross poc-c/cross
+    docker build -t tedge-dot-cross impl/c/cross
 
-# Cross-build the C PoC for one architecture into poc-c/dist/<arch>/.
+# Cross-build the C implementation for one architecture into impl/c/dist/<arch>/.
 # Usage: just c-cross arm64 [extra cmake args]
 c-cross arch="arm64" *args="": c-cross-image
-    mkdir -p "poc-c/dist/{{arch}}"
+    mkdir -p "impl/c/dist/{{arch}}"
     docker run --rm \
-        -v "$PWD:/src:ro" -v "$PWD/poc-c/dist/{{arch}}:/out" \
+        -v "$PWD:/src:ro" -v "$PWD/impl/c/dist/{{arch}}:/out" \
         -e ARCH={{arch}} -e GLIBC_MIN={{C_GLIBC_MIN}} \
         tedge-dot-cross {{args}}
 
@@ -334,20 +411,20 @@ c-cross-all: c-cross-image
 #   docker run --privileged --rm tonistiigi/binfmt --install all
 c-verify arch="arm64":
     docker run --rm --platform linux/{{ if arch == "armhf" { "arm/v7" } else { arch } }} \
-        -v "$PWD/poc-c/dist/{{arch}}:/out" \
+        -v "$PWD/impl/c/dist/{{arch}}:/out" \
         -v "$PWD:/src:ro" \
-        -v "$PWD/poc-c/cross/verify.sh:/verify.sh:ro" \
+        -v "$PWD/impl/c/cross/verify.sh:/verify.sh:ro" \
         debian:bullseye-slim /verify.sh
 
-# Package one cross-built architecture as deb/rpm/apk into poc-c/dist/packages/.
+# Package one cross-built architecture as deb/rpm/apk into impl/c/dist/packages/.
 # Usage: just c-package arm64 0.1.0
 c-package arch="arm64" version="0.0.0-dev":
     #!/usr/bin/env bash
     set -euo pipefail
     # nfpm expands env vars in scalar fields but not in contents[].src, so stage
     # the architecture's binary at the fixed path nfpm.yaml points to.
-    mkdir -p poc-c/dist/staged poc-c/dist/packages
-    cp "poc-c/dist/{{arch}}/tedge-dot" poc-c/dist/staged/tedge-dot
+    mkdir -p impl/c/dist/staged impl/c/dist/packages
+    cp "impl/c/dist/{{arch}}/tedge-dot" impl/c/dist/staged/tedge-dot
     case "{{arch}}" in
         armhf) nfpm_arch=arm7 ;;
         *)     nfpm_arch="{{arch}}" ;;
@@ -356,6 +433,6 @@ c-package arch="arm64" version="0.0.0-dev":
         docker run --rm -v "$PWD:/work" -w /work \
             -e ARCH="$nfpm_arch" -e VERSION="{{version}}" \
             ghcr.io/goreleaser/nfpm:latest \
-            pkg -f poc-c/packaging/nfpm.yaml -p "$format" -t poc-c/dist/packages/
+            pkg -f impl/c/packaging/nfpm.yaml -p "$format" -t impl/c/dist/packages/
     done
-    ls -l poc-c/dist/packages
+    ls -l impl/c/dist/packages

@@ -80,7 +80,7 @@ does, and this RFC adds `write-batch` there. To **thin-edge/cloud commands**
 stays ignorant of thin-edge command types and cloud fragments; the bridge is flows, hot-reloaded
 and protocol-neutral, exactly like measurements and the existing `ot_write` bridge. Nor does
 the runtime publish the twin itself: that would be the driver's first thin-edge-model output
-and every runtime (Rust SDK, the C proof of concept) would have to replicate the set logic.
+and every runtime (the Rust SDK, the C implementation) would have to replicate the set logic.
 What *does* belong in the runtime is what every requester would otherwise re-implement:
 writing N points as one ordered request with one result (`write-batch`), and echoing the
 point's `access` in samples so a flow can recognise parameters without the TOML file.
@@ -175,9 +175,9 @@ MQTT, and it has no notion of point state; on child devices it cannot run at all
 
 | Layer | What | Where |
 | --- | --- | --- |
-| SDK | parameter/set derivation from the config + DTM rendering | `crates/sdk/src/descriptor.rs` |
-| SDK runtime | `access` in samples, `write-batch` | `crates/sdk/src/runtime.rs` |
-| CLI | `tedge-dot describe [--set] [--device] [--compact]` | `src/main.rs`, `poc-c/src/main.c` |
+| SDK | parameter/set derivation from the config + DTM rendering | `impl/rust/crates/sdk/src/descriptor.rs` |
+| SDK runtime | `access` in samples, `write-batch` | `impl/rust/crates/sdk/src/runtime.rs` |
+| CLI | `tedge-dot describe [--set] [--device] [--compact]` | `impl/rust/src/main.rs`, `impl/c/src/main.c` |
 | Flows | `ot-parameter-state` (new); `ot-command-forward` reshapes `parameter_update`, `ot-command-result` honours `origin.command`; `ot-registration` advertises `parameter_update` | `flows/` |
 | c8y glue | none — the tedge-parameter-plugin's template (installed by the cloud e2e image) | |
 | Tests | offline flow checks incl. the chain through shared mapper state (`just test-flows`); e2e: `access` in samples, batch semantics, and the flows-driven parameter round-trip on a cloud-free flows runner (`just test-e2e modbus|opcua`); cloud: DTM registration → fragment → operation → measurement (`cloud/modbus/tests/parameters_c8y.robot`) | |
@@ -185,10 +185,10 @@ MQTT, and it has no notion of point state; on child devices it cannot run at all
 A simplification pass removed an earlier retained point-descriptor topic and two dedicated
 parameter flows in favour of the `access` sample field and the existing command flows.
 
-The C proof of concept ([poc-c/](../../poc-c/)) implements the same runtime pieces
+The C implementation ([impl/c/](../../impl/c/)) implements the same runtime pieces
 (`access` in samples, `write-batch` with the `executing` transition, and the management verbs
 with persist + live reload) and the same parameter derivation and DTM rendering
-(`poc-c/sdk/src/descriptor.c`, `tedge-dot describe`), so the flows, the Cumulocity glue and the
+(`impl/c/sdk/src/descriptor.c`, `tedge-dot describe`), so the flows, the Cumulocity glue and the
 tenant admin's registration step work unchanged with either binary. The C build runs the same
 Robot e2e suites (`just test-e2e-c`), the same cloud suites (`just test-cloud-c`, which builds
 the C connector into the thin-edge demo image) and the same conformance suite

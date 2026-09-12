@@ -2,12 +2,35 @@
 
 [![CI](https://github.com/thin-edge/tedge-dot/actions/workflows/ci.yaml/badge.svg)](https://github.com/thin-edge/tedge-dot/actions/workflows/ci.yaml)
 
-OT protocol connectors for [thin-edge.io](https://thin-edge.io): one Rust binary
-that moves data between industrial (OT) protocols and the thin-edge.io MQTT
-broker.
+OT protocol connectors for [thin-edge.io](https://thin-edge.io): one `tedge-dot`
+binary that moves data between industrial (OT) protocols and the thin-edge.io
+MQTT broker.
 
 > **Status: alpha.** The MQTT contract, config format and packaging may still
 > change between releases.
+
+## Two implementations, one contract
+
+`tedge-dot` exists twice, as two maintained implementations of the same
+[OT Connector Contract](doc/contract/), released together as two interchangeable
+packages that both install `/usr/bin/tedge-dot`:
+
+| Package | Source | Pick it when |
+|---|---|---|
+| **`tedge-dot-rs`** | [impl/rust/](impl/rust/) | Default. Richest protocol support, one static binary, no shared-library dependencies. |
+| **`tedge-dot-c`** | [impl/c/](impl/c/) | Small or old devices: ~25x smaller, a glibc 2.17 floor (Debian 8 / RHEL 7 era), and it ships the PROFIBUS-DP connector the Rust package omits. |
+
+The two are mutually exclusive — a host installs one or the other — and a
+config, a flow or a cloud integration built against one works unchanged against
+the other. They run the **same** e2e, cloud and conformance suites, share the
+same golden decode vectors, and are checked against each other for `describe`
+output; the remaining behavioural differences are listed, and enforced by test
+tags, in [impl/c/README.md](impl/c/README.md#parity-with-the-rust-implementation).
+
+Everything outside `impl/` is shared by both: the contract and docs
+([doc/](doc/)), the device-side [flows/](flows/), the test stacks and
+conformance manifests ([connectors/](connectors/), [cloud/](cloud/)), the
+[demo/](demo/) simulators and the [packaging/](packaging/) defaults.
 
 ## Design in one paragraph
 
@@ -24,17 +47,24 @@ machine-readable schemas.
 
 ## Protocols
 
-All protocol modules are compiled into the single `tedge-dot` binary behind
-cargo feature flags; each process runs one protocol (selected by
-`connector.protocol` in its config file).
+All protocol modules are compiled into the single `tedge-dot` binary (behind
+cargo features in the Rust build, CMake options in the C one); each process runs
+one protocol, selected by `connector.protocol` in its config file.
 
-| Protocol | Crate | Transport | In released packages |
+| Protocol | Transport | `tedge-dot-rs` | `tedge-dot-c` |
 |---|---|---|---|
-| Modbus (reference) | [connector-modbus](crates/connector-modbus/) | TCP + RTU | ✅ |
-| OPC UA | [connector-opcua](crates/connector-opcua/) | opc.tcp | ✅ |
-| CAN bus | [connector-canbus](crates/connector-canbus/) | Linux SocketCAN + DBC | ✅ |
-| CANopen | [connector-canopen](crates/connector-canopen/) | Linux SocketCAN (SDO) | ✅ |
-| PROFIBUS-DP | [connector-profibus](crates/connector-profibus/) | serial | ❌ build from source (`--features profibus`, Linux only) |
+| Modbus (reference) | TCP + RTU | ✅ | ✅ |
+| OPC UA | opc.tcp | ✅ | ✅ |
+| CAN bus | Linux SocketCAN + DBC | ✅ | ✅ |
+| CANopen | Linux SocketCAN (SDO) | ✅ | ✅ |
+| PROFIBUS-DP | serial (Rust) / `tcp://` (C) | ❌ build from source (`--features profibus`, Linux only) | ✅ |
+
+Rust modules: [connector-modbus](impl/rust/crates/connector-modbus/),
+[connector-opcua](impl/rust/crates/connector-opcua/),
+[connector-canbus](impl/rust/crates/connector-canbus/),
+[connector-canopen](impl/rust/crates/connector-canopen/),
+[connector-profibus](impl/rust/crates/connector-profibus/). C modules:
+[impl/c/connectors/](impl/c/connectors/).
 
 ## Install
 
@@ -70,9 +100,9 @@ poke — the CLI talks to the device directly:
 
 ```sh
 just sim modbus     # pymodbus simulator on 127.0.0.1:5020
-cargo run -- read -c demo/config/modbus.toml                    # all devices, all readable points
-cargo run -- read -c demo/config/modbus.toml -d plc1 -p 'temp_*' --poll   # keep polling (Ctrl-C stops)
-cargo run -- run  -c demo/config/modbus.toml --output stdout --duration 10s  # sample JSON lines, no broker
+cargo run --manifest-path impl/rust/Cargo.toml -- read -c demo/config/modbus.toml                    # all devices, all readable points
+cargo run --manifest-path impl/rust/Cargo.toml -- read -c demo/config/modbus.toml -d plc1 -p 'temp_*' --poll   # keep polling (Ctrl-C stops)
+cargo run --manifest-path impl/rust/Cargo.toml -- run  -c demo/config/modbus.toml --output stdout --duration 10s  # sample JSON lines, no broker
 ```
 
 See [demo/](demo/) for the local exploration guide and the full
@@ -104,10 +134,11 @@ the same config. See [RFC 0003](doc/rfc/0003-parameter-writes.md), [flows/](flow
 
 | Path | Contents |
 |---|---|
-| [crates/sdk](crates/sdk/) | `tedge-dot-sdk` — runtime, `Connector` trait, config model, decode helpers |
-| [crates/connector-*](crates/) | one crate per protocol module |
-| [crates/ot-conformance](crates/ot-conformance/) | `ot-conformance` — the connector conformance harness (schema, decode vectors, behavioural checks) |
-| [src/](src/) | the `tedge-dot` binary (run service, `read`/`write` CLI) |
+| [impl/rust/crates/sdk](impl/rust/crates/sdk/) | `tedge-dot-sdk` — runtime, `Connector` trait, config model, decode helpers |
+| [impl/rust/crates/connector-*](impl/rust/crates/) | one crate per protocol module |
+| [impl/rust/crates/ot-conformance](impl/rust/crates/ot-conformance/) | `ot-conformance` — the connector conformance harness (schema, decode vectors, behavioural checks) |
+| [impl/rust/src/](impl/rust/src/) | the Rust `tedge-dot` binary (run service, `read`/`write`/`describe` CLI) |
+| [impl/c/](impl/c/) | the C implementation: SDK, connectors, binary, cross-build and packaging |
 | [flows/](flows/) | protocol-neutral thin-edge.io flows (sample→measurement, alarms, registration, commands) |
 | [operations/](operations/) | Cumulocity operation shims (legacy `c8y_*` operations and `c8y_ParameterUpdate` → generic OT commands) |
 | [connectors/](connectors/) | per-protocol e2e test stacks: simulator, Docker compose, Robot suites |
@@ -122,18 +153,35 @@ Requires Rust (stable) and [just](https://github.com/casey/just);
 Docker and Python for the e2e suites.
 
 ```sh
-just venv               # one virtualenv for every system test (also used by the editor)
-just test               # unit + integration + property tests
-just lint               # clippy -D warnings
-just conformance modbus # full conformance suite (no hardware/broker needed)
-just test-flows         # offline flow tests (tedge flows test)
-just test-e2e modbus    # Dockerised MQTT e2e suite for one protocol (the suite starts its own stack)
-just test-e2e-c modbus  # the same suite against the C connector (poc-c/)
-just test-cloud modbus  # live Cumulocity suite (needs C8Y_* credentials; device created per run)
-just test-cloud-c modbus # the same cloud suite against the C connector
-just fuzz config_toml   # fuzz one SDK target (nightly + cargo-fuzz)
-just build              # cross-compile + package everything (goreleaser)
+just venv                 # one virtualenv for every system test (also used by the editor)
+just test                 # Rust unit + integration + property tests
+just lint                 # clippy -D warnings
+just conformance modbus   # full conformance suite (no hardware/broker needed)
+just test-flows           # offline flow tests (tedge flows test)
+just test-e2e modbus      # Dockerised MQTT e2e suite for one protocol (the suite starts its own stack)
+just test-cloud modbus    # live Cumulocity suite (needs C8Y_* credentials; device created per run)
+just fuzz config_toml     # fuzz one SDK target (nightly + cargo-fuzz)
+just build                # cross-compile + package the Rust build (goreleaser)
 ```
+
+The same system suites run against the C implementation — that is how parity is
+proven — and it has its own build and packaging recipes:
+
+```sh
+just c-test               # build impl/c/ and run its unit tests (shared golden vectors)
+just c-describe-parity    # `tedge-dot describe` must agree between the two binaries
+just conformance-c modbus # the contract conformance suite against the C build
+just test-e2e-c modbus    # the SAME e2e suite, C connector
+just test-cloud-c modbus  # the SAME cloud suite, C connector
+just c-cross arm64        # cross-compile with zig against the glibc 2.17 floor
+just c-package arm64 0.1.0 # deb/rpm/apk for one architecture (nfpm)
+```
+
+A test covering a capability one implementation lacks is tagged
+`requires:<capability>` and reported as skipped for that implementation rather
+than being duplicated or silently passing; see
+[connectors/_shared/stack.resource](connectors/_shared/stack.resource) and
+`C_MISSING_CAPABILITIES` in the [justfile](justfile).
 
 The testing strategy — what each layer catches and what a new connector must
 ship with — is documented in [doc/testing.md](doc/testing.md). Adding a new
@@ -143,9 +191,12 @@ protocol is documented in [connectors/README.md](connectors/README.md) and
 ## Releasing
 
 Push a tag (e.g. `v0.1.0`) and the [release workflow](.github/workflows/release.yaml)
-cross-compiles all targets with goreleaser, creates the GitHub release and
-publishes the Linux packages. Run the workflow manually for a snapshot build
-without releasing.
+builds **both** implementations — `tedge-dot-rs` with goreleaser/cargo-zigbuild,
+`tedge-dot-c` with the zig + Debian multiarch image in
+[impl/c/cross/](impl/c/cross/) and nfpm — then assembles one GitHub release, one
+`SHA256SUMS` over every asset, and one Cloudsmith push. Run the workflow
+manually for a snapshot build; it can also refresh the rolling `snapshot`
+pre-release.
 
 ## License
 

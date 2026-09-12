@@ -1,5 +1,5 @@
 *** Settings ***
-Documentation       End-to-end tests for the Rust tedge-dot (opcua module) against a real
+Documentation       End-to-end tests for tedge-dot (opcua module) against a real
 ...                 OPC-UA server (python-asyncua). The connector reads the simulator's nodes and
 ...                 publishes samples + status to a local MQTT broker; these tests assert on that
 ...                 output. No cloud (Cumulocity) is involved. This proves the connector contract
@@ -34,6 +34,12 @@ ${FLOWS_TIMEOUT}        120
 # Generous timeout: the connector waits for the simulator/broker before it starts.
 ${READY_TIMEOUT}        90
 ${SAMPLE_TIMEOUT}       15
+# Reconnect uses a 1s->60s exponential backoff, and re-subscribing needs a fresh session.
+${RECOVERY_TIMEOUT}     90
+# How long a frozen server must stay frozen for the connector to conclude the subscription is
+# no longer delivering: operation_timeout (5s, see connector.toml) plus the subscription's
+# publishing_interval x max_keep_alive_count (1s x 20), with margin.
+${SUBSCRIPTION_INACTIVITY_WAIT}     35s
 
 
 *** Test Cases ***
@@ -44,6 +50,15 @@ Connector Publishes Capability Descriptor
     Should Be Equal    ${protocol}    opcua
     ${verbs}=    Get Json Field    ${payload}    command_verbs
     List Should Contain Value    ${verbs}    write
+
+Capability Descriptor Advertises Push Delivery
+    [Documentation]    The descriptor's `subscribe` flag is what a mapper reads to know samples
+    ...                can arrive without being asked for. It must agree with what the connector
+    ...                actually does, which "Subscribed Node Pushes Value Changes" proves.
+    [Tags]    requires:subscribe
+    ${payload}=    Wait For Retained    ${CAPS_TOPIC}    timeout=${READY_TIMEOUT}
+    ${subscribe}=    Get Json Field    ${payload}    subscribe
+    Should Be Equal    ${subscribe}    ${True}
 
 Service Health Is Up
     [Documentation]    The connector publishes a retained service health status of "up".
@@ -113,6 +128,12 @@ Subscribed Node Pushes Value Changes
     [Documentation]    The ticks point is delivered by an OPC-UA subscription (monitored item),
     ...                not polling: the simulator increments it every second and each change
     ...                arrives as a pushed sample with a strictly increasing value.
+    ...
+    ...                This checks that push delivers the changes correctly (good quality,
+    ...                strictly increasing). It does NOT by itself prove delivery is push --
+    ...                polling would produce the same series -- which is what
+    ...                "Subscribed Static Node Falls Silent After Its First Value" is for.
+    [Tags]    requires:subscribe
     ${first}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${SAMPLE_TIMEOUT}
     Sample Should Be Good    ${first}
     ${v1}=    Get Json Field    ${first}    value
@@ -120,9 +141,69 @@ Subscribed Node Pushes Value Changes
     ${v2}=    Get Json Field    ${second}    value
     Should Be True    ${v2} > ${v1}
 
+Subscribed Static Node Falls Silent After Its First Value
+    [Documentation]    The decisive push test. temperature_pushed is subscribed to a node whose
+    ...                value never changes, so a subscription delivers its initial value and
+    ...                then reports nothing; polling would republish it every poll_interval
+    ...                (1s here) for as long as the connector runs.
+    ...
+    ...                A rate check cannot make this distinction: the runtime passes each
+    ...                point's resolved poll interval to the connector as the monitored item's
+    ...                sampling interval, so push and polling run at the same rate by design.
+    ...                Silence is the only behaviour polling cannot imitate.
+    [Tags]    requires:subscribe
+    # The initial notification arrives when the connector subscribes, i.e. at stack startup —
+    # so look it up in the recorded traffic rather than waiting for a FRESH one, which is
+    # precisely what will never come again.
+    ${payload}=    Wait For Message Containing
+    ...    ${SAMPLE_PREFIX}/temperature_pushed    "quality"    timeout=${SAMPLE_TIMEOUT}
+    Sample Should Be Good    ${payload}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be True    abs(${value} - 21.5) < 0.05
+    # ...and then nothing more, because the node never changes.
+    No New Messages On Topic    ${SAMPLE_PREFIX}/temperature_pushed    timeout=5
+
+Push Delivery Recovers After The Server Restarts
+    [Documentation]    A subscribed point is OFF the polling schedule, so if push stops the
+    ...                device goes silent and nothing else notices. When the server restarts,
+    ...                the connector must drop the link, reconnect and re-arm the subscription
+    ...                — otherwise samples never come back.
+    [Tags]    requires:subscribe
+    Wait For Message Containing    ${SAMPLE_PREFIX}/ticks    "quality"    timeout=${SAMPLE_TIMEOUT}
+    Restart Stack Service    simulator
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${RECOVERY_TIMEOUT}
+    Sample Should Be Good    ${payload}
+
+Push Delivery Recovers From A Silent Server
+    [Documentation]    Freezing the server leaves the TCP connection ESTABLISHED and simply
+    ...                stops every answer — the contract's silent-peer case (§8.1), but on the
+    ...                PUSH path, where the conformance suite's B5 checks do not reach: every
+    ...                point in the conformance config is `subscribe = false`. A subscribed
+    ...                point is off the polling schedule, so if push stalls there is nothing
+    ...                else to notice it.
+    ...
+    ...                Measured: this trips the client's request timeout
+    ...                (connector.operation_timeout), which the connector reports as a dead
+    ...                transport. It does NOT cover a subscription that dies while the session
+    ...                stays healthy — see the note in impl/c/README.md; that path is guarded
+    ...                by explicit checks but cannot be provoked with this simulator.
+    [Tags]    requires:subscribe
+    Wait For Message Containing    ${SAMPLE_PREFIX}/ticks    "quality"    timeout=${SAMPLE_TIMEOUT}
+    Freeze Stack Service    simulator
+    # Long enough for the keep-alive window to lapse: the connector's operation_timeout plus
+    # publishing_interval x max_keep_alive_count (see connector.toml).
+    Sleep    ${SUBSCRIPTION_INACTIVITY_WAIT}
+    Thaw Stack Service    simulator
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${RECOVERY_TIMEOUT}
+    Sample Should Be Good    ${payload}
+    [Teardown]    Run Keyword And Ignore Error    Thaw Stack Service    simulator
+
 Pushed Sample Echoes Point Meta
     [Documentation]    The point's free-form meta table (connector config) is echoed verbatim
-    ...                in the sample envelope, so flows can apply per-signal behaviour.
+    ...                in the sample envelope, so flows can apply per-signal behaviour. This
+    ...                covers the PUSH envelope specifically; the polled one is covered by
+    ...                "Samples Carry The Point Access".
+    [Tags]    requires:subscribe
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${SAMPLE_TIMEOUT}
     ${on_change}=    Get Json Field    ${payload}    meta.on_change
     Should Be Equal    ${on_change}    ${True}

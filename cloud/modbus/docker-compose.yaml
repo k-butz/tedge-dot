@@ -14,7 +14,7 @@ services:
   tedge:
     # Stable image name per implementation so every (randomly named) project reuses the built
     # image. IMPL selects the connector under test: the Rust .deb from dist/ by default, the C
-    # build (poc-c/) via `just test-cloud-c modbus` — see cloud/modbus/Dockerfile.tedge.
+    # build (impl/c/) via `just test-cloud-c modbus` — see cloud/modbus/Dockerfile.tedge.
     image: tedge-dot-${IMPL:-rust}-cloud-modbus
     build:
       context: ../..
