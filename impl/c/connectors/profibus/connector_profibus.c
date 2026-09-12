@@ -2,8 +2,8 @@
  * class-1 master). Mirrors impl/rust/crates/connector-profibus, replacing the profirust
  * stack with a hand-rolled FDL/DP subset that speaks to DP-V0 slaves over a
  * serial-over-TCP byte stream ("tcp://host:port" — RS-485 device servers or
- * the containerised slave simulator). No FDL token timing is implemented; the
- * This module drives one master, one bus, request/response only.
+ * the containerised slave simulator). No FDL token timing is implemented: this
+ * module drives one master, one bus, request/response only.
  *
  * Init sequence per peripheral: Slave_Diag (SAP 60) -> Set_Prm (SAP 61) ->
  * Chk_Cfg (SAP 62) -> Slave_Diag -> cyclic Data_Exchange (default SAP).

@@ -41,14 +41,12 @@ typedef struct tdot_point {
     bool has_transform;
     char *meta_json; /* free-form [device.point.meta], serialized to JSON */
     bool subscribe;  /* default true: deliver by push when the module supports it */
-    double poll_interval_s; /* resolved: point ?? device ?? connector */
-    /* The point's OWN poll_interval, or -1 when it did not set one. Mirrors the
-     * Rust PointRef::interval (an Option): a subscribe-capable module uses it
-     * as the per-point sampling-interval hint -- an OPC UA monitored item's
-     * samplingInterval, say -- and falls back to its own default when unset.
-     * Distinct from poll_interval_s, which is always resolved through the
-     * device and connector defaults and drives the polling schedule. */
-    double own_poll_interval_s;
+    /* Resolved: point ?? device ?? connector. Drives the polling schedule AND,
+     * for a subscribe-capable module, the per-point sampling-interval hint (an
+     * OPC UA monitored item's samplingInterval). The Rust runtime resolves
+     * PointRef::interval the same way, so the same config samples at the same
+     * rate in both builds. */
+    double poll_interval_s;
     toml_table_t *address;  /* protocol-specific, borrowed from the doc */
 
     /* Filled by the connector during configure(): */

@@ -76,6 +76,7 @@ Setup OT Stack
     ${impl}=    Get Environment Variable    IMPL    rust
     ${container}=    DeviceLibrary.Get Container Name
     Log    Connector under test: ${impl} implementation (container ${container})
+    Connector Implementation Should Be    ${impl}
 
     IF    "${broker_port}" == "${EMPTY}"
         ${host}    ${port}=    DeviceLibrary.Get Service Port
@@ -96,6 +97,31 @@ Teardown OT Stack
     ...    project (containers, network, volumes) itself when the suite ends.
     Run Keyword And Ignore Error    Collect Stack Logs
     Run Keyword And Ignore Error    Disconnect Broker
+
+Connector Implementation Should Be
+    [Documentation]    Assert the container really runs the implementation under test.
+    ...
+    ...    Without this the fallback is silent: the compose file defaults IMPL to `rust` and
+    ...    CONNECTOR_DOCKERFILE to the stack's own Rust Dockerfile, so any path where the
+    ...    variables do not reach compose (an editor profile, a stale shell, a wrapper that
+    ...    forgets to export) builds the Rust connector and reports a green run as coverage of
+    ...    the other implementation. The cloud harness has had this guard for the same reason
+    ...    (cloud/_shared/device.resource); the connector suites had only a Log line.
+    ...
+    ...    The two are told apart by linkage rather than by version — both deliberately report
+    ...    the same capability `version`, because they implement the same contract revision.
+    ...    The C build dynamically links libcjson (see impl/c/README.md); the Rust build is
+    ...    self-contained.
+    [Arguments]    ${impl}
+    ${links_cjson}=    DeviceLibrary.Execute Command
+    ...    cmd=ldd /usr/bin/tedge-dot 2>/dev/null | grep -c libcjson || true    strip=${True}
+    IF    "${impl}" == "c"
+        Should Not Be Equal    ${links_cjson}    0
+        ...    msg=IMPL=c but /usr/bin/tedge-dot does not link libcjson - this is the Rust build
+    ELSE
+        Should Be Equal    ${links_cjson}    0
+        ...    msg=IMPL=${impl} but /usr/bin/tedge-dot links libcjson - this is the C build
+    END
 
 Run Compose
     [Documentation]    Run a docker compose subcommand against THIS suite's stack (the project

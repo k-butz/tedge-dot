@@ -42,9 +42,15 @@ typedef struct {
     const char *name; /* config path, for the log line */
 } progress_t;
 
-/* Written by the signal handler AND by the main thread (to wake the watchdog), read by every
- * worker and by the watchdog thread. sig_atomic_t alone covers the signal handler but not the
- * cross-thread reads, so make it atomic outright; it is touched once per tick. */
+/* Two flags for two readers, because they have different requirements.
+ *
+ * g_stop is written by the signal handler and read by the poll loops; sig_atomic_t is exactly
+ * what a handler may touch, and each loop runs on the thread whose work it is stopping.
+ *
+ * g_stop_threads is the same signal for the WATCHDOG thread, which is a genuine cross-thread
+ * read and also has a second writer: the supervisor sets it after the workers have joined, to
+ * wake the watchdog out of its sleep so shutdown does not wait a whole check period. Both are
+ * set together by the handler, so they never disagree about whether a stop was requested. */
 static volatile sig_atomic_t g_stop = 0;
 static _Atomic int g_stop_threads = 0;
 

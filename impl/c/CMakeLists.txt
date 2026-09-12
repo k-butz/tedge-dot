@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
-# Keep VERSION in step with impl/rust/Cargo.toml: both implementations publish the same
-# `version` in their capability descriptor, and the conformance suite compares the two.
+# Both implementations publish this as the `version` of their capability descriptor, because
+# they implement the same contract revision -- the e2e suites rely on that to tell them apart
+# by LINKAGE rather than by version (connectors/_shared/stack.resource).
+#
+# Keeping it in step with impl/rust/Cargo.toml is manual: nothing checks it. The conformance
+# suite compares protocol/modes/datatypes/verbs/features/subscribe, not the version string.
 project(tedge-dot VERSION 0.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)

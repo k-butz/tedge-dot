@@ -206,11 +206,9 @@ static int parse_point(toml_table_t *pt, tdot_point_t *point,
         point->subscribe = d.u.b;
 
     point->poll_interval_s = device_interval;
-    point->own_poll_interval_s = -1.0;
     d = toml_string_in(pt, "poll_interval");
     if (d.ok) {
         point->poll_interval_s = tdot_duration_parse(d.u.s);
-        point->own_poll_interval_s = point->poll_interval_s;
         if (point->poll_interval_s < 0) {
             snprintf(err, errlen, "point %s: invalid poll_interval '%s'",
                      point->id, d.u.s);

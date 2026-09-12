@@ -32,6 +32,10 @@ env:
   C8Y_BASEURL: ${{ secrets.C8Y_BASEURL }}
   C8Y_USER: ${{ secrets.C8Y_USER }}
   C8Y_PASSWORD: ${{ secrets.C8Y_PASSWORD }}
+  # The fourth one every consumer of the harness expects (cloud/_shared/device.resource,
+  # FieldbusLibrary, ParameterLibrary, and the cleanup step below). Optional only if
+  # C8Y_USER is stored as `tenant/user`.
+  C8Y_TENANT: ${{ secrets.C8Y_TENANT }}
 
 jobs:
   cloud-e2e:

@@ -43,8 +43,16 @@ in_list() {
 fail=0
 
 # 1. Every tag a suite uses must be a known capability.
-tags=$(grep -rhoE "requires:[A-Za-z0-9_-]+" connectors cloud --include="*.robot" --include="*.resource" \
-       | sort -u | sed 's/^requires://')
+#
+# Only `[Tags]` lines count. Matching `requires:` anywhere would also pick up the convention's
+# own documentation (stack.resource explains the mechanism using `requires:subscribe` as the
+# example), which would report a capability as tagged when no test carries it -- defeating
+# exactly the check in step 3. `|| true` because grep exits 1 when nothing matches, which is a
+# legitimate state, not an error.
+tags=$(grep -rhE "^\s*\[Tags\].*requires:" connectors cloud \
+         --include="*.robot" --include="*.resource" 2>/dev/null \
+       | grep -oE "requires:[A-Za-z0-9_-]+" \
+       | sed 's/^requires://' | sort -u || true)
 for tag in $tags; do
     if ! in_list "$tag" "$known"; then
         echo "FAIL: tests are tagged 'requires:$tag', which is not in KNOWN_CAPABILITIES." >&2

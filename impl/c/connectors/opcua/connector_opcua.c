@@ -20,10 +20,6 @@ typedef struct {
     char node_id[160]; /* textual "ns=2;s=Temperature" */
 } ua_point_t;
 
-/* Default monitored-item sampling interval for a point that does not set its
- * own poll_interval, matching DEFAULT_SAMPLING_INTERVAL in the Rust module. */
-#define UA_DEFAULT_SAMPLING_MS 500.0
-
 /* Samples that arrived by subscription since the last drain.
  *
  * open62541 delivers data changes through a callback fired from inside
@@ -221,7 +217,12 @@ static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
     UA_String_clear(&cc->securityPolicyUri);
     cc->securityPolicyUri =
         UA_STRING_ALLOC("http://opcfoundation.org/UA/SecurityPolicy#None");
-    cc->timeout = (UA_UInt32)st->request_timeout_s * 1000;
+    /* The handshake gets its own bound, as in the Rust module, which wraps
+     * wait_for_connection() in connect_timeout_s: establishing a session is
+     * several round trips and a slow-but-working server should not be cut off
+     * by the per-request timeout. Restored to request_timeout_s below once the
+     * session is up, so ordinary reads keep the tighter bound. */
+    cc->timeout = (UA_UInt32)st->connect_timeout_s * 1000;
     UA_LocaleId locale = UA_STRING_ALLOC("en");
     UA_String name = UA_STRING_ALLOC(st->application_name);
     UA_String uri = UA_STRING_ALLOC(st->application_uri);
@@ -243,6 +244,10 @@ static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
         ua->client = NULL;
         return -1;
     }
+    /* Session established: from here every request is bounded by
+     * connector.operation_timeout (see configure()). open62541 reads
+     * config.timeout per request, so changing it now applies to all of them. */
+    cc->timeout = (UA_UInt32)st->request_timeout_s * 1000;
     return 0;
 }
 
@@ -522,14 +527,14 @@ static int write_point(tdot_connector_t *self, tdot_device_t *dev,
  * one. Nothing here touches MQTT.
  */
 
-/* The point's own poll_interval is the sampling hint (contract §4.2); a point
- * that does not set one gets the module default rather than inheriting the
- * device/connector polling rate, which is what the Rust module does with
- * PointRef::interval. */
+/* A point's RESOLVED poll interval (point ?? device ?? connector) is its
+ * monitored-item sampling interval, which is what the Rust runtime hands its
+ * module in PointRef::interval -- always Some, never the module's own default.
+ * Both implementations must derive it identically: the same config otherwise
+ * monitors at different rates in the two builds, and a subscription sampling
+ * more slowly silently coalesces away value changes the other one reports. */
 static double sampling_interval_ms(const tdot_point_t *pt) {
-    if (pt->own_poll_interval_s > 0)
-        return pt->own_poll_interval_s * 1000.0;
-    return UA_DEFAULT_SAMPLING_MS;
+    return pt->poll_interval_s * 1000.0;
 }
 
 static void on_data_change(UA_Client *client, UA_UInt32 sub_id,
@@ -699,6 +704,12 @@ static int subscribe_device(tdot_connector_t *self, tdot_device_t *dev,
         UA_Client_Subscriptions_deleteSingle(ua->client, ua->sub_id);
         ua->sub_id = 0;
         ua->subscribed = false;
+        /* deleteSingle fires on_subscription_deleted, which sets sub_lost. Clearing it here
+         * keeps "we tore this down deliberately" from looking like "it died on us": today the
+         * runtime never drains a device with no subscribed points, but a future change that
+         * did would see a permanent -1 and reconnect in a 1s loop against a server that simply
+         * refuses monitored items. */
+        ua->sub_lost = false;
         snprintf(err, errlen,
                  "server accepted no monitored item for %zu requested point(s)",
                  wanted);

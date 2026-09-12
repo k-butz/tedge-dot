@@ -88,14 +88,16 @@ the session. The connector therefore also watches the subscription's
 delete/status-change/inactivity callbacks and the session state, and treats any
 of them as a dead link so the ordinary reconnect-and-re-subscribe path runs.
 
-Two of the three paths are covered end to end (`Push Delivery Recovers After
-The Server Restarts` and `... From A Silent Server` in the OPC UA suite). The
-third — a subscription deleted while the session stays healthy — **cannot be
-provoked with the suite's simulator**, so it is guarded by the checks above and
-by reading open62541's source, not by a test. Freezing the server, the obvious
-candidate, trips the client's request timeout instead and is caught by the
-transport check that was already there (verified by removing the new checks: the
-test still passes).
+**None of those checks is currently proven by a test**, and it is worth being
+precise about why. The OPC UA suite does cover push *recovery* end to end
+(`Push Delivery Recovers After The Server Restarts` and `... From A Silent
+Server`), but each of those trips an older path: a restart resets the TCP
+connection, so `UA_Client_run_iterate` returns non-GOOD; a freeze trips the
+client's request timeout on the polled points first. Verified by removing the
+new checks — both tests still pass. Provoking the remaining path needs a server
+that deletes a subscription while keeping the session up, which the suite's
+simulator cannot do (tracked in TODO.md). Until then these checks rest on
+open62541's source, not on evidence.
 
 The **CAN bus** module is the one place the two still differ in delivery: the
 Rust module pushes frames as they arrive, while this one renders the push-based
@@ -165,8 +167,9 @@ Debugging: `TDOT_OPCUA_DEBUG=1` keeps open62541's client handshake log on stdout
 ## Packaging & releases
 
 Both implementations are released together by
-[`.github/workflows/release.yaml`](../../.github/workflows/release.yaml): a `v*`
-tag builds `tedge-dot-rs` (goreleaser) and `tedge-dot-c` (this tree), and one
+[`.github/workflows/release.yaml`](../../.github/workflows/release.yaml): a
+release tag (`v1.2.3` or the bare `0.0.1-alpha.3` form this repository has used
+so far) builds `tedge-dot-rs` (goreleaser) and `tedge-dot-c` (this tree), and one
 publish job assembles a single GitHub release, a single `SHA256SUMS` over every
 asset and a single Cloudsmith push. A manual run builds both and can refresh the
 rolling `snapshot` pre-release.
@@ -218,16 +221,16 @@ worker thread per file), matching the Rust single-service model.
 
 | Path | Contents | Rust counterpart |
 |---|---|---|
-| `sdk/include/tedge_dot/` | public headers: model, config, connector vtable, decode, runtime | `crates/sdk` |
-| `sdk/src/` | config loader (tomlc99), decode/encode, envelope builder (cJSON), poll-loop runtime (mosquitto), device parameters + Cumulocity DTM rendering | `crates/sdk` |
-| `connectors/modbus/` | libmodbus connector (TCP + RTU, 4 tables, typed decode, writes) | `crates/connector-modbus` |
-| `connectors/opcua/` | open62541 connector (client session, node-id points, typed reads/writes) | `crates/connector-opcua` |
-| `connectors/canbus/` | SocketCAN connector + minimal DBC parser (BO_/SG_, Intel & Motorola layouts) | `crates/connector-canbus` |
-| `connectors/canopen/` | expedited SDO client over raw SocketCAN (no CANopen library) | `crates/connector-canopen` |
-| `connectors/profibus/` | minimal DP-V0 master (Diag→Prm→Cfg→Data_Exchange, bus thread, tcp:// transport) | `crates/connector-profibus` |
+| `sdk/include/tedge_dot/` | public headers: model, config, connector vtable, decode, runtime | `impl/rust/crates/sdk` |
+| `sdk/src/` | config loader (tomlc99), decode/encode, envelope builder (cJSON), poll-loop runtime (mosquitto), device parameters + Cumulocity DTM rendering | `impl/rust/crates/sdk` |
+| `connectors/modbus/` | libmodbus connector (TCP + RTU, 4 tables, typed decode, writes) | `impl/rust/crates/connector-modbus` |
+| `connectors/opcua/` | open62541 connector (client session, node-id points, typed reads/writes) | `impl/rust/crates/connector-opcua` |
+| `connectors/canbus/` | SocketCAN connector + minimal DBC parser (BO_/SG_, Intel & Motorola layouts) | `impl/rust/crates/connector-canbus` |
+| `connectors/canopen/` | expedited SDO client over raw SocketCAN (no CANopen library) | `impl/rust/crates/connector-canopen` |
+| `connectors/profibus/` | minimal DP-V0 master (Diag→Prm→Cfg→Data_Exchange, bus thread, tcp:// transport) | `impl/rust/crates/connector-profibus` |
 | `src/main.c` | `read` / `write` / `run` / `describe` CLI | `src/main.rs` |
-| `tests/golden.c` | conformance runner for `crates/sdk/conformance/vectors.json` | `tests/golden_vectors.rs` |
-| `tests/describe.c` | device-parameter derivation + DTM rendering checks | `crates/sdk/src/descriptor.rs` tests |
+| `tests/golden.c` | conformance runner for `impl/rust/crates/sdk/conformance/vectors.json` | `tests/golden_vectors.rs` |
+| `tests/describe.c` | device-parameter derivation + DTM rendering checks | `impl/rust/crates/sdk/src/descriptor.rs` tests |
 | `ci/describe-parity.sh` | `tedge-dot describe` output compared between the Rust and C binaries | — |
 | `ci/smoke.sh` | e2e smoke: connector ⇄ simulator ⇄ broker, per protocol (used by the `c` CI job) | conformance/e2e suites |
 | `cross/` | zig + Debian-multiarch cross-compilation image, build and verify scripts | goreleaser/zig |
@@ -255,19 +258,19 @@ cmake -B build -G Ninja        # MinSizeRel by default
 cmake --build build
 
 # against the demo simulators (`just sim modbus`, `just sim opcua`):
-./build/tedge-dot read  -c ../demo/config/modbus.toml
-./build/tedge-dot read  -c ../demo/config/opcua.toml -d opc1 -p temperature --json
-./build/tedge-dot write -c ../demo/config/modbus.toml -d plc1 -p coil_rw --value true
-./build/tedge-dot run   -c ../demo/config/modbus.toml --output stdout --duration 10s
-./build/tedge-dot run   -c ../demo/config/opcua.toml   # publishes to MQTT broker
+./build/tedge-dot read  -c ../../demo/config/modbus.toml
+./build/tedge-dot read  -c ../../demo/config/opcua.toml -d opc1 -p temperature --json
+./build/tedge-dot write -c ../../demo/config/modbus.toml -d plc1 -p coil_rw --value true
+./build/tedge-dot run   -c ../../demo/config/modbus.toml --output stdout --duration 10s
+./build/tedge-dot run   -c ../../demo/config/opcua.toml   # publishes to MQTT broker
 
 # the writable points as Cumulocity DTM property definitions, for a tenant admin to
 # register once (needs no device, broker or protocol module):
-./build/tedge-dot describe -c ../demo/config/modbus.toml
-./build/tedge-dot describe -c ../demo/config/modbus.toml -d plc1 --compact
+./build/tedge-dot describe -c ../../demo/config/modbus.toml
+./build/tedge-dot describe -c ../../demo/config/modbus.toml -d plc1 --compact
 
 # tests
-./build/tedge-dot-golden ../crates/sdk/conformance/vectors.json
+./build/tedge-dot-golden ../rust/crates/sdk/conformance/vectors.json
 ./build/tedge-dot-describe
 ```
 

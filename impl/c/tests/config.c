@@ -142,31 +142,72 @@ static void check_invalid_timeouts_fall_back(void) {
 }
 
 static void check_point_interval_resolution(void) {
-    /* No poll_interval on the point: the polling schedule inherits the device's
-     * 30s, but own_poll_interval_s stays unset so a subscribe-capable module
-     * uses its OWN sampling default instead of sampling once every 30s. */
+    /* point ?? device ?? connector, resolved once at load. This single value is
+     * BOTH the polling period and the subscription's sampling-interval hint, so
+     * it has to match what the Rust runtime resolves (runtime.rs, `point_ref`
+     * and `subscribe_device`): the same config must sample at the same rate in
+     * both builds, or one of them quietly coalesces away value changes the
+     * other reports. */
     tdot_config_t *cfg = load("", "");
     if (!cfg)
         return;
     tdot_point_t *pt = &cfg->devices[0].points[0];
     CHECK(pt->poll_interval_s == 30.0,
-          "point should inherit the device poll_interval (30s), got %.1f",
+          "a point without its own poll_interval must inherit the device's "
+          "(30s), not fall back to a module default, got %.1f",
           pt->poll_interval_s);
-    CHECK(pt->own_poll_interval_s < 0,
-          "a point without its own poll_interval must report none, got %.1f",
-          pt->own_poll_interval_s);
     tdot_config_free(cfg);
 
-    /* With its own poll_interval, both are that value. */
+    /* The point's own value wins over the device's. */
     cfg = load("", "  poll_interval = \"250ms\"\n");
     if (!cfg)
         return;
     pt = &cfg->devices[0].points[0];
-    CHECK(pt->poll_interval_s == 0.25, "point poll_interval 250ms, got %.3f",
+    CHECK(pt->poll_interval_s == 0.25,
+          "the point's own poll_interval must win (250ms), got %.3f",
           pt->poll_interval_s);
-    CHECK(pt->own_poll_interval_s == 0.25,
-          "own poll_interval should be 250ms, got %.3f",
-          pt->own_poll_interval_s);
+    tdot_config_free(cfg);
+}
+
+static void check_connector_interval_is_the_last_resort(void) {
+    /* With no device-level value either, the connector default applies -- the
+     * third step of the same chain. */
+    char template[] = "/tmp/tdot-config-XXXXXX";
+    char *dir = mkdtemp(template);
+    if (!dir) {
+        perror("mkdtemp");
+        exit(2);
+    }
+    char path[256];
+    snprintf(path, sizeof path, "%s/modbus.toml", dir);
+    FILE *fp = fopen(path, "w");
+    fputs("[connector]\n"
+          "protocol = \"modbus\"\n"
+          "poll_interval = \"7s\"\n"
+          "\n"
+          "[[device]]\n"
+          "name = \"plc1\"\n"
+          "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+          "port = 502, unit_id = 1 }\n"
+          "\n"
+          "  [[device.point]]\n"
+          "  id = \"temp_u16\"\n"
+          "  datatype = \"uint16\"\n"
+          "  address = { table = \"holding\", address = 3, count = 1 }\n",
+          fp);
+    fclose(fp);
+    char err[256];
+    tdot_config_t *cfg = tdot_config_load(path, err, sizeof err);
+    unlink(path);
+    rmdir(dir);
+    if (!cfg) {
+        printf("FAIL config did not load: %s\n", err);
+        failures++;
+        return;
+    }
+    CHECK(cfg->devices[0].points[0].poll_interval_s == 7.0,
+          "with no point or device value the connector's 7s must apply, got %.1f",
+          cfg->devices[0].points[0].poll_interval_s);
     tdot_config_free(cfg);
 }
 
@@ -238,6 +279,7 @@ int main(void) {
     check_stall_timeout_zero_disables();
     check_invalid_timeouts_fall_back();
     check_point_interval_resolution();
+    check_connector_interval_is_the_last_resort();
     check_subscribe_defaults_on();
     check_stall_decision();
     check_watchdog_period();

@@ -260,6 +260,10 @@ _pull-stack-images compose_file:
 e2e-up proto impl="rust":
     #!/usr/bin/env bash
     set -euo pipefail
+    # Same guard as the suites: an unrecognised impl would otherwise export IMPL=<typo>,
+    # leave CONNECTOR_DOCKERFILE unset, and quietly bring up the RUST connector under a
+    # tedge-dot-<typo>-<proto>-connector image tag.
+    just _missing-capabilities {{impl}} >/dev/null
     export IMPL={{impl}} BROKER_PORT=1884
     export $(just _sim-port {{proto}})
     [ "{{impl}}" = "c" ] && export CONNECTOR_DOCKERFILE=connectors/_shared/Dockerfile.connector-c || true

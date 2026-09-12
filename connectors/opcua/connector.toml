@@ -17,7 +17,7 @@ poll_interval = "1s"
 log_level     = "info"
 # Bounds one protocol call (contract §8.1). Lowered from the 30s default so the suite's
 # subscription-inactivity test does not have to wait a full minute for the keep-alive window
-# to lapse — see "Push Delivery Recovers When The Subscription Dies..." in tests/.
+# to lapse — see "Push Delivery Recovers From A Silent Server" in tests/opcua_e2e.robot.
 operation_timeout = "5s"
 
 [mqtt]

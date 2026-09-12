@@ -22,9 +22,12 @@ sudo systemctl status tedge-dot
 # RPM distros
 sudo dnf install ./tedge-dot-rs_*_linux_amd64.rpm           # or ./tedge-dot-c_*_amd64.rpm
 
-# Alpine
-sudo apk add --allow-untrusted ./tedge-dot-rs_*_linux_amd64.apk
 ```
+
+> **Alpine:** the attached `.apk` files carry a version string apk-tools rejects
+> (`apk version -c` refuses both this project's tag format and the snapshot
+> form), so `apk add` will not install them. Use the tarball on Alpine until
+> that is fixed — see TODO.md.
 
 Or grab a tarball and run the binary directly — it doubles as a one-shot
 read/write CLI. The `tedge-dot-c` tarball carries the default configs to start from:

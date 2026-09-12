@@ -131,6 +131,9 @@ publish() {
             rc=1
         fi
     done < <(find "$sourcedir" -name "$pattern" -print0)
+    # `find` itself can fail (an unreadable directory) and a process substitution hides that,
+    # so check separately rather than trusting the loop to have seen everything.
+    find "$sourcedir" -name "$pattern" >/dev/null || rc=1
     return "$rc"
 }
 

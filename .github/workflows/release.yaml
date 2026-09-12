@@ -59,7 +59,11 @@ jobs:
       - uses: actions/checkout@v4
       - id: ver
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
+          # Must use the SAME condition as the rust job's --snapshot decision below. Keying on
+          # ref_type alone would, for a manual run started from a tag, version the C packages
+          # after the tag while goreleaser still stamped a snapshot -- the exact mismatch the
+          # snapshot template exists to prevent.
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "tag" ]; then
             v="${{ github.ref_name }}"; v="${v#v}"
           else
             # Must match .goreleaser.yaml's `snapshot.version_template`, or one `snapshot`
