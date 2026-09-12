@@ -2,7 +2,11 @@
 //
 // Direction: OT protocol format -> thin-edge.io data model.
 //   in:  te/device/<device>/ot/<protocol>/cmd/<verb>/<id>  {"status":"executing|successful|failed",...}
+//        te/device/main/service/<service>/ot/cmd/<verb>/<id>  (management verbs, contract §6.3)
 //   out: te/device/<device>///cmd/<command type>/<id>      (same payload, retained)
+//
+// A management command's topic names the connector service, not an entity: its result is
+// completed on the entity ot-command-forward recorded in `origin.device` (else `main`).
 //
 // Protocol-neutral and verb-neutral: mirrors any connector's command result onto the matching
 // generic `ot_<verb>` command (the connector verb's `-` becomes `_` and gains the `ot_` prefix:
@@ -62,8 +66,15 @@ export function onMessage(message, context) {
     context.script.remove(id, null);
   }
 
+  // A service topic's device segment is always `main`; the entity the command was issued on
+  // travels in origin.device. Only a plain topic level is used: it becomes part of the topic.
+  const serviceTopic = parts[3] === "service";
+  const target = serviceTopic && typeof origin?.device === "string" && /^[^/+#]+$/.test(origin.device)
+    ? origin.device
+    : device;
+
   return [{
-    topic: `te/device/${device}///cmd/${commandType}/${id}`,
+    topic: `te/device/${target}///cmd/${commandType}/${id}`,
     payload: JSON.stringify(merged),
     mqtt: { retain: true, qos: 1 },
   }];

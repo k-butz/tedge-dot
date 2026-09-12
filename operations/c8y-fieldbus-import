@@ -38,6 +38,8 @@
 # Environment:
 #   C8Y_PROXY             mapper's local Cumulocity proxy    (default http://127.0.0.1:8001/c8y)
 #   FIELDBUS_PROTOCOL     connector protocol topic segment   (default modbus)
+#   FIELDBUS_SERVICE      connector service to define the device in
+#                                                            (default tedge-dot-$FIELDBUS_PROTOCOL)
 #   FIELDBUS_TIMEOUT      seconds to wait for define-device  (default 60)
 #   FIELDBUS_SERIAL_PORT  serial port for RTU devices        (default /dev/ttyUSB0)
 #                         TODO: resolve from [connection.serial] / c8y_SerialConfiguration
@@ -46,6 +48,7 @@ set -u
 
 C8Y_PROXY="${C8Y_PROXY:-http://127.0.0.1:8001/c8y}"
 FIELDBUS_PROTOCOL="${FIELDBUS_PROTOCOL:-modbus}"
+FIELDBUS_SERVICE="${FIELDBUS_SERVICE:-tedge-dot-$FIELDBUS_PROTOCOL}"
 FIELDBUS_TIMEOUT="${FIELDBUS_TIMEOUT:-60}"
 FIELDBUS_SERIAL_PORT="${FIELDBUS_SERIAL_PORT:-/dev/ttyUSB0}"
 
@@ -179,7 +182,9 @@ publish_and_wait() {
     local cmd_id cmd_topic connector_topic status_file sub_pid waited result reason
     cmd_id="fieldbus-$(date +%s)-$$"
     cmd_topic="te/device/main///cmd/ot_define_device/${cmd_id}"
-    connector_topic="te/device/main/ot/${FIELDBUS_PROTOCOL}/cmd/define-device/ot--${cmd_id}"
+    # Management commands are addressed to the connector service (contract §6.3), which
+    # ot-command-forward takes from the request's `service`.
+    connector_topic="te/device/main/service/${FIELDBUS_SERVICE}/ot/cmd/define-device/ot--${cmd_id}"
     status_file="$(mktemp)"
 
     tedge mqtt sub --no-topic "$cmd_topic" >"$status_file" 2>/dev/null &
@@ -187,7 +192,8 @@ publish_and_wait() {
     sleep 1 # let the subscription establish before publishing
 
     tedge mqtt pub -r -q 1 "$cmd_topic" \
-        "$(jq -nc --argjson device "$device_json" '{ status: "init", device: $device }')" ||
+        "$(jq -nc --argjson device "$device_json" --arg service "$FIELDBUS_SERVICE" \
+            '{ status: "init", service: $service, device: $device }')" ||
         die "failed to publish $cmd_topic"
 
     waited=0

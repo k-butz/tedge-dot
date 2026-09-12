@@ -24,8 +24,8 @@ modules that run inside a mapper and are hot-reloaded without restarts.
 | [ot-alarm](ot-alarm/) | thin-edge → thin-edge | `m/<group>` | `a/<type>` alarm (hysteresis) |
 | [ot-event](ot-event/) | thin-edge → thin-edge | `m/<group>` | `e/<type>` event (on change) |
 | [ot-registration](ot-registration/) | OT → thin-edge | `ot/<protocol>/status/link` | `te/device/<device>//` child registration (+ optional `twin/<fragment>`) |
-| [ot-command-forward](ot-command-forward/) | thin-edge → OT | `cmd/ot_<verb>/<id>` (incl. `parameter_update`) | `ot/<protocol>/cmd/<verb>/<id>` |
-| [ot-command-result](ot-command-result/) | OT → thin-edge | `ot/<protocol>/cmd/<verb>/<id>` | `cmd/ot_<verb>/<id>` (or the `origin.command`) |
+| [ot-command-forward](ot-command-forward/) | thin-edge → OT | `cmd/ot_<verb>/<id>` (incl. `parameter_update`) | `ot/<protocol>/cmd/<verb>/<id>`, or `service/<service>/ot/cmd/<verb>/<id>` for management verbs |
+| [ot-command-result](ot-command-result/) | OT → thin-edge | `ot/<protocol>/cmd/<verb>/<id>`, `service/<service>/ot/cmd/<verb>/<id>` | `cmd/ot_<verb>/<id>` (or the `origin.command`) |
 | [ot-parameter-state](ot-parameter-state/) | OT → thin-edge | `sample/<point>`, `cmd/write*/<id>`, `status/link` | `twin/<set>` |
 
 The two `ot-command-*` flows form a bidirectional, **verb-neutral** bridge: *forward* turns a

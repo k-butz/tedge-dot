@@ -1,5 +1,8 @@
 # ot-command-result: connector command result -> thin-edge command (any verb)
-input.mqtt.topics = ["te/+/+/ot/+/cmd/+/+"]
+input.mqtt.topics = [
+  "te/+/+/ot/+/cmd/+/+",
+  "te/device/main/service/+/ot/cmd/+/+",   # management verbs, addressed to the connector service
+]
 
 [config]
 # Prefix for the thin-edge command type results are mirrored onto:

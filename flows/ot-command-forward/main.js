@@ -39,6 +39,17 @@ const decoder = new TextDecoder();
 // purpose: `[`/`]` in a topic breaks the `[topic] payload` line format of `tedge flows test`.
 const INTERNAL_PREFIX = "ot--";
 
+// The management verbs (contract §6.3). They change one connector instance's configuration, so
+// they are addressed to that instance's service rather than to a device topic that every
+// instance of the protocol hears. The service is the request's `service`, else
+// `tedge-dot-<protocol>` — the service name of the packaged connector configurations.
+const MANAGEMENT_VERBS = new Set(["set-config", "define-device", "remove-device"]);
+
+// A value usable as one MQTT topic level: non-empty, no level separator, no wildcard.
+function isTopicSegment(value) {
+  return typeof value === "string" && /^[^/+#]+$/.test(value);
+}
+
 function parameterRequest(payload) {
   const op = payload?.operation;
   if (op && typeof op === "object") {
@@ -99,6 +110,22 @@ export function onMessage(message, context) {
   } else {
     verb = commandType.slice(3).split("_").join("-");
     request = payload;
+  }
+
+  if (MANAGEMENT_VERBS.has(verb)) {
+    const { service: requested, ...rest } = payload;
+    const service = requested ?? `tedge-dot-${protocol}`;
+    // Not a topic segment: forwarding would publish somewhere no connector listens, or to a
+    // wildcard. (This flow cannot fail the command itself — its output would match its input.)
+    if (!isTopicSegment(service)) return [];
+    const origin = rest.origin && typeof rest.origin === "object" ? rest.origin : {};
+    return [{
+      topic: `te/device/main/service/${service}/ot/cmd/${verb}/${INTERNAL_PREFIX}${id}`,
+      // The service topic does not name the entity the command was issued on, so it travels in
+      // `origin` (echoed by the connector) for ot-command-result to complete the command there.
+      payload: JSON.stringify({ ...rest, origin: { ...origin, device } }),
+      mqtt: { retain: true, qos: 1 },
+    }];
   }
 
   return [{

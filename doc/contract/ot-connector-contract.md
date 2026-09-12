@@ -56,6 +56,8 @@ up naturally. `<device>` is the thin-edge entity id segment for the device
 | Capability descriptor | connector → broker | `te/device/main/service/<service>/ot/capabilities` | yes |
 | Command request | requester → broker | `te/device/<device>/ot/<protocol>/cmd/<verb>/<id>` | yes |
 | Command result | connector → broker | `te/device/<device>/ot/<protocol>/cmd/<verb>/<id>` | yes |
+| Management command request | requester → broker | `te/device/main/service/<service>/ot/cmd/<verb>/<id>` | yes |
+| Management command result | connector → broker | `te/device/main/service/<service>/ot/cmd/<verb>/<id>` | yes |
 
 Notes:
 
@@ -586,15 +588,26 @@ for free without any extra code.
 
 A connector that uses the SDK runtime MUST advertise these verbs (and the `management` feature)
 in its capability descriptor (§7). All three follow the same `init → executing →
-successful/failed` state machine as `write`, on
-`te/device/<device>/ot/<protocol>/cmd/<verb>/<id>`. After a successful management command the
-runtime persists the updated configuration to disk and live-reloads the connector (re-validate,
-reconnect, reschedule) — no service restart is required.
+successful/failed` state machine as `write`, but on the connector's **service** command topic:
 
-> Management commands mutate the connector's own configuration; they are typically targeted at
-> the connector's main device (`te/device/main/ot/<protocol>/cmd/<verb>/<id>`), but the
-> `<device>` segment is not otherwise interpreted by these verbs (the affected device is named in
-> the payload).
+```text
+te/device/main/service/<service>/ot/cmd/<verb>/<id>
+```
+
+A management command changes one connector instance's configuration file, so it is addressed to
+that instance by its `service_name` rather than to a device topic that every instance of the
+protocol receives (§6.5); the affected device is named in the payload. A connector:
+
+- MUST act on management verbs only on its own service command topic;
+- MUST reject (`failed`, naming the service topic in `reason`) a management verb received on the
+  topic of a device it owns, and any other verb received on its service command topic;
+- MUST echo the request's `origin` (§6.4) into every transition, so a bridge can complete the
+  command on the entity it was issued for, which the service topic does not name.
+
+After a successful management command the runtime persists the updated configuration to disk and
+live-reloads the connector (re-validate, reconnect, reschedule) — no service restart is required.
+From then on the connector answers the device commands of the devices the new configuration
+defines (§6.5).
 
 #### `set-config` — patch connector configuration
 
@@ -707,6 +720,28 @@ carries `results`, one entry per *attempted* write in order:
 The batch is **not atomic**: a failed batch may have applied the writes listed as `successful`.
 A connector MAY implement `write-batch` natively (e.g. one Modbus FC16 for contiguous registers) as
 long as it keeps these semantics.
+
+### 6.5 Command ownership
+
+Several connector instances may share a broker — one process running a directory of
+configurations starts one instance per file, and further processes may run alongside it — and
+every instance of a protocol subscribes to the device command topics of the whole protocol
+(`te/device/+/ot/<protocol>/cmd/+/+`). Each command must still be acted on by exactly one of them.
+The command topic is retained and holds one message, so a second responder's transitions
+overwrite the first's: a fast `failed` ("unknown device") from an instance that does not own the
+device would replace the real result of the instance that does.
+
+- A connector MUST act on a device command only when `<device>` is a device its current
+  configuration defines, and MUST NOT publish anything for a command addressed to any other
+  device — not even `failed`, since it cannot know whether another instance owns that device. A
+  command for a device no connector owns therefore stays at `init`; a requester needs its own
+  timeout for that case.
+- Ownership follows the live configuration: a device added or removed by a management verb
+  (§6.3) is answered, or no longer answered, as soon as the change is applied.
+- Management commands are addressed to one instance by its service name (§6.3).
+- A device MUST be defined by at most one instance per protocol on a broker, and every instance
+  MUST have a unique `service_name`. An SDK runtime starting a directory of configurations warns
+  about both.
 
 #### Other verbs
 

@@ -32,7 +32,7 @@ ${OP_TIMEOUT}           30
 Connector Service Is Registered
     [Documentation]    The connector runs as a tedge service on the main device.
     Set Main Device
-    Cumulocity.Should Have Services    name=tedge-dot    min_count=1    timeout=${MEAS_TIMEOUT}
+    Cumulocity.Should Have Services    name=tedge-dot-modbus    min_count=1    timeout=${MEAS_TIMEOUT}
 
 Child Device Is Registered
     [Documentation]    The connector's device is auto-registered as a modbus child device.

@@ -476,12 +476,20 @@ check "command-forward: init forwarded" ot-command-forward \
   '[te/device/plc1/ot/modbus/cmd/write/ot--abc] {"status":"init","point":"coil_rw","value":true}'
 check_empty "command-forward: non-init ignored" ot-command-forward \
   '[te/device/plc1///cmd/ot_write/abc] {"status":"successful","point":"coil_rw"}'
-check "command-forward: set-config init forwarded" ot-command-forward \
+# Management verbs change one connector instance's configuration, so they go to its service topic
+# (contract §6.3) — the named `service`, else the packaged tedge-dot-<protocol> — with the entity
+# the command was issued on recorded in origin.device for ot-command-result.
+check "command-forward: set-config init forwarded to the default service" ot-command-forward \
   '[te/device/main///cmd/ot_set_config/cfg1] {"status":"init","target":"connector","config":{"poll_interval":"5s"}}' \
-  '[te/device/main/ot/modbus/cmd/set-config/ot--cfg1] {"status":"init","target":"connector","config":{"poll_interval":"5s"}}'
-check "command-forward: define-device init forwarded" ot-command-forward \
-  '[te/device/main///cmd/ot_define_device/d1] {"status":"init","device":{"name":"plc-9"}}' \
-  '[te/device/main/ot/modbus/cmd/define-device/ot--d1] {"status":"init","device":{"name":"plc-9"}}'
+  '[te/device/main/service/tedge-dot-modbus/ot/cmd/set-config/ot--cfg1] {"status":"init","target":"connector","config":{"poll_interval":"5s"},"origin":{"device":"main"}}'
+check "command-forward: define-device init forwarded to the service it names" ot-command-forward \
+  '[te/device/main///cmd/ot_define_device/d1] {"status":"init","service":"plant-a","device":{"name":"plc-9"}}' \
+  '[te/device/main/service/plant-a/ot/cmd/define-device/ot--d1] {"status":"init","device":{"name":"plc-9"},"origin":{"device":"main"}}'
+check "command-forward: remove-device keeps the requester's origin and adds the entity" ot-command-forward \
+  '[te/device/gw1///cmd/ot_remove_device/r1] {"status":"init","device":"plc-9","origin":{"ticket":7}}' \
+  '[te/device/main/service/tedge-dot-modbus/ot/cmd/remove-device/ot--r1] {"status":"init","device":"plc-9","origin":{"ticket":7,"device":"gw1"}}'
+check_empty "command-forward: a service that is not a topic level is not forwarded" ot-command-forward \
+  '[te/device/main///cmd/ot_define_device/d2] {"status":"init","service":"+","device":{"name":"plc-9"}}'
 check_empty "command-forward: non-ot command ignored" ot-command-forward \
   '[te/device/plc1///cmd/restart/abc] {"status":"init"}'
 
@@ -492,9 +500,15 @@ check "command-result: successful mirrored" ot-command-result \
 check "command-result: opcua result mirrored (generic)" ot-command-result \
   '[te/device/opc1/ot/opcua/cmd/write/xyz] {"status":"successful","point":"setpoint","value":42}' \
   '[te/device/opc1///cmd/ot_write/xyz]'
-check "command-result: set-config result mirrored" ot-command-result \
-  '[te/device/main/ot/modbus/cmd/set-config/cfg1] {"status":"successful"}' \
+check "command-result: set-config result on a service topic mirrored onto main" ot-command-result \
+  '[te/device/main/service/tedge-dot-modbus/ot/cmd/set-config/ot--cfg1] {"status":"successful"}' \
   '[te/device/main///cmd/ot_set_config/cfg1]'
+check "command-result: management result completes the command on the echoed origin.device" ot-command-result \
+  '[te/device/main/service/plant-a/ot/cmd/remove-device/ot--r1] {"status":"successful","origin":{"device":"gw1"}}' \
+  '[te/device/gw1///cmd/ot_remove_device/r1]'
+check "command-result: an origin.device that is not a topic level falls back to main" ot-command-result \
+  '[te/device/main/service/plant-a/ot/cmd/remove-device/ot--r2] {"status":"successful","origin":{"device":"#"}}' \
+  '[te/device/main///cmd/ot_remove_device/r2]'
 check_empty "command-result: init not mirrored (no loop)" ot-command-result \
   '[te/device/plc1/ot/modbus/cmd/write/ot--abc] {"status":"init","point":"coil_rw","value":true}'
 check "command-result: c8y-mapper metadata preserved in result" ot-command-result \

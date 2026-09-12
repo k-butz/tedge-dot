@@ -24,6 +24,8 @@ ${LINK_TOPIC}           te/device/${DEVICE}/ot/${PROTOCOL}/status/link
 ${CAPS_TOPIC}           te/device/main/service/${SERVICE}/ot/capabilities
 ${HEALTH_TOPIC}         te/device/main/service/${SERVICE}/status/health
 ${BATCH_PREFIX}         te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write-batch
+# Management verbs change this instance's configuration, so they address its service (§6.3).
+${MGMT_PREFIX}          te/device/main/service/${SERVICE}/ot/cmd
 ${PARAM_CMD_PREFIX}     te/device/${DEVICE}///cmd/parameter_update
 # The device type (from the point library, §3.1) qualifies the parameter set names, so this is
 # `<type>_<group>_parameters` with the type's punctuation folded to '_' (§5.2).
@@ -302,10 +304,10 @@ Refuses A Point Library Path From A Management Command
     ...                connector open an arbitrary path and report what it found there — the
     ...                loader's error would otherwise carry file detail into this retained
     ...                result. Refused before the path is opened, in both implementations.
-    Publish Message    te/device/plc3/ot/${PROTOCOL}/cmd/define-device/lib-2
+    Publish Message    ${MGMT_PREFIX}/define-device/lib-2
     ...    {"status":"init","device":{"name":"plc3","protocol_address":{"transport":"tcp","host":"simulator","port":502,"unit_id":1},"points_from":["../../etc/hostname"]}}
     ...    retain=True
-    ${result}=    Wait For Message Containing    te/device/plc3/ot/${PROTOCOL}/cmd/define-device/lib-2
+    ${result}=    Wait For Message Containing    ${MGMT_PREFIX}/define-device/lib-2
     ...    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
     ${reason}=    Get Json Field    ${result}    reason
     Should Contain    ${reason}    is a path
@@ -321,10 +323,10 @@ Defines A Device From A Point Library Alone
     ...
     ...                Last in the suite: it rewrites /etc/connector.toml and reconnects every
     ...                device.
-    Publish Message    te/device/plc2/ot/${PROTOCOL}/cmd/define-device/lib-1
+    Publish Message    ${MGMT_PREFIX}/define-device/lib-1
     ...    {"status":"init","device":{"name":"plc2","protocol_address":{"transport":"tcp","host":"simulator","port":502,"unit_id":1},"points_from":["plc-sim"]}}
     ...    retain=True
-    Wait For Message Containing    te/device/plc2/ot/${PROTOCOL}/cmd/define-device/lib-1
+    Wait For Message Containing    ${MGMT_PREFIX}/define-device/lib-1
     ...    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
     ${payload}=    Wait For Sample    te/device/plc2/ot/${PROTOCOL}/sample/count_u32    timeout=${SAMPLE_TIMEOUT}
     Sample Should Be Good    ${payload}

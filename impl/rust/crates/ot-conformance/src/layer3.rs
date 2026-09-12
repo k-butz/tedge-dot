@@ -924,9 +924,10 @@ async fn check_b8_hot_reload(ctx: &Ctx<'_>, layer: &mut Layer, config_path: &std
         points.push(clone);
 
         let device_name = device["name"].as_str().unwrap_or_default().to_string();
+        // Management verbs are addressed to the connector service (contract §6.3).
         let topic = format!(
-            "te/device/{}/ot/{}/cmd/define-device/conf-b8",
-            device_name, ctx.protocol
+            "te/device/main/service/{}/ot/cmd/define-device/conf-b8",
+            ctx.service
         );
         let mark = ctx.broker.mark();
         ctx.broker.publish(
@@ -1154,6 +1155,7 @@ fn check_b10_topic_discipline(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
         format!("te/device/+/ot/{}/status/link", ctx.protocol),
         format!("te/device/+/ot/{}/sample/+", ctx.protocol),
         format!("te/device/+/ot/{}/cmd/+/+", ctx.protocol),
+        format!("te/device/main/service/{}/ot/cmd/+/+", ctx.service),
     ];
     let mut violations: Vec<String> = ctx
         .broker
@@ -1280,8 +1282,9 @@ fn validate_captured_traffic(ctx: &Ctx<'_>, from: usize) -> Layer {
             "command transitions",
             Kind::Command,
             Box::new({
-                let f = format!("te/device/+/ot/{}/cmd/+/+", ctx.protocol);
-                move |t: &str| topic_matches(&f, t)
+                let device = format!("te/device/+/ot/{}/cmd/+/+", ctx.protocol);
+                let service = format!("te/device/main/service/{}/ot/cmd/+/+", ctx.service);
+                move |t: &str| topic_matches(&device, t) || topic_matches(&service, t)
             }),
         ),
         (

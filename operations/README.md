@@ -8,6 +8,13 @@ bridges that command to the connector's `cmd/<verb>` topic, the connector (or th
 management verbs) acts on it, and [`ot-command-result`](../flows/) mirrors the result back so the
 cloud operation completes.
 
+Management verbs (`set-config`, `define-device`, `remove-device`) change one connector instance's
+configuration, so they go to that instance's service topic
+(`te/device/main/service/<service>/ot/cmd/<verb>/<id>`, contract §6.3) rather than a device topic.
+`ot-command-forward` uses the command's `service` field, else `tedge-dot-<protocol>` — the service
+name of the packaged configurations. With several configurations of one protocol, name the
+service: `c8y-fieldbus-import` sets it from `FIELDBUS_SERVICE`.
+
 ```text
  c8y operation ─▶ c8y-mapper ─▶ cmd/ot_<verb> ─▶ ot-command-forward ─▶ ot/<protocol>/cmd/<verb> ─▶ connector
                                        ▲                                                                │
