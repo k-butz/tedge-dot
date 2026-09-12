@@ -11,17 +11,14 @@ Documentation       End-to-end tests for the Rust tedge-dot CAN bus connector ag
 ...
 ...                 Run via:  just test-e2e canbus
 
-Library             ../../_shared/MqttClient.py
+Resource            ../../_shared/stack.resource
 Library             Collections
 
-Suite Setup         Connect And Subscribe
-Suite Teardown      Disconnect Broker
+Suite Setup         Setup OT Stack    canbus    broker_port=13883
+Suite Teardown      Teardown OT Stack
 
 
 *** Variables ***
-${BROKER_HOST}          localhost
-${BROKER_PORT}          13883
-
 ${DEVICE}               engine
 ${PROTOCOL}             canbus
 ${SERVICE}              tedge-dot
@@ -126,10 +123,6 @@ B10 Topic Discipline — No Stray Measurement Topics
 
 
 *** Keywords ***
-Connect And Subscribe
-    Connect Broker    ${BROKER_HOST}    ${BROKER_PORT}
-    Subscribe    te/#
-
 Sample Should Be Good
     [Arguments]    ${payload}
     ${quality}=    Get Json Field    ${payload}    quality

@@ -4,6 +4,8 @@
  *                   [--poll] [--interval 1s] [--count N] [--json]
  *   tedge-dot write -c <config> -d <device> -p <point> --value <v>
  *   tedge-dot run   -c <config> [--output stdout|mqtt] [--duration 10s]
+ *   tedge-dot describe [-c <config>] [-d <device-glob>] [--set <name>]
+ *                      [--format c8y-dtm] [--compact]
  */
 #include <dirent.h>
 #include <fnmatch.h>
@@ -17,6 +19,7 @@
 
 #include "tedge_dot/connector.h"
 #include "tedge_dot/decode.h"
+#include "tedge_dot/descriptor.h"
 #include "tedge_dot/runtime.h"
 
 static void usage(void) {
@@ -28,9 +31,15 @@ static void usage(void) {
         "[--poll] [--interval <dur>] [--count <n>] [--json]\n"
         "  tedge-dot write -c <config> -d <device> -p <point> --value <v>\n"
         "  tedge-dot run   -c <config> [--output stdout|mqtt] "
-        "[--duration <dur>]\n",
+        "[--duration <dur>]\n"
+        "  tedge-dot describe [-c <config>] [-d <device>] [--set <name>] "
+        "[--format c8y-dtm] [--compact]\n"
+        "  tedge-dot <config-or-dir> [run options]      (same as run)\n",
         stderr);
 }
+
+/* Same default config file as the Rust binary. */
+#define DEFAULT_CONFIG "/etc/tedge/plugins/ot/modbus.toml"
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int sig) {
@@ -45,17 +54,21 @@ typedef struct {
     int npoints;
     const char *value;
     const char *output;
+    const char *format;
+    const char *set;
     double interval_s;
     double duration_s;
     int count;
     bool poll;
     bool json;
+    bool compact;
 } args_t;
 
 static int parse_args(int argc, char **argv, args_t *a) {
     memset(a, 0, sizeof *a);
     a->interval_s = 1.0;
     a->output = "mqtt";
+    a->format = "c8y-dtm";
     for (int i = 2; i < argc; i++) {
         const char *arg = argv[i];
         const char *next = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -70,6 +83,12 @@ static int parse_args(int argc, char **argv, args_t *a) {
             a->value = argv[++i];
         else if (!strcmp(arg, "--output") && next)
             a->output = argv[++i];
+        else if (!strcmp(arg, "--format") && next)
+            a->format = argv[++i];
+        else if (!strcmp(arg, "--set") && next)
+            a->set = argv[++i];
+        else if (!strcmp(arg, "--compact"))
+            a->compact = true;
         else if (!strcmp(arg, "--interval") && next)
             a->interval_s = tdot_duration_parse(argv[++i]);
         else if (!strcmp(arg, "--duration") && next)
@@ -88,8 +107,14 @@ static int parse_args(int argc, char **argv, args_t *a) {
         }
     }
     if (!a->config) {
-        fputs("missing --config\n", stderr);
-        return -1;
+        /* `describe` needs neither a device nor a broker, so — like the Rust
+         * binary — it falls back to the packaged default config path. */
+        if (!strcmp(argv[1], "describe"))
+            a->config = DEFAULT_CONFIG;
+        else {
+            fputs("missing --config\n", stderr);
+            return -1;
+        }
     }
     return 0;
 }
@@ -364,22 +389,115 @@ static int cmd_run(const args_t *a) {
     return rc == 0 ? 0 : 1;
 }
 
+/* Render the Cumulocity DTM property definitions derived from a configuration
+ * (mirrors cmd_describe in src/main.rs). Needs no device, broker or protocol
+ * module — only the config file. */
+static int cmd_describe(const args_t *a) {
+    if (strcmp(a->format, "c8y-dtm") != 0) {
+        fprintf(stderr, "error: unknown --format '%s' (expected c8y-dtm)\n",
+                a->format);
+        return 1;
+    }
+    char err[256];
+    tdot_config_t *cfg = tdot_config_load(a->config, err, sizeof err);
+    if (!cfg) {
+        fprintf(stderr, "error: %s\n", err);
+        return 1;
+    }
+
+    /* Restrict to the matching devices by moving them to the front; ndevices is
+     * restored before the free so nothing leaks. */
+    size_t all = cfg->ndevices, keep = 0;
+    for (size_t i = 0; i < all; i++) {
+        if (!device_matches(a, &cfg->devices[i]))
+            continue;
+        tdot_device_t tmp = cfg->devices[keep];
+        cfg->devices[keep] = cfg->devices[i];
+        cfg->devices[i] = tmp;
+        keep++;
+    }
+    cfg->ndevices = keep;
+    int rc = 1;
+    if (keep == 0 && a->device) {
+        fprintf(stderr, "error: no device matches '%s'\n", a->device);
+        goto out;
+    }
+
+    /* Parameter ids become fragment keys on the device twin, so they must be
+     * plain identifiers. */
+    char *default_set = a->set ? strdup(a->set)
+                               : tdot_param_default_set(cfg->protocol);
+    char *bad = tdot_param_invalid_keys(cfg, default_set);
+    free(default_set);
+    if (bad) {
+        fprintf(stderr, "error: parameter keys must match [A-Za-z0-9_]: %s\n",
+                bad);
+        free(bad);
+        goto out;
+    }
+
+    cJSON *docs = tdot_c8y_dtm_definitions(cfg, a->set);
+    if (a->compact) {
+        cJSON *doc;
+        cJSON_ArrayForEach(doc, docs) {
+            char *line = cJSON_PrintUnformatted(doc);
+            puts(line);
+            free(line);
+        }
+    } else {
+        char *out = cJSON_Print(docs);
+        puts(out);
+        free(out);
+    }
+    cJSON_Delete(docs);
+    rc = 0;
+
+out:
+    cfg->ndevices = all;
+    tdot_config_free(cfg);
+    return rc;
+}
+
+static bool is_subcommand(const char *s) {
+    return !strcmp(s, "read") || !strcmp(s, "write") || !strcmp(s, "run") ||
+           !strcmp(s, "describe");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         usage();
         return 2;
     }
-    args_t a;
-    if (parse_args(argc, argv, &a) != 0) {
-        usage();
-        return 2;
+    /* Like the Rust binary: invoked with just config paths/options and no
+     * subcommand (`tedge-dot /etc/connector.toml`, the systemd unit and the e2e
+     * entrypoints do this), behave as `run`. */
+    char **args = argv;
+    int nargs = argc;
+    char **shifted = NULL;
+    if (!is_subcommand(argv[1]) && strcmp(argv[1], "-h") != 0 &&
+        strcmp(argv[1], "--help") != 0) {
+        shifted = calloc((size_t)argc + 2, sizeof *shifted);
+        shifted[0] = argv[0];
+        shifted[1] = "run";
+        for (int i = 1; i < argc; i++)
+            shifted[i + 1] = argv[i];
+        args = shifted;
+        nargs = argc + 1;
     }
-    if (!strcmp(argv[1], "read"))
-        return cmd_read(&a);
-    if (!strcmp(argv[1], "write"))
-        return cmd_write(&a);
-    if (!strcmp(argv[1], "run"))
-        return cmd_run(&a);
-    usage();
-    return 2;
+    args_t a;
+    int rc = 2;
+    if (parse_args(nargs, args, &a) != 0)
+        usage();
+    else if (!strcmp(args[1], "read"))
+        rc = cmd_read(&a);
+    else if (!strcmp(args[1], "write"))
+        rc = cmd_write(&a);
+    else if (!strcmp(args[1], "run"))
+        rc = cmd_run(&a);
+    else if (!strcmp(args[1], "describe"))
+        rc = cmd_describe(&a);
+    else
+        usage();
+    free(shifted);
+    return rc;
 }

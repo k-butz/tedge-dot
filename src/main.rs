@@ -6,6 +6,9 @@
 //!   `*.toml`), and run every connector concurrently in this one process: each config gets its
 //!   own protocol module + SDK runtime instance, supervised with an in-process restart loop.
 //!   Samples go to the MQTT broker by default, or to stdout as JSON lines (`--output stdout`).
+//! * `describe` — render the Cumulocity Digital Twin Manager property definitions that declare
+//!   a configuration's writable points as editable device parameters (for a tenant admin to
+//!   register; the device itself never talks to the DTM service).
 //! * `read` / `write` — connect directly to configured devices and read or write points, then
 //!   exit. Devices and points accept `*`/`?` wildcards, and `read` can keep polling
 //!   (`--poll` / `--interval` / `--count`). These need no broker or running connector; they
@@ -43,6 +46,39 @@ enum Command {
     Read(ReadArgs),
     /// Write a value to a point directly on a device, then exit (no broker required).
     Write(WriteArgs),
+    /// Render the Cumulocity DTM property definitions for a configuration's parameter sets
+    /// (no device or broker required).
+    Describe(DescribeArgs),
+}
+
+/// Output format of `describe`.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum DescribeFormat {
+    /// Cumulocity Digital Twin Manager property definitions, one per parameter set
+    /// (writable points grouped by meta.parameter.set). A tenant admin posts each element
+    /// to POST /service/dtm/definitions/properties once to make the set editable in the
+    /// device "Parameters" tab.
+    C8yDtm,
+}
+
+#[derive(Args)]
+struct DescribeArgs {
+    /// Path to the connector configuration file.
+    #[arg(short, long, default_value = DEFAULT_CONFIG)]
+    config: String,
+    /// What to print.
+    #[arg(short, long, value_enum, default_value_t = DescribeFormat::C8yDtm)]
+    format: DescribeFormat,
+    /// Device name or wildcard pattern to restrict the output to.
+    #[arg(short, long, default_value = "*")]
+    device: String,
+    /// Default parameter set for points without meta.parameter.set
+    /// (default: <protocol>_parameters). Must match the ot-parameter-state flow setting.
+    #[arg(long, value_name = "NAME")]
+    set: Option<String>,
+    /// Print compact JSON (one document per line) instead of pretty-printed.
+    #[arg(long)]
+    compact: bool,
 }
 
 /// Where the `run` command publishes samples.
@@ -140,6 +176,7 @@ async fn main() -> ExitCode {
         Command::Run(args) => run(args).await,
         Command::Read(args) => report(cmd_read(args).await),
         Command::Write(args) => report(cmd_write(args).await),
+        Command::Describe(args) => report(cmd_describe(args)),
     }
 }
 
@@ -159,7 +196,7 @@ fn report(result: Result<(), String>) -> ExitCode {
 /// flag (`-h`/`--help`/`-V`/`--version`).
 fn normalized_args() -> Vec<String> {
     let mut args: Vec<String> = std::env::args().collect();
-    const SUBCOMMANDS: &[&str] = &["run", "read", "write", "help"];
+    const SUBCOMMANDS: &[&str] = &["run", "read", "write", "describe", "help"];
     let needs_run = match args.get(1) {
         None => true,
         Some(a) => !(SUBCOMMANDS.contains(&a.as_str()) || a.starts_with('-')),
@@ -306,16 +343,86 @@ async fn run_one(
 ) -> Result<(), String> {
     let config = load_config(&path.display().to_string())?;
     let connector = build_connector(&config.connector.protocol)?;
+    let stall = stall_timeout(&config);
     let shutdown_fut = async move {
         let _ = shutdown.wait_for(|stop| *stop).await;
     };
     match output {
-        Output::Mqtt => runtime::run_until(connector, config, path, shutdown_fut)
-            .await
-            .map_err(|e| e.to_string()),
+        Output::Mqtt => {
+            // Race the connector against a liveness watchdog. The runtime bounds every single
+            // protocol call, but a module can still wedge in ways a timeout does not cover (a
+            // driver looping internally, a lock never released); the loop cannot rescue itself
+            // then, since the hang is inside it. Losing the race cancels the connector —
+            // dropping the hung call and the MQTT client, so the broker publishes the retained
+            // last-will health "down" — and returns an error, which the supervisor restarts.
+            let progress = runtime::Progress::new();
+            let watchdog = stall_watchdog(progress.clone(), stall);
+            tokio::select! {
+                result = runtime::run_until_watched(connector, config, path, shutdown_fut, progress) =>
+                    result.map_err(|e| e.to_string()),
+                reason = watchdog => Err(reason),
+            }
+        }
         Output::Stdout => runtime::run_stdout_until(connector, config, shutdown_fut)
             .await
             .map_err(|e| e.to_string()),
+    }
+}
+
+/// The watchdog period for one connector: `[connector] stall_timeout`, `"0"` to disable.
+///
+/// It must be longer than the per-call bound, otherwise a single slow-but-legitimate call (a
+/// large batch on a slow serial line) would be read as a hang and restart the connector in a
+/// loop; a too-small value is raised rather than honoured.
+fn stall_timeout(config: &ConnectorConfig) -> Duration {
+    let configured = parse_duration(&config.connector.stall_timeout).unwrap_or_else(|| {
+        warn!(
+            "invalid connector.stall_timeout '{}'; using 120s",
+            config.connector.stall_timeout
+        );
+        Duration::from_secs(120)
+    });
+    if configured.is_zero() {
+        info!("stall watchdog disabled (connector.stall_timeout = 0)");
+        return Duration::ZERO;
+    }
+    let operation = parse_duration(&config.connector.operation_timeout)
+        .unwrap_or_else(|| Duration::from_secs(30));
+    let floor = operation.saturating_mul(2);
+    if configured < floor {
+        warn!(
+            "connector.stall_timeout ({}s) is not longer than operation_timeout ({}s); using {}s",
+            configured.as_secs(),
+            operation.as_secs(),
+            floor.as_secs()
+        );
+        return floor;
+    }
+    configured
+}
+
+/// Resolves with a reason once the connector's loop has made no progress for `limit`.
+/// Never resolves when the watchdog is disabled.
+async fn stall_watchdog(progress: runtime::Progress, limit: Duration) -> String {
+    if limit.is_zero() {
+        loop {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    }
+    let period = (limit / 4)
+        .max(Duration::from_millis(500))
+        .min(Duration::from_secs(10));
+    loop {
+        tokio::time::sleep(period).await;
+        let idle = progress.idle();
+        if idle >= limit {
+            return format!(
+                "no progress for {}s (connector.stall_timeout {}s): a protocol call is not \
+                 returning, restarting the connector",
+                idle.as_secs(),
+                limit.as_secs()
+            );
+        }
     }
 }
 
@@ -720,6 +827,43 @@ async fn cmd_write(args: WriteArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// Print the Cumulocity DTM definitions derived from a configuration.
+fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
+    let mut config = load_config(&args.config)?;
+    if args.device != "*" {
+        config
+            .devices
+            .retain(|d| wildcard_match(&args.device, &d.name));
+        if config.devices.is_empty() {
+            return Err(format!("no device matches '{}'", args.device));
+        }
+    }
+    // Parameter ids become fragment keys on the device twin, so they must be plain identifiers.
+    let default_set = args
+        .set
+        .clone()
+        .unwrap_or_else(|| tedge_dot_sdk::descriptor::default_set(&config.connector.protocol));
+    let bad = tedge_dot_sdk::descriptor::invalid_keys(&config, &default_set);
+    if !bad.is_empty() {
+        return Err(format!(
+            "parameter keys must match [A-Za-z0-9_]: {}",
+            bad.join(", ")
+        ));
+    }
+    let docs: Vec<serde_json::Value> = match args.format {
+        DescribeFormat::C8yDtm => tedge_dot_sdk::c8y_dtm_definitions(&config, args.set.as_deref()),
+    };
+    if args.compact {
+        for doc in &docs {
+            println!("{doc}");
+        }
+    } else {
+        let out = serde_json::to_string_pretty(&docs).map_err(|e| e.to_string())?;
+        println!("{out}");
+    }
+    Ok(())
+}
+
 /// Print one successful write result (JSON envelope or friendly line). The `device` field
 /// identifies the target when several devices matched.
 fn print_write_result(device: &str, result: &tedge_dot_sdk::CommandResult, json: bool) {
@@ -853,6 +997,80 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    fn config_with(connector_section: &str) -> ConnectorConfig {
+        toml::from_str(&format!("[connector]\nprotocol = \"modbus\"\n{connector_section}")).unwrap()
+    }
+
+    #[test]
+    fn stall_timeout_defaults_and_is_disabled_by_zero() {
+        assert_eq!(stall_timeout(&config_with("")), Duration::from_secs(120));
+        assert_eq!(
+            stall_timeout(&config_with("stall_timeout = \"0\"\n")),
+            Duration::ZERO
+        );
+        assert_eq!(
+            stall_timeout(&config_with("stall_timeout = \"5m\"\n")),
+            Duration::from_secs(300)
+        );
+    }
+
+    /// A watchdog shorter than the per-call bound would read one slow-but-legitimate call as a
+    /// hang and restart the connector in a loop, so it is raised to twice the call bound.
+    #[test]
+    fn stall_timeout_is_raised_above_the_operation_bound() {
+        let config = config_with("operation_timeout = \"30s\"\nstall_timeout = \"10s\"\n");
+        assert_eq!(stall_timeout(&config), Duration::from_secs(60));
+        // A value that already clears the floor is honoured as configured.
+        let config = config_with("operation_timeout = \"5s\"\nstall_timeout = \"20s\"\n");
+        assert_eq!(stall_timeout(&config), Duration::from_secs(20));
+    }
+
+    /// The watchdog must stay silent while the loop is alive, and report once it stops.
+    /// Real time (not tokio's paused clock): the liveness marker is measured with
+    /// `std::time::Instant`, which a paused clock does not advance.
+    #[tokio::test]
+    async fn stall_watchdog_fires_only_once_progress_stops() {
+        let limit = Duration::from_millis(300);
+        let progress = runtime::Progress::new();
+
+        let alive = {
+            let progress = progress.clone();
+            tokio::spawn(async move {
+                loop {
+                    progress.mark();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+        };
+        let silent = tokio::time::timeout(
+            Duration::from_millis(1500),
+            stall_watchdog(progress.clone(), limit),
+        )
+        .await;
+        assert!(silent.is_err(), "watchdog fired while the loop was alive");
+
+        alive.abort();
+        let reason = tokio::time::timeout(
+            Duration::from_secs(5),
+            stall_watchdog(progress, limit),
+        )
+        .await
+        .expect("watchdog did not fire after progress stopped");
+        assert!(reason.contains("no progress"), "unexpected reason: {reason}");
+    }
+
+    /// Disabled means disabled: it must never resolve.
+    #[tokio::test]
+    async fn stall_watchdog_disabled_never_fires() {
+        let progress = runtime::Progress::new();
+        let result = tokio::time::timeout(
+            Duration::from_millis(300),
+            stall_watchdog(progress, Duration::ZERO),
+        )
+        .await;
+        assert!(result.is_err(), "disabled watchdog must never resolve");
     }
 
     #[test]

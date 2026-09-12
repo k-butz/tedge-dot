@@ -15,15 +15,15 @@ Documentation       Cloud Fieldbus round-trip (RFC 0002 increment 2): create a m
 ...                 Requires C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD / C8Y_TENANT and DEVICE_ID,
 ...                 plus a running stack (see `just test-cloud modbus`).
 
-Library             Cumulocity
+Resource            ../../_shared/device.resource
 Library             Collections
 Library             ../../_shared/FieldbusLibrary.py
 
 Suite Setup         Setup Gateway Context
+Suite Teardown      Teardown Cloud Device
 
 
 *** Variables ***
-${DEVICE_ID}            %{DEVICE_ID=}
 ${TYPE_NAME}            tedge-dot-sim-type
 ${FB_CHILD}             fieldbus1
 ${OP_TIMEOUT}           60
@@ -93,4 +93,5 @@ Imported Points Produce Mapped Measurements
 
 *** Keywords ***
 Setup Gateway Context
+    Setup Cloud Device
     Set Managed Object    ${DEVICE_ID}

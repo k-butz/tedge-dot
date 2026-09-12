@@ -3,11 +3,31 @@
 
 use serde::Deserialize;
 
-/// Shared `[connection]` defaults (RTU serial settings).
-#[derive(Debug, Clone, Deserialize, Default)]
+/// Shared `[connection]` defaults (RTU serial settings and the per-request timeout).
+#[derive(Debug, Clone, Deserialize)]
 pub struct ModbusConnection {
     #[serde(default)]
     pub serial: SerialDefaults,
+    /// Seconds a single Modbus request may take before it is treated as a transport failure.
+    ///
+    /// tokio-modbus has no timeout of its own, so without this a request to a peer that accepts
+    /// bytes and never answers — a half-open socket after the device or its container vanished,
+    /// with no RST to end it — waits forever and wedges the connector.
+    #[serde(default = "default_request_timeout_s")]
+    pub request_timeout_s: f64,
+}
+
+impl Default for ModbusConnection {
+    fn default() -> Self {
+        ModbusConnection {
+            serial: SerialDefaults::default(),
+            request_timeout_s: default_request_timeout_s(),
+        }
+    }
+}
+
+fn default_request_timeout_s() -> f64 {
+    5.0
 }
 
 #[derive(Debug, Clone, Deserialize)]

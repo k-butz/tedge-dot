@@ -106,7 +106,10 @@ container-based end-to-end tests.
 
 The connector under test runs in-process by default (the protocol module under the real SDK
 runtime — the identical code path the shipped binary links). An out-of-tree connector binary
-is tested instead via `[harness] command` in its manifest.
+is tested instead via `[harness] command` in its manifest — this is how the C build
+([poc-c/](../../poc-c/)) is checked: `connectors/<proto>/conformance-c.toml` points the
+harness at `poc-c/build/tedge-dot` (`just conformance-c <proto>`), and the static S1 check is
+skipped for external connectors because only the live descriptor (B9) describes them.
 
 ### 3.1 Required behavioural checks
 
@@ -116,7 +119,7 @@ is tested instead via `[harness] command` in its manifest.
 | B2 | Sample publishing | For each configured point, a sample on `…/sample/<point>` validating Layer 1, with the value matching the simulator's seeded data (cross-checked via Layer 2 decode). |
 | B3 | Modes | A `typed` point yields `value`+`value_repr`; a `raw` point yields `raw` only. |
 | B4 | Quality | A simulated read failure yields a `bad` sample with `error`, not a dropped message. |
-| B5 | Link status | `status/link` transitions to `connected`; to `disconnected`/`degraded` when the simulator drops — tested at both levels: an application outage (requests fail, transport up) and a transport drop (the TCP session dies). Recovery must restore `connected`, and after a transport drop the connector must re-establish the session itself (reconnect with backoff) so samples flow again. |
+| B5 | Link status | `status/link` transitions to `connected`; to `disconnected`/`degraded` when the simulator drops — tested at three levels: an application outage (requests fail, transport up), a transport drop (the TCP session dies), and a **silent peer** (the session stays open and answers nothing, the case an unbounded protocol call hangs on forever). Recovery must restore `connected`; after a transport drop the connector must re-establish the session itself (reconnect with backoff), and with a silent peer it must keep reporting instead of going quiet. |
 | B6 | Write verb | A `cmd/write/<id>` `init` drives `executing`→`successful`; the simulator observes the written value; round-trips through a subsequent read. |
 | B7 | Access control | A write to a `read`-only point yields `failed` with a reason and no simulator write. |
 | B8 | Hot reload | A config change (add a point, applied through the management `define-device` verb) is picked up without restart; the new point starts publishing. |
@@ -154,7 +157,7 @@ stacks) skips the behavioural layer with an explanatory note instead of failing.
 protocol  = "modbus"
 modes     = ["raw", "typed"]
 datatypes = ["bool", "int16", "uint16", "int32", "uint32", "float32", "float64"]
-verbs     = ["write"]
+verbs     = ["write"]        # module verbs only: the SDK's write-batch and management verbs are implied
 features  = ["polling", "bitfield"]
 subscribe = false
 

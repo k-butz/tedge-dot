@@ -5,8 +5,9 @@
 //   out: te/device/<device>/ot/<protocol>/cmd/<verb>/<id> {"status":"init", ...}
 //
 // Protocol-neutral and verb-neutral: a generic `ot_<verb>` command type drives any connector;
-// the target protocol is selected by params.protocol (modbus, opcua, ...). The thin-edge command
-// type maps to a connector verb by dropping the `ot_` prefix and turning `_` into `-`:
+// the target protocol is the one ot-parameter-state recorded for the device (from its samples),
+// else params.protocol (modbus, opcua, ...). The thin-edge command type maps to a connector verb
+// by dropping the `ot_` prefix and turning `_` into `-`:
 //   ot_write         -> write          (point write; c8y_SetRegister)
 //   ot_write_coil    -> write-coil     (coil write; c8y_SetCoil — alias for `write` in the connector,
 //                                       kept separate to work around the one-operation-per-command-type limit)
@@ -14,27 +15,71 @@
 //   ot_define_device -> define-device  (covers c8y_ModbusDevice / c8y_Coils / c8y_Registers)
 //   ot_remove_device -> remove-device
 //
-// Only new requests (status:"init") are forwarded; the whole init payload is passed through so
-// both point writes (point/value/raw) and management verbs (target/config/device) work unchanged.
-// The connector drives the command to completion; ot-command-result mirrors the transitions back.
+// One command type is reshaped rather than passed through: `parameter_update` (device
+// parameters — the command type of the tedge-parameter-plugin, whose c8y_ParameterUpdate
+// template maps the Cumulocity operation onto it; on OT child devices nobody but this flow
+// handles it, since tedge-agent only runs workflows for its own entity) becomes ONE connector
+// `write-batch`. Two request shapes:
+//   1. Cumulocity: { "operation": { "c8y_ParameterUpdate":{}, "c8y_ParameterUpdate_<set>":{},
+//                                   "<set>": { "<point>": <value>, ... } }, "c8y-mapper": {...} }
+//   2. Direct:     { "set": "<set>", "parameters": { "<point>": <value>, ... } }
+// The keys of a set ARE the connector point ids. The batch request carries an `origin` object
+// (command type, set, requested values) that the connector ignores; ot-command-result reads it
+// back from the retained init to complete the right thin-edge command.
+//
+// Only new requests (status:"init") are forwarded; for the pass-through verbs the whole init
+// payload is forwarded so both point writes (point/value/raw) and management verbs
+// (target/config/device) work unchanged. The connector drives the command to completion;
+// ot-command-result mirrors the transitions back.
 
 const decoder = new TextDecoder();
 
-export function onMessage(message, context) {
-  const protocol = context.config?.protocol || "modbus";
+// Marks connector-side command ids so mapper-declared operations can't collide with the
+// generic ot_<verb> commands (one-operation-per-command-type limitation). Bracket-free on
+// purpose: `[`/`]` in a topic breaks the `[topic] payload` line format of `tedge flows test`.
+const INTERNAL_PREFIX = "ot--";
 
+function parameterRequest(payload) {
+  const op = payload?.operation;
+  if (op && typeof op === "object") {
+    const marker = Object.keys(op).find((k) => k.startsWith("c8y_ParameterUpdate_"));
+    if (!marker) return { error: "c8y_ParameterUpdate operation names no parameter set" };
+    const set = marker.slice("c8y_ParameterUpdate_".length);
+    const values = op[set];
+    if (!values || typeof values !== "object") return { error: `operation carries no '${set}' fragment` };
+    return { set, values };
+  }
+  if (typeof payload?.set === "string" && payload.parameters && typeof payload.parameters === "object") {
+    return { set: payload.set, values: payload.parameters };
+  }
+  return { error: "unsupported parameter_update payload (expected operation or set+parameters)" };
+}
+
+// Reshape an parameter_update request into a write-batch request. A request the flow cannot
+// interpret is still forwarded, with no writes: the connector rejects an empty batch and
+// ot-command-result completes the command as failed with the runtime's reason plus the note
+// recorded in origin.error. (This flow cannot publish the failure itself — its output would
+// match its own input filter.)
+function parameterBatch(payload) {
+  const req = parameterRequest(payload);
+  const origin = { command: "parameter_update", set: req.set ?? null, parameters: req.values ?? null };
+  if (req.error) origin.error = req.error;
+  const writes = req.error ? [] : Object.entries(req.values).map(([point, value]) => ({ point, value }));
+  const out = { status: "init", writes, origin };
+  if (payload["c8y-mapper"] !== undefined) out["c8y-mapper"] = payload["c8y-mapper"];
+  return out;
+}
+
+export function onMessage(message, context) {
   const parts = message.topic.split("/");
   const device = parts[2];
   const commandType = parts[parts.length - 2];
   const id = parts[parts.length - 1];
-  // Marks connector-side command ids so mapper-declared operations can't collide with the
-  // generic ot_<verb> commands (one-operation-per-command-type limitation). Bracket-free on
-  // purpose: `[`/`]` in a topic breaks the `[topic] payload` line format of `tedge flows test`.
-  const internalPrefix = "ot--";
 
-  // Only forward generic OT commands (cmd type prefixed with `ot_`).
-  if (!commandType.startsWith("ot_")) return [];
-  const verb = commandType.slice(3).split("_").join("-");
+  // Only forward generic OT commands (cmd type prefixed with `ot_`) and the parameter
+  // plugin's `parameter_update` (reshaped below).
+  const PARAMETER_UPDATE = "parameter_update";
+  if (!commandType.startsWith("ot_") && commandType !== PARAMETER_UPDATE) return [];
 
   let payload;
   try {
@@ -44,9 +89,21 @@ export function onMessage(message, context) {
   }
   if ((payload?.status ?? "") !== "init") return []; // only act on new requests
 
+  const protocol = context.mapper.get(`ot-protocol:${device}`) || context.config?.protocol || "modbus";
+
+  let verb;
+  let request;
+  if (commandType === PARAMETER_UPDATE) {
+    verb = "write-batch";
+    request = parameterBatch(payload);
+  } else {
+    verb = commandType.slice(3).split("_").join("-");
+    request = payload;
+  }
+
   return [{
-    topic: `te/device/${device}/ot/${protocol}/cmd/${verb}/${internalPrefix}${id}`,
-    payload: JSON.stringify(payload),
+    topic: `te/device/${device}/ot/${protocol}/cmd/${verb}/${INTERNAL_PREFIX}${id}`,
+    payload: JSON.stringify(request),
     mqtt: { retain: true, qos: 1 },
   }];
 }

@@ -7,6 +7,32 @@ TARGET := "aarch64-unknown-linux-musl"
 PKG_ARCH := "arm64"
 VERSION := `awk -F '"' '/^version = /{print $2; exit}' Cargo.toml`
 
+# Create/refresh the single Python virtualenv used by every system test (and by the editor,
+# see .vscode/settings.json).
+venv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A .venv copied from another checkout keeps that checkout's path in its scripts, so its
+    # `pip` would install into the OTHER project. Recreate unless this venv was made here.
+    if [ -d .venv ] && ! grep -q "venv $PWD/.venv\$" .venv/pyvenv.cfg 2>/dev/null; then
+        echo "recreating ./.venv (it was not created for this checkout)" >&2
+        rm -rf .venv
+    fi
+    [ -d .venv ] || python3 -m venv .venv
+    # Always go through `python -m pip`: immune to a stale shebang in .venv/bin/pip.
+    ./.venv/bin/python -m pip install -q --upgrade pip
+    ./.venv/bin/python -m pip install -q -r requirements-test.txt
+    # Fail loudly if anything landed outside this venv.
+    ./.venv/bin/python - <<'EOF'
+    import pathlib, sys, DeviceLibrary, robot
+    here = pathlib.Path(".venv").resolve()
+    for mod in (DeviceLibrary, robot):
+        path = pathlib.Path(mod.__file__).resolve()
+        if here not in path.parents:
+            sys.exit(f"{mod.__name__} resolved outside ./.venv: {path}")
+    print("venv ready: ./.venv (robot, DeviceLibrary, robotframework-c8y)")
+    EOF
+
 # Run the Rust unit + integration tests
 test *args="":
     cargo test --workspace {{args}}
@@ -23,6 +49,13 @@ test-properties:
 # hardware). Usage: just conformance modbus [extra ot-conformance flags]
 conformance protocol="modbus" *args="":
     cargo run -p ot-conformance -- check --spec connectors/{{protocol}}/conformance.toml {{args}}
+
+# The same conformance suite against the C build (poc-c/), launched as an external connector
+# through the `[harness] command` of connectors/<proto>/conformance-c.toml. Build the C binary
+# first: cmake -S poc-c -B poc-c/build && cmake --build poc-c/build
+# Usage: just conformance-c modbus
+conformance-c protocol="modbus" *args="":
+    cargo run -p ot-conformance -- check --spec connectors/{{protocol}}/conformance-c.toml {{args}}
 
 # Compile-check the Linux-only code paths (SocketCAN connectors are cfg-gated and silently
 # skipped by a macOS `cargo build`). profibus is excluded: its serial dependency has a native
@@ -70,45 +103,80 @@ demo-sims-logs *args="":
 # Spin up a single simulator and poke it with the CLI (no MQTT broker / cloud).
 # See demo/README.md and connectors/README.md for the full quickstart.
 
-# Start the protocol simulator in Docker (pairs with demo/config/<proto>.toml).
-# Usage: just sim modbus   just sim opcua
+# Start the protocol simulator in Docker (pairs with demo/config/<proto>.toml), pinning the
+# host port the demo configs expect — the e2e stacks leave it ephemeral so they stay
+# parallel-safe. Usage: just sim modbus   just sim opcua
 sim proto:
-    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d --build simulator
-    @echo "{{proto}} simulator ready — see demo/config/{{proto}}.toml for usage"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export $(just _sim-port {{proto}})
+    docker compose -p tedge-dot-sim-{{proto}} -f connectors/{{proto}}/docker-compose.yaml up -d --build --wait simulator
+    echo "{{proto}} simulator ready — see demo/config/{{proto}}.toml for usage"
 
 # Stop the protocol simulator container.
 sim-down proto:
-    docker compose -f connectors/{{proto}}/docker-compose.yaml rm -sf simulator
-
-# Run the MQTT end-to-end suite for a protocol (Docker stack up → robot → down).
-# Usage: just test-e2e modbus   just test-e2e opcua
-test-e2e proto *args="":
     #!/usr/bin/env bash
     set -euo pipefail
-    # build and up are split: `up -d --build` can hang after "resolving provenance"
-    # with a docker-container buildx builder (observed with compose 2.x + colima).
-    docker compose -f connectors/{{proto}}/docker-compose.yaml build
-    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d
-    [ -d connectors/{{proto}}/.venv ] || python3 -m venv connectors/{{proto}}/.venv
-    connectors/{{proto}}/.venv/bin/pip install -q -r connectors/_shared/requirements.txt
-    [ -f connectors/{{proto}}/requirements.txt ] && \
-        connectors/{{proto}}/.venv/bin/pip install -q -r connectors/{{proto}}/requirements.txt || true
-    rc=0
-    connectors/{{proto}}/.venv/bin/python -m robot \
-        --outputdir connectors/{{proto}}/output {{args}} \
-        connectors/{{proto}}/tests/ || rc=$?
-    docker compose -f connectors/{{proto}}/docker-compose.yaml down -v
-    exit $rc
+    export $(just _sim-port {{proto}})
+    docker compose -p tedge-dot-sim-{{proto}} -f connectors/{{proto}}/docker-compose.yaml rm -sf simulator
 
-# Bring the e2e stack up without running tests (for manual inspection).
-e2e-up proto:
-    docker compose -f connectors/{{proto}}/docker-compose.yaml build
-    docker compose -f connectors/{{proto}}/docker-compose.yaml up -d
+# The fixed simulator host port a protocol's demo config expects (empty = protocol has none).
+_sim-port proto:
+    #!/usr/bin/env bash
+    case "{{proto}}" in
+        modbus)   echo "MODBUS_SIM_PORT=5020" ;;
+        opcua)    echo "OPCUA_SIM_PORT=4840" ;;
+        profibus) echo "PROFIBUS_SIM_PORT=9200" ;;
+        *)        echo "UNUSED_SIM_PORT=" ;;
+    esac
 
-# Tear the e2e stack down.
-e2e-down proto:
-    docker compose -f connectors/{{proto}}/docker-compose.yaml down -v
+# Run the MQTT end-to-end suite for a protocol. The Robot suite starts and stops the stack
+# itself (DeviceLibrary, see connectors/_shared/stack.resource) — no `docker compose up` first,
+# and every run gets its own randomly named compose project.
+# Usage: just test-e2e modbus   just test-e2e opcua
+test-e2e proto *args="":
+    just _e2e {{proto}} rust "{{args}}"
 
+# Same suite, same stack, but the connector is the C implementation (poc-c/): the Rust and
+# C connectors are maintained to the same contract, so they get the same e2e coverage.
+# Usage: just test-e2e-c modbus
+test-e2e-c proto *args="":
+    just _e2e {{proto}} c "{{args}}"
+
+# Shared body of test-e2e / test-e2e-c. `impl` is "rust" (the stack's own Dockerfile.connector)
+# or "c" (connectors/_shared/Dockerfile.connector-c, selected via CONNECTOR_DOCKERFILE).
+_e2e proto impl args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    outdir=connectors/{{proto}}/output
+    export IMPL={{impl}}
+    if [ "{{impl}}" = "c" ]; then
+        outdir=connectors/{{proto}}/output-c
+        export CONNECTOR_DOCKERFILE=connectors/_shared/Dockerfile.connector-c
+    fi
+    just venv
+    ./.venv/bin/python -m robot \
+        --outputdir "$outdir" --variable IMPL:{{impl}} {{args}} \
+        connectors/{{proto}}/tests/
+
+# Bring a stack up manually for inspection, with the host ports pinned (the test stacks use
+# ephemeral ones). Tear it down with `just e2e-down <proto> [impl]`.
+# Usage: just e2e-up modbus [c]
+e2e-up proto impl="rust":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export IMPL={{impl}} BROKER_PORT=1884
+    export $(just _sim-port {{proto}})
+    [ "{{impl}}" = "c" ] && export CONNECTOR_DOCKERFILE=connectors/_shared/Dockerfile.connector-c || true
+    docker compose -p tedge-dot-{{proto}}-manual -f connectors/{{proto}}/docker-compose.yaml up -d --build --wait
+    echo "stack up: broker on localhost:1884 (canbus/canopen: see the compose file)"
+
+# Tear down a manually started stack.
+e2e-down proto impl="rust":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export IMPL={{impl}}
+    docker compose -p tedge-dot-{{proto}}-manual -f connectors/{{proto}}/docker-compose.yaml down -v
 
 # Cross-compile + build all packages
 build:
@@ -119,62 +187,89 @@ test-data-docker pkg_arch=PKG_ARCH:
     @mkdir -p ../tests/data
     docker build -f Dockerfile.package --build-arg PKG_ARCH={{pkg_arch}} --target export --output ../tests/data .
 
-# Start a shell in the cloud e2e tedge container (after `just cloud-up <proto>`)
+# Start a shell in the tedge container of a manually started cloud stack
+# (after `just cloud-up <proto> [impl]`).
 shell proto *args='bash':
-    docker compose -f cloud/{{proto}}/docker-compose.yaml exec tedge {{args}}
+    docker compose -p tedge-dot-cloud-{{proto}} -f cloud/{{proto}}/docker-compose.yaml exec tedge {{args}}
 
-# Full Cumulocity end-to-end for a protocol: build the connector .deb + tedge image,
-# bring up the stack, bootstrap to Cumulocity, then run the Robot suite.
-# Requires C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD / DEVICE_ID in the env.
+# Full Cumulocity end-to-end for a protocol. The Robot suite starts the stack, bootstraps a
+# freshly named device and deletes it from the tenant again (DeviceLibrary, see
+# cloud/_shared/device.resource) — no compose up and no manual cleanup.
+# Requires C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD / C8Y_TENANT in the env or .env.
+# Run `just build` first so dist/ holds the packages the image installs.
 # Usage: just test-cloud modbus
 test-cloud proto *args="":
+    just _cloud {{proto}} rust "{{args}}"
+
+# The same cloud suites against the C implementation (poc-c/), which the image compiles itself —
+# no `just build` needed, since dist/ is not read on this path.
+# Usage: just test-cloud-c modbus
+test-cloud-c proto *args="":
+    just _cloud {{proto}} c "{{args}}"
+
+# Shared body of test-cloud / test-cloud-c. `impl` picks the connector the image installs
+# (IMPL, see cloud/<proto>/Dockerfile.tedge); the output directory keeps the runs apart.
+_cloud proto impl args:
     #!/usr/bin/env bash
     set -euo pipefail
-    # build and up are split: `up -d --build` can hang after "resolving provenance"
-    # with a docker-container buildx builder (observed with compose 2.x + colima).
-    docker compose -f cloud/{{proto}}/docker-compose.yaml build
-    docker compose -f cloud/{{proto}}/docker-compose.yaml up -d
-    echo "Bootstrapping device ${DEVICE_ID} to Cumulocity"
-    docker compose -f cloud/{{proto}}/docker-compose.yaml exec -T \
-        --env "DEVICE_ID=${DEVICE_ID}" --env "C8Y_BASEURL=${C8Y_BASEURL}" \
-        --env "C8Y_USER=${C8Y_USER}" --env "C8Y_PASSWORD=${C8Y_PASSWORD}" \
-        tedge bootstrap.sh
-    [ -d cloud/{{proto}}/.venv ] || python3 -m venv cloud/{{proto}}/.venv
-    ./cloud/{{proto}}/.venv/bin/pip install -q -r cloud/{{proto}}/requirements.txt
-    rc=0
-    ./cloud/{{proto}}/.venv/bin/python -m robot \
-        --outputdir cloud/{{proto}}/output {{args}} \
-        cloud/{{proto}}/tests/ || rc=$?
-    docker compose -f cloud/{{proto}}/docker-compose.yaml down -v
-    exit $rc
+    outdir=cloud/{{proto}}/output
+    export IMPL={{impl}}
+    if [ "{{impl}}" != "rust" ]; then outdir=cloud/{{proto}}/output-{{impl}}; fi
+    just venv
+    ./.venv/bin/python -m robot \
+        --outputdir "$outdir" --variable IMPL:{{impl}} {{args}} \
+        cloud/{{proto}}/tests/
 
-# Bring the cloud e2e stack up (build + bootstrap) without running tests, for manual inspection.
-cloud-up proto:
+# Bring a cloud stack up manually for inspection (fixed project name, DEVICE_ID from the env),
+# e.g. to poke at the mapper or run bootstrap.sh by hand. The test suites do NOT need this.
+# One project per protocol, so switching `impl` replaces the running container.
+# Usage: just cloud-up modbus [c]
+cloud-up proto impl="rust":
     #!/usr/bin/env bash
     set -euo pipefail
-    just build
-    docker compose -f cloud/{{proto}}/docker-compose.yaml up -d --build
-    docker compose -f cloud/{{proto}}/docker-compose.yaml exec -T \
-        --env "DEVICE_ID=${DEVICE_ID}" --env "C8Y_BASEURL=${C8Y_BASEURL}" \
-        --env "C8Y_USER=${C8Y_USER}" --env "C8Y_PASSWORD=${C8Y_PASSWORD}" \
-        tedge bootstrap.sh
+    export IMPL={{impl}}
+    # Only the Rust image installs the packages from dist/; the C image compiles the binary.
+    if [ "{{impl}}" = "rust" ]; then just build; fi
+    docker compose -p tedge-dot-cloud-{{proto}} -f cloud/{{proto}}/docker-compose.yaml up -d --build --wait
+    docker compose -p tedge-dot-cloud-{{proto}} -f cloud/{{proto}}/docker-compose.yaml exec -T tedge bootstrap.sh
 
-# Tear down the cloud e2e stack.
-cloud-down proto:
-    docker compose -f cloud/{{proto}}/docker-compose.yaml down -v
+# Tear down a manually started cloud stack.
+cloud-down proto impl="rust":
+    IMPL={{impl}} docker compose -p tedge-dot-cloud-{{proto}} -f cloud/{{proto}}/docker-compose.yaml down -v
 
-# Clean up
-cleanup DEVICE_ID $CI="true":
-    echo "Removing device and child devices (including certificates)"
-    c8y devicemanagement certificates list -n --tenant "$(c8y currenttenant get --select name --output csv)" --filter "name eq ${DEVICE_ID}" --pageSize 2000 | c8y devicemanagement certificates delete --tenant "$(c8y currenttenant get --select name --output csv)"
-    c8y inventory find -n --owner "device_${DEVICE_ID}" -p 100 | c8y inventory delete
-    c8y users delete -n --id "device_${DEVICE_ID}$" --tenant "$(c8y currenttenant get --select name --output csv)" --silentStatusCodes 404 --silentExit
+# Delete leftover test devices from the tenant. The suites clean up after themselves; this is
+# the fallback for runs that crashed before their teardown. Device ids generated by
+# DeviceLibrary all start with "TST_".
+cleanup PATTERN="TST_*" $CI="true":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Removing devices matching '{{PATTERN}}' (and their certificates + users)"
+    tenant="$(c8y currenttenant get --select name --output csv)"
+    c8y devicemanagement certificates list -n --tenant "$tenant" --filter "name like {{PATTERN}}" --pageSize 2000 \
+        | c8y devicemanagement certificates delete --tenant "$tenant" --silentStatusCodes 404 || true
+    c8y inventory find -n --query "name eq '{{PATTERN}}'" -p 100 | c8y inventory delete --silentStatusCodes 404 || true
+    c8y users list -n --tenant "$tenant" --filter "userName like device_{{PATTERN}}" --pageSize 2000 \
+        | c8y users delete --tenant "$tenant" --silentStatusCodes 404 || true
 
 # --- C proof of concept (poc-c/) ---------------------------------------------
 #
 # The C build is cross-compiled with zig inside a Debian multiarch container
 # (poc-c/cross/), so one host builds every architecture and the binaries carry
 # a glibc floor we choose (2.17 by default) rather than the build host's.
+
+# Build the C PoC natively and run its unit tests: the golden decode vectors shared with
+# the Rust SDK, plus the device-parameter/`describe` checks.
+# Usage: just c-test [extra ctest flags]
+c-test *args="":
+    cmake -B poc-c/build -S poc-c
+    cmake --build poc-c/build
+    ctest --test-dir poc-c/build --output-on-failure {{args}}
+
+# Check that `tedge-dot describe` renders identical Cumulocity DTM definitions in the Rust
+# and C builds. With no argument every connector config in the repo is compared.
+# Usage: just c-describe-parity [config.toml ...]
+c-describe-parity *configs="":
+    ./poc-c/ci/describe-parity.sh {{configs}}
 
 # Debian architectures the C PoC is built and packaged for.
 C_ARCHS := "amd64 arm64 armhf"

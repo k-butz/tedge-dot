@@ -77,6 +77,12 @@ if [ "$quality" != "good" ] || [ "$value" != "$expect" ]; then
     exit 1
 fi
 echo "OK: $point = $value (good)"
+access=$(jq -r .access <<<"$sample")
+if [ "$access" != "read" ] && [ "$access" != "read_write" ] && [ "$access" != "write" ]; then
+    echo "FAIL: sample carries no valid access field (got '$access')" >&2
+    exit 1
+fi
+echo "OK: sample echoes access=$access"
 
 if [ -n "$write_point" ]; then
     cmd_topic="te/device/$write_device/ot/$proto/cmd/write/smoke-1"
@@ -84,7 +90,7 @@ if [ -n "$write_point" ]; then
     mosquitto_pub -h 127.0.0.1 -t "$cmd_topic" -r \
         -m "{\"status\":\"init\",\"point\":\"$write_point\",\"value\":$write_value}"
     result=$(mosquitto_sub -h 127.0.0.1 -W 15 -t "$cmd_topic" | \
-        jq -c --unbuffered 'select(.status != "init")' | head -1 || true)
+        jq -c --unbuffered 'select(.status == "successful" or .status == "failed")' | head -1 || true)
     echo "result: $result"
     if [ "$(jq -r .status <<<"$result")" != "successful" ]; then
         echo "FAIL: write command did not succeed; connector log:" >&2
@@ -94,6 +100,26 @@ if [ -n "$write_point" ]; then
     echo "OK: write $write_point = $write_value successful"
     # clear the retained command so reruns start clean
     mosquitto_pub -h 127.0.0.1 -t "$cmd_topic" -r -n
+
+    # write-batch (contract §6.4): the same write plus an unknown point -> the batch
+    # fails at the unknown point but reports the write that was applied before it.
+    batch_topic="te/device/$write_device/ot/$proto/cmd/write-batch/smoke-2"
+    echo "== write-batch round-trip on $batch_topic"
+    mosquitto_pub -h 127.0.0.1 -t "$batch_topic" -r \
+        -m "{\"status\":\"init\",\"writes\":[{\"point\":\"$write_point\",\"value\":$write_value},{\"point\":\"no_such_point\",\"value\":1}]}"
+    result=$(mosquitto_sub -h 127.0.0.1 -W 15 -t "$batch_topic" | \
+        jq -c --unbuffered 'select(.status == "successful" or .status == "failed")' | head -1 || true)
+    echo "result: $result"
+    if [ "$(jq -r .status <<<"$result")" != "failed" ] || \
+       [ "$(jq -r '.results[0].status' <<<"$result")" != "successful" ] || \
+       [ "$(jq -r '.results[1].status' <<<"$result")" != "failed" ] || \
+       [ "$(jq -r '.results | length' <<<"$result")" != "2" ]; then
+        echo "FAIL: write-batch did not stop at the unknown point with per-point results; connector log:" >&2
+        cat "$workdir/connector.log" >&2
+        exit 1
+    fi
+    echo "OK: write-batch applied $write_point then failed on no_such_point"
+    mosquitto_pub -h 127.0.0.1 -t "$batch_topic" -r -n
 fi
 
 echo "== $proto smoke passed"

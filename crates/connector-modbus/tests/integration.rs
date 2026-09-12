@@ -217,3 +217,80 @@ async fn tcp_read_and_write_roundtrip() {
     let err = connector.execute(&device, "write", &bad_write).await;
     assert!(err.is_err(), "write to read-only point should fail");
 }
+
+/// Regression: a peer that accepts the connection and then answers nothing must fail the read,
+/// not wait forever.
+///
+/// tokio-modbus has no timeout of its own, so before `connection.request_timeout_s` existed a
+/// request to such a peer never returned — which is exactly what a half-open socket looks like
+/// after the device (or its container) vanished without sending a RST. The await happened inside
+/// the runtime's poll loop, so the whole connector wedged: no samples, no health, no link
+/// status, nothing logged, and only a service restart recovered it.
+#[tokio::test]
+async fn silent_peer_fails_the_read_instead_of_hanging() {
+    // Accept connections and hold them open without ever replying.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream); // keep the socket open: no response, no close, no reset
+        }
+    });
+
+    let toml = format!(
+        r#"
+        [connector]
+        protocol = "modbus"
+
+        [connection]
+        request_timeout_s = 0.25
+
+        [[device]]
+        name = "plc-1"
+        protocol_address = {{ transport = "tcp", host = "{}", port = {}, unit_id = 1 }}
+        default_mode = "typed"
+
+          [[device.point]]
+          id = "first"
+          datatype = "uint16"
+          address = {{ table = "holding", address = 0, count = 1 }}
+
+          [[device.point]]
+          id = "second"
+          datatype = "uint16"
+          address = {{ table = "holding", address = 1, count = 1 }}
+        "#,
+        addr.ip(),
+        addr.port()
+    );
+    let config: ConnectorConfig = toml::from_str(&toml).unwrap();
+    let mut connector = ModbusConnector::default();
+    connector.configure(&config).unwrap();
+    // The TCP connect itself succeeds: the peer accepts, it just never answers a request.
+    connector.connect().await.unwrap();
+
+    let device = "plc-1".to_string();
+    let points = vec![
+        pref("first", Mode::Typed, Some(DataType::Uint16), Access::Read),
+        pref("second", Mode::Typed, Some(DataType::Uint16), Access::Read),
+    ];
+    let started = std::time::Instant::now();
+    let samples = connector.read_points(&device, &points).await.unwrap();
+    let elapsed = started.elapsed();
+
+    // One timeout bounds the batch: the second point is reported without waiting again.
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "read_points took {elapsed:?}, expected it to give up after ~250ms"
+    );
+    assert_eq!(samples.len(), 2);
+    assert!(
+        samples.iter().all(|s| s.quality == Quality::Bad),
+        "every point of an unanswered batch must be bad: {samples:?}"
+    );
+    let first = samples[0].error.as_deref().unwrap_or_default();
+    assert!(first.contains("timed out"), "unexpected error: {first}");
+    let second = samples[1].error.as_deref().unwrap_or_default();
+    assert!(second.contains("skipped"), "unexpected error: {second}");
+}

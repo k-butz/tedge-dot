@@ -11,8 +11,8 @@ ip link set up vcan0
 echo "vcan0 is up"
 
 # Wait for the MQTT broker to be reachable.
-echo "Waiting for broker at localhost:13883 ..."
-until nc -z localhost 13883; do
+echo "Waiting for broker at localhost:13884 ..."
+until nc -z localhost 13884; do
     sleep 0.5
 done
 echo "Broker is ready"

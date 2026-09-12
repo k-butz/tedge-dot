@@ -54,6 +54,13 @@ pub trait Simulator: Send + Sync {
     /// second half — exercises the runtime's reconnect-with-backoff).
     async fn set_transport(&self, up: bool) -> Result<(), String>;
 
+    /// Freeze (or resume) the transport *without* closing it: the peer keeps the connection
+    /// open and answers nothing. Simulators that cannot do this leave the default, and the
+    /// behavioural check that needs it is skipped.
+    async fn set_stalled(&self, _stalled: bool) -> Result<(), String> {
+        Err("simulator cannot freeze the transport".to_string())
+    }
+
     /// Rewrite a device's `protocol_address` (TOML) to point at this simulator.
     fn rewrite_protocol_address(&self, address: &mut toml::Value) -> Result<(), String>;
 }

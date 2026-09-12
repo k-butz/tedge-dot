@@ -12,7 +12,9 @@ target/
 .DS_Store
 connectors/*/.venv/
 connectors/*/output/
+connectors/*/output-c/
 cloud/*/.venv/
 cloud/*/output/
+cloud/*/output-c/
 __pycache__/
 *.pycpki/

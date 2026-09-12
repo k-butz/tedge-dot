@@ -22,12 +22,20 @@ extern "C" {
 #define TDOT_ACCESS_READ 0x1
 #define TDOT_ACCESS_WRITE 0x2
 
+/* Per-point output mode (contract §3.1): typed decodes a primitive, raw
+ * publishes the wire bytes only. */
+typedef enum {
+    TDOT_MODE_TYPED = 0,
+    TDOT_MODE_RAW,
+} tdot_mode_t;
+
 typedef struct tdot_point {
     char *id;
     tdot_datatype_t datatype;
     tdot_order_t endianness; /* default big */
     tdot_order_t word_order; /* default big */
     int access;              /* TDOT_ACCESS_* bits; default read */
+    tdot_mode_t mode;        /* point.mode ?? device.default_mode ?? typed */
     char *unit;              /* optional */
     tdot_transform_t transform;
     bool has_transform;
@@ -96,6 +104,21 @@ double tdot_duration_parse(const char *s);
 
 tdot_device_t *tdot_config_device(tdot_config_t *cfg, const char *name);
 tdot_point_t *tdot_device_point(tdot_device_t *dev, const char *id);
+
+/* The whole configuration document as a JSON string (tables -> objects,
+ * arrays-of-tables -> arrays). Used by the management verbs, which patch the
+ * document and write it back as TOML. Caller frees. */
+char *tdot_config_root_json(const tdot_config_t *cfg);
+
+/* Free the connector-owned per-device/per-point state (dev->proto, pt->proto)
+ * so the connector can be re-configured against the same config. Transports
+ * must have been released with disconnect_device() first. */
+void tdot_config_release_protos(tdot_config_t *cfg);
+
+/* Move the contents of `src` into `dst` (freeing dst's previous contents and
+ * the src struct), so every pointer to dst stays valid across a live reload.
+ * dst keeps its own `path`. */
+void tdot_config_replace(tdot_config_t *dst, tdot_config_t *src);
 
 #ifdef __cplusplus
 }

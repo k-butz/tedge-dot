@@ -81,12 +81,30 @@ static void publish_link(rt_t *rt, tdot_device_t *dev, tdot_link_t status) {
     logmsg("info", "device %s: link %s", dev->name, name);
     char ts[40];
     tdot_now_rfc3339(ts, sizeof ts);
-    char topic[256], payload[128];
+    char topic[256];
     snprintf(topic, sizeof topic, "te/device/%s/ot/%s/status/link", dev->name,
              rt->cfg->protocol);
-    snprintf(payload, sizeof payload, "{\"status\":\"%s\",\"since\":\"%s\"}",
-             name, ts);
+
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "status", name);
+    cJSON_AddStringToObject(obj, "since", ts);
+    /* Optional device descriptor from the module (contract status schema
+     * `info`); the registration flow forwards it into a twin fragment. */
+    if (rt->conn->device_info) {
+        char *info = rt->conn->device_info(rt->conn, dev);
+        if (info) {
+            cJSON *parsed = cJSON_Parse(info);
+            if (parsed && cJSON_IsObject(parsed))
+                cJSON_AddItemToObject(obj, "info", parsed);
+            else
+                cJSON_Delete(parsed);
+            free(info);
+        }
+    }
+    char *payload = cJSON_PrintUnformatted(obj);
     publish(rt, topic, payload, true);
+    free(payload);
+    cJSON_Delete(obj);
 }
 
 static void publish_health(rt_t *rt, const char *status) {
@@ -151,6 +169,145 @@ static int json_to_value(const cJSON *jv, tdot_value_t *out) {
     return 0;
 }
 
+static bool is_management_verb(const char *verb);
+static void handle_management(rt_t *rt, const char *topic, const char *verb,
+                              const cJSON *req);
+static char *augmented_capabilities(const char *json);
+
+static void publish_retained(rt_t *rt, const char *topic, cJSON *obj) {
+    char *payload = cJSON_PrintUnformatted(obj);
+    mosquitto_publish(rt->mosq, NULL, topic, (int)strlen(payload), payload, 0,
+                      true);
+    free(payload);
+}
+
+/* Execute one point write; returns 0 on success, else fills `reason`. */
+static int do_write(rt_t *rt, tdot_device_t *dev, const char *dev_name,
+                    const char *point_id, const cJSON *jvalue, char *reason,
+                    size_t reason_len) {
+    tdot_point_t *pt = (dev && point_id) ? tdot_device_point(dev, point_id) : NULL;
+    tdot_value_t value;
+    if (!dev) {
+        snprintf(reason, reason_len, "unknown device: %s", dev_name);
+    } else if (!pt) {
+        snprintf(reason, reason_len, "unknown point: %s",
+                 point_id ? point_id : "(missing)");
+    } else if (!(pt->access & TDOT_ACCESS_WRITE)) {
+        snprintf(reason, reason_len, "point %s is not writable", pt->id);
+    } else if (json_to_value(jvalue, &value) != 0) {
+        snprintf(reason, reason_len, "missing or invalid value");
+    } else if (rt->conn->write_point(rt->conn, dev, pt, &value, reason,
+                                     reason_len) == 0) {
+        return 0;
+    }
+    return -1;
+}
+
+/* `write`: {"status":"init","point":...,"value":...} -> executing -> successful|failed */
+static void handle_write(rt_t *rt, const char *topic, const char *dev_name,
+                         tdot_device_t *dev, const cJSON *req) {
+    const cJSON *jpoint = cJSON_GetObjectItem(req, "point");
+    const char *point_id = cJSON_IsString(jpoint) ? jpoint->valuestring : NULL;
+    const cJSON *jv = cJSON_GetObjectItem(req, "value");
+
+    cJSON *exec = cJSON_CreateObject();
+    cJSON_AddStringToObject(exec, "status", "executing");
+    if (point_id)
+        cJSON_AddStringToObject(exec, "point", point_id);
+    publish_retained(rt, topic, exec);
+    cJSON_Delete(exec);
+
+    char reason[TDOT_ERR_MAX] = "";
+    bool ok = do_write(rt, dev, dev_name, point_id, jv, reason, sizeof reason) == 0;
+
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddStringToObject(res, "status", ok ? "successful" : "failed");
+    if (point_id)
+        cJSON_AddStringToObject(res, "point", point_id);
+    if (ok) {
+        if (jv)
+            cJSON_AddItemToObject(res, "value", cJSON_Duplicate(jv, 1));
+        logmsg("info", "cmd write %s/%s: ok", dev_name,
+               point_id ? point_id : "?");
+    } else {
+        cJSON_AddStringToObject(res, "reason", reason);
+        logmsg("warn", "cmd write %s/%s: %s", dev_name,
+               point_id ? point_id : "?", reason);
+    }
+    publish_retained(rt, topic, res);
+    cJSON_Delete(res);
+}
+
+/* `write-batch` (contract §6.4): {"status":"init","writes":[{point,value},...]}.
+ * Writes run sequentially in request order and stop at the first failure; the
+ * terminal message lists one result per attempted write. Implemented once
+ * here on top of the connector's write_point, like the Rust SDK runtime. */
+static void handle_write_batch(rt_t *rt, const char *topic,
+                               const char *dev_name, tdot_device_t *dev,
+                               const cJSON *req) {
+    const cJSON *writes = cJSON_GetObjectItem(req, "writes");
+    cJSON *results = cJSON_CreateArray();
+    char reason[TDOT_ERR_MAX] = "";
+    bool failed = false;
+
+    if (!cJSON_IsArray(writes)) {
+        snprintf(reason, sizeof reason,
+                 "write-batch request needs a `writes` array");
+        failed = true;
+    } else if (cJSON_GetArraySize(writes) == 0) {
+        snprintf(reason, sizeof reason, "write-batch request has no writes");
+        failed = true;
+    }
+
+    if (!failed) {
+        cJSON *exec = cJSON_CreateObject();
+        cJSON_AddStringToObject(exec, "status", "executing");
+        cJSON *points = cJSON_AddArrayToObject(exec, "points");
+        const cJSON *w;
+        cJSON_ArrayForEach(w, writes) {
+            const cJSON *jp = cJSON_GetObjectItem(w, "point");
+            cJSON_AddItemToArray(points, cJSON_CreateString(
+                                             cJSON_IsString(jp) ? jp->valuestring
+                                                                : ""));
+        }
+        publish_retained(rt, topic, exec);
+        cJSON_Delete(exec);
+
+        cJSON_ArrayForEach(w, writes) {
+            const cJSON *jp = cJSON_GetObjectItem(w, "point");
+            const char *point_id = cJSON_IsString(jp) ? jp->valuestring : NULL;
+            const cJSON *jv = cJSON_GetObjectItem(w, "value");
+            char why[TDOT_ERR_MAX] = "";
+            cJSON *r = cJSON_CreateObject();
+            cJSON_AddStringToObject(r, "point", point_id ? point_id : "");
+            if (do_write(rt, dev, dev_name, point_id, jv, why, sizeof why) == 0) {
+                cJSON_AddStringToObject(r, "status", "successful");
+                if (jv)
+                    cJSON_AddItemToObject(r, "value", cJSON_Duplicate(jv, 1));
+                cJSON_AddItemToArray(results, r);
+            } else {
+                snprintf(reason, sizeof reason, "write to %s failed: %s",
+                         point_id ? point_id : "(missing)", why);
+                cJSON_AddStringToObject(r, "status", "failed");
+                cJSON_AddStringToObject(r, "reason", reason);
+                cJSON_AddItemToArray(results, r);
+                failed = true;
+                break;
+            }
+        }
+    }
+
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddStringToObject(res, "status", failed ? "failed" : "successful");
+    if (failed)
+        cJSON_AddStringToObject(res, "reason", reason);
+    cJSON_AddItemToObject(res, "results", results);
+    logmsg(failed ? "warn" : "info", "cmd write-batch %s: %s", dev_name,
+           failed ? reason : "ok");
+    publish_retained(rt, topic, res);
+    cJSON_Delete(res);
+}
+
 static void on_message(struct mosquitto *mosq, void *ud,
                        const struct mosquitto_message *msg) {
     (void)mosq;
@@ -179,52 +336,444 @@ static void on_message(struct mosquitto *mosq, void *ud,
         return;
     }
 
-    char reason[TDOT_ERR_MAX] = "";
     tdot_device_t *dev = tdot_config_device(rt->cfg, dev_name);
-    const cJSON *jpoint = cJSON_GetObjectItem(req, "point");
-    const char *point_id =
-        cJSON_IsString(jpoint) ? jpoint->valuestring : NULL;
-    tdot_point_t *pt =
-        (dev && point_id) ? tdot_device_point(dev, point_id) : NULL;
-    tdot_value_t value;
-    bool ok = false;
-
-    if (strcmp(verb, "write") != 0)
-        snprintf(reason, sizeof reason, "unsupported verb: %s", verb);
-    else if (!dev)
-        snprintf(reason, sizeof reason, "unknown device: %s", dev_name);
-    else if (!pt)
-        snprintf(reason, sizeof reason, "unknown point: %s",
-                 point_id ? point_id : "(missing)");
-    else if (!(pt->access & TDOT_ACCESS_WRITE))
-        snprintf(reason, sizeof reason, "point %s is not writable", pt->id);
-    else if (json_to_value(cJSON_GetObjectItem(req, "value"), &value) != 0)
-        snprintf(reason, sizeof reason, "missing or invalid value");
-    else if (rt->conn->write_point(rt->conn, dev, pt, &value, reason,
-                                   sizeof reason) == 0)
-        ok = true;
-
-    cJSON *res = cJSON_CreateObject();
-    cJSON_AddStringToObject(res, "status", ok ? "successful" : "failed");
-    if (point_id)
-        cJSON_AddStringToObject(res, "point", point_id);
-    if (ok) {
-        cJSON *jv = cJSON_GetObjectItem(req, "value");
-        if (jv)
-            cJSON_AddItemToObject(res, "value", cJSON_Duplicate(jv, 1));
-        logmsg("info", "cmd write %s/%s: ok", dev_name,
-               point_id ? point_id : "?");
+    if (strcmp(verb, "write") == 0 || strcmp(verb, "write-coil") == 0) {
+        /* write-coil is c8y_SetCoil's alias for write (see the Rust module) */
+        handle_write(rt, msg->topic, dev_name, dev, req);
+    } else if (strcmp(verb, "write-batch") == 0) {
+        handle_write_batch(rt, msg->topic, dev_name, dev, req);
+    } else if (is_management_verb(verb)) {
+        handle_management(rt, msg->topic, verb, req);
     } else {
+        cJSON *res = cJSON_CreateObject();
+        cJSON_AddStringToObject(res, "status", "failed");
+        char reason[TDOT_ERR_MAX];
+        snprintf(reason, sizeof reason, "unsupported verb: %s", verb);
         cJSON_AddStringToObject(res, "reason", reason);
-        logmsg("warn", "cmd write %s/%s: %s", dev_name,
-               point_id ? point_id : "?", reason);
+        logmsg("warn", "cmd %s %s: unsupported verb", verb, dev_name);
+        publish_retained(rt, msg->topic, res);
+        cJSON_Delete(res);
     }
-    char *payload = cJSON_PrintUnformatted(res);
-    mosquitto_publish(rt->mosq, NULL, msg->topic, (int)strlen(payload),
-                      payload, 0, true);
-    free(payload);
-    cJSON_Delete(res);
     cJSON_Delete(req);
+}
+
+/* ---- capability augmentation ---------------------------------------------
+ * Like the Rust SDK runtime, the verbs implemented here (management + batch)
+ * are added to every module's descriptor at publish time. */
+static void add_unique(cJSON *arr, const char *item) {
+    const cJSON *x;
+    cJSON_ArrayForEach(x, arr) {
+        if (cJSON_IsString(x) && strcmp(x->valuestring, item) == 0)
+            return;
+    }
+    cJSON_AddItemToArray(arr, cJSON_CreateString(item));
+}
+
+static char *augmented_capabilities(const char *json) {
+    cJSON *caps = cJSON_Parse(json);
+    if (!caps)
+        return NULL;
+    cJSON *verbs = cJSON_GetObjectItem(caps, "command_verbs");
+    if (!cJSON_IsArray(verbs))
+        verbs = cJSON_AddArrayToObject(caps, "command_verbs");
+    bool has_write = false;
+    const cJSON *v;
+    cJSON_ArrayForEach(v, verbs) {
+        if (cJSON_IsString(v) && strcmp(v->valuestring, "write") == 0)
+            has_write = true;
+    }
+    if (has_write)
+        add_unique(verbs, "write-batch");
+    add_unique(verbs, "set-config");
+    add_unique(verbs, "define-device");
+    add_unique(verbs, "remove-device");
+    cJSON *features = cJSON_GetObjectItem(caps, "features");
+    if (!cJSON_IsArray(features))
+        features = cJSON_AddArrayToObject(caps, "features");
+    add_unique(features, "management");
+    char *out = cJSON_PrintUnformatted(caps);
+    cJSON_Delete(caps);
+    return out;
+}
+
+/* ---- TOML emitter (cJSON document -> TOML text) ---------------------------
+ * The management verbs patch the configuration as JSON and write it back as
+ * TOML. Layout: top-level objects become [sections] (nested objects become
+ * [dotted.sections]); arrays of objects become [[array]] entries whose nested
+ * objects are inline tables and whose nested arrays of objects become
+ * [[array.sub]] entries — i.e. the layout of the shipped config files
+ * ([connector], [connection.serial], [[device]] with inline protocol_address,
+ * [[device.point]] with inline address/transform/meta). Comments are not
+ * preserved (tomlc99 is read-only), unlike the Rust runtime's toml_edit.
+ */
+typedef struct {
+    char *buf;
+    size_t len, cap;
+} sb_t;
+
+static void sb_put(sb_t *sb, const char *s) {
+    size_t n = strlen(s);
+    if (sb->len + n + 1 > sb->cap) {
+        size_t cap = sb->cap ? sb->cap * 2 : 1024;
+        while (cap < sb->len + n + 1)
+            cap *= 2;
+        sb->buf = realloc(sb->buf, cap);
+        sb->cap = cap;
+    }
+    memcpy(sb->buf + sb->len, s, n + 1);
+    sb->len += n;
+}
+
+static void sb_putf(sb_t *sb, const char *fmt, ...) {
+    char tmp[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_end(ap);
+    sb_put(sb, tmp);
+}
+
+static bool bare_key(const char *k) {
+    if (!*k)
+        return false;
+    for (const char *p = k; *p; p++) {
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-'))
+            return false;
+    }
+    return true;
+}
+
+static void emit_string(sb_t *sb, const char *str) {
+    sb_put(sb, "\"");
+    for (const char *p = str; *p; p++) {
+        switch (*p) {
+        case '"': sb_put(sb, "\\\""); break;
+        case '\\': sb_put(sb, "\\\\"); break;
+        case '\n': sb_put(sb, "\\n"); break;
+        case '\r': sb_put(sb, "\\r"); break;
+        case '\t': sb_put(sb, "\\t"); break;
+        default:
+            if ((unsigned char)*p < 0x20)
+                sb_putf(sb, "\\u%04x", (unsigned)(unsigned char)*p);
+            else {
+                char c[2] = {*p, 0};
+                sb_put(sb, c);
+            }
+        }
+    }
+    sb_put(sb, "\"");
+}
+
+static void emit_key(sb_t *sb, const char *k) {
+    if (bare_key(k))
+        sb_put(sb, k);
+    else
+        emit_string(sb, k);
+}
+
+static bool is_object_array(const cJSON *v) {
+    if (!cJSON_IsArray(v) || cJSON_GetArraySize(v) == 0)
+        return false;
+    const cJSON *x;
+    cJSON_ArrayForEach(x, v) {
+        if (!cJSON_IsObject(x))
+            return false;
+    }
+    return true;
+}
+
+static void emit_inline(sb_t *sb, const cJSON *v) {
+    if (cJSON_IsString(v)) {
+        emit_string(sb, v->valuestring);
+    } else if (cJSON_IsBool(v)) {
+        sb_put(sb, cJSON_IsTrue(v) ? "true" : "false");
+    } else if (cJSON_IsNumber(v)) {
+        double d = v->valuedouble;
+        if (d == (double)(long long)d && d < 9.2e18 && d > -9.2e18)
+            sb_putf(sb, "%lld", (long long)d);
+        else
+            sb_putf(sb, "%.17g", d);
+    } else if (cJSON_IsArray(v)) {
+        sb_put(sb, "[");
+        const cJSON *x;
+        bool first = true;
+        cJSON_ArrayForEach(x, v) {
+            if (!first)
+                sb_put(sb, ", ");
+            first = false;
+            emit_inline(sb, x);
+        }
+        sb_put(sb, "]");
+    } else if (cJSON_IsObject(v)) {
+        sb_put(sb, "{ ");
+        const cJSON *x;
+        bool first = true;
+        cJSON_ArrayForEach(x, v) {
+            if (cJSON_IsNull(x))
+                continue;
+            if (!first)
+                sb_put(sb, ", ");
+            first = false;
+            emit_key(sb, x->string);
+            sb_put(sb, " = ");
+            emit_inline(sb, x);
+        }
+        sb_put(sb, " }");
+    } else {
+        sb_put(sb, "\"\""); /* null: should have been skipped */
+    }
+}
+
+static void emit_table(sb_t *sb, const cJSON *obj, const char *path,
+                       bool in_array_item);
+
+/* Scalars and inline values first, then the deferred sub-tables. */
+static void emit_table_body(sb_t *sb, const cJSON *obj, const char *path,
+                            bool in_array_item) {
+    const cJSON *x;
+    cJSON_ArrayForEach(x, obj) {
+        if (cJSON_IsNull(x))
+            continue;
+        bool deferred = is_object_array(x) || (cJSON_IsObject(x) && !in_array_item);
+        if (deferred)
+            continue;
+        emit_key(sb, x->string);
+        sb_put(sb, " = ");
+        emit_inline(sb, x);
+        sb_put(sb, "\n");
+    }
+    cJSON_ArrayForEach(x, obj) {
+        if (cJSON_IsNull(x))
+            continue;
+        char sub[512];
+        if (*path)
+            snprintf(sub, sizeof sub, "%s.%s", path, x->string);
+        else
+            snprintf(sub, sizeof sub, "%s", x->string);
+        if (is_object_array(x)) {
+            const cJSON *item;
+            cJSON_ArrayForEach(item, x) {
+                sb_putf(sb, "\n[[%s]]\n", sub);
+                emit_table_body(sb, item, sub, true);
+            }
+        } else if (cJSON_IsObject(x) && !in_array_item) {
+            emit_table(sb, x, sub, false);
+        }
+    }
+}
+
+static void emit_table(sb_t *sb, const cJSON *obj, const char *path,
+                       bool in_array_item) {
+    if (*path)
+        sb_putf(sb, "\n[%s]\n", path);
+    emit_table_body(sb, obj, path, in_array_item);
+}
+
+static char *toml_emit(const cJSON *doc) {
+    sb_t sb = {0};
+    sb_put(&sb, "# Written by tedge-dot (management command); comments are not preserved.\n");
+    emit_table_body(&sb, doc, "", false);
+    return sb.buf;
+}
+
+/* ---- management verbs (contract §6.3) -------------------------------------
+ * set-config / define-device / remove-device patch the configuration document,
+ * validate the result (config loader + connector configure), persist it to
+ * the config file, and live-reload the connector — the same behaviour as the
+ * Rust SDK runtime. */
+static bool is_management_verb(const char *verb) {
+    return strcmp(verb, "set-config") == 0 ||
+           strcmp(verb, "define-device") == 0 ||
+           strcmp(verb, "remove-device") == 0;
+}
+
+/* Deep-merge `patch` into `target`: objects merge recursively, everything
+ * else replaces. */
+static void deep_merge(cJSON *target, const cJSON *patch) {
+    const cJSON *x;
+    cJSON_ArrayForEach(x, patch) {
+        cJSON *existing = cJSON_GetObjectItemCaseSensitive(target, x->string);
+        if (existing && cJSON_IsObject(existing) && cJSON_IsObject(x)) {
+            deep_merge(existing, x);
+        } else if (existing) {
+            cJSON_ReplaceItemInObjectCaseSensitive(target, x->string,
+                                                   cJSON_Duplicate(x, 1));
+        } else {
+            cJSON_AddItemToObject(target, x->string, cJSON_Duplicate(x, 1));
+        }
+    }
+}
+
+static cJSON *find_device(cJSON *devices, const char *name, int *index) {
+    int i = 0;
+    cJSON *d;
+    cJSON_ArrayForEach(d, devices) {
+        const cJSON *n = cJSON_GetObjectItem(d, "name");
+        if (cJSON_IsString(n) && strcmp(n->valuestring, name) == 0) {
+            if (index)
+                *index = i;
+            return d;
+        }
+        i++;
+    }
+    return NULL;
+}
+
+/* Apply one management verb to the JSON form of the config document.
+ * Returns 0, or -1 with `reason` filled. */
+static int apply_management(cJSON *doc, const char *verb, const cJSON *req,
+                            char *reason, size_t rlen) {
+    cJSON *devices = cJSON_GetObjectItem(doc, "device");
+    if (!cJSON_IsArray(devices))
+        devices = cJSON_AddArrayToObject(doc, "device");
+
+    if (strcmp(verb, "set-config") == 0) {
+        const cJSON *target = cJSON_GetObjectItem(req, "target");
+        const cJSON *config = cJSON_GetObjectItem(req, "config");
+        if (!cJSON_IsString(target) || !cJSON_IsObject(config)) {
+            snprintf(reason, rlen, "set-config needs `target` (string) and `config` (object)");
+            return -1;
+        }
+        const char *t = target->valuestring;
+        cJSON *section = NULL;
+        if (strcmp(t, "connector") == 0 || strcmp(t, "mqtt") == 0 ||
+            strcmp(t, "connection") == 0) {
+            section = cJSON_GetObjectItem(doc, t);
+            if (!cJSON_IsObject(section))
+                section = cJSON_AddObjectToObject(doc, t);
+        } else if (strncmp(t, "device:", 7) == 0) {
+            section = find_device(devices, t + 7, NULL);
+            if (!section) {
+                snprintf(reason, rlen, "unknown device '%s'", t + 7);
+                return -1;
+            }
+        } else {
+            snprintf(reason, rlen,
+                     "unknown target '%s' (expected connector|mqtt|connection|device:<name>)", t);
+            return -1;
+        }
+        deep_merge(section, config);
+        return 0;
+    }
+    if (strcmp(verb, "define-device") == 0) {
+        const cJSON *device = cJSON_GetObjectItem(req, "device");
+        const cJSON *name = cJSON_IsObject(device) ? cJSON_GetObjectItem(device, "name") : NULL;
+        if (!cJSON_IsString(name)) {
+            snprintf(reason, rlen, "define-device needs a `device` object with a `name`");
+            return -1;
+        }
+        int idx = -1;
+        if (find_device(devices, name->valuestring, &idx))
+            cJSON_ReplaceItemInArray(devices, idx, cJSON_Duplicate(device, 1));
+        else
+            cJSON_AddItemToArray(devices, cJSON_Duplicate(device, 1));
+        return 0;
+    }
+    /* remove-device */
+    const cJSON *name = cJSON_GetObjectItem(req, "device");
+    if (!cJSON_IsString(name)) {
+        snprintf(reason, rlen, "remove-device needs `device` (the device name)");
+        return -1;
+    }
+    int idx = -1;
+    if (!find_device(devices, name->valuestring, &idx)) {
+        snprintf(reason, rlen, "unknown device '%s'", name->valuestring);
+        return -1;
+    }
+    cJSON_DeleteItemFromArray(devices, idx);
+    return 0;
+}
+
+static void publish_status(rt_t *rt, const char *topic, const char *status,
+                           const char *reason) {
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddStringToObject(res, "status", status);
+    if (reason)
+        cJSON_AddStringToObject(res, "reason", reason);
+    publish_retained(rt, topic, res);
+    cJSON_Delete(res);
+}
+
+/* Validate the candidate config end to end, persist it, and live-reload:
+ * disconnect -> configure(new) -> replace in place -> reconnect. On any
+ * failure the running configuration is kept (and re-configured). */
+static void handle_management(rt_t *rt, const char *topic, const char *verb,
+                              const cJSON *req) {
+    publish_status(rt, topic, "executing", NULL);
+    char reason[TDOT_ERR_MAX] = "";
+    tdot_config_t *cfg = rt->cfg;
+
+    if (!cfg->path) {
+        publish_status(rt, topic, "failed", "configuration has no file path to persist to");
+        return;
+    }
+    char *json = tdot_config_root_json(cfg);
+    cJSON *doc = json ? cJSON_Parse(json) : NULL;
+    free(json);
+    if (!doc) {
+        publish_status(rt, topic, "failed", "cannot read the running configuration document");
+        return;
+    }
+    if (apply_management(doc, verb, req, reason, sizeof reason) != 0) {
+        cJSON_Delete(doc);
+        publish_status(rt, topic, "failed", reason);
+        logmsg("warn", "cmd %s: %s", verb, reason);
+        return;
+    }
+    char *text = toml_emit(doc);
+    cJSON_Delete(doc);
+
+    /* Write the candidate next to the config and validate it with the real
+     * loader before it replaces anything. */
+    char tmp_path[1024];
+    snprintf(tmp_path, sizeof tmp_path, "%s.tmp", cfg->path);
+    FILE *f = fopen(tmp_path, "w");
+    if (!f || fputs(text, f) == EOF || fclose(f) != 0) {
+        free(text);
+        snprintf(reason, sizeof reason, "cannot write %s: %s", tmp_path, strerror(errno));
+        publish_status(rt, topic, "failed", reason);
+        return;
+    }
+    free(text);
+    char err[256];
+    tdot_config_t *candidate = tdot_config_load(tmp_path, err, sizeof err);
+    if (!candidate) {
+        unlink(tmp_path);
+        snprintf(reason, sizeof reason, "resulting config is invalid: %s", err);
+        publish_status(rt, topic, "failed", reason);
+        logmsg("warn", "cmd %s: %s", verb, reason);
+        return;
+    }
+
+    /* Swap: release the running transports and connector state, try the
+     * candidate on the protocol module, fall back to the old config if the
+     * module rejects it. */
+    for (size_t i = 0; i < cfg->ndevices; i++)
+        rt->conn->disconnect_device(rt->conn, &cfg->devices[i]);
+    tdot_config_release_protos(cfg);
+    if (rt->conn->configure(rt->conn, candidate, err, sizeof err) != 0) {
+        tdot_config_free(candidate);
+        unlink(tmp_path);
+        snprintf(reason, sizeof reason, "configure failed: %s", err);
+        char err2[256];
+        if (rt->conn->configure(rt->conn, cfg, err2, sizeof err2) != 0)
+            logmsg("error", "re-configure of the previous config failed: %s", err2);
+        for (size_t i = 0; i < cfg->ndevices; i++) {
+            cfg->devices[i].link = TDOT_LINK_UNKNOWN;
+            connect_device(rt, &cfg->devices[i]);
+        }
+        publish_status(rt, topic, "failed", reason);
+        logmsg("warn", "cmd %s: %s", verb, reason);
+        return;
+    }
+    if (rename(tmp_path, cfg->path) != 0)
+        logmsg("warn", "failed to persist config to %s: %s", cfg->path, strerror(errno));
+    tdot_config_replace(cfg, candidate); /* cfg pointer stays valid */
+    for (size_t i = 0; i < cfg->ndevices; i++)
+        connect_device(rt, &cfg->devices[i]);
+    publish_status(rt, topic, "successful", NULL);
+    logmsg("info", "cmd %s: applied and persisted to %s", verb, cfg->path);
 }
 
 /* ---- main loop ------------------------------------------------------------ */
@@ -245,8 +794,8 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
 
     if (rt.output == TDOT_OUTPUT_MQTT) {
         char client_id[128];
-        snprintf(client_id, sizeof client_id, "%s#%d", cfg->service_name,
-                 (int)getpid());
+        snprintf(client_id, sizeof client_id, "%s-%s", cfg->service_name,
+                 cfg->protocol);
         rt.mosq = mosquitto_new(client_id, true, &rt);
         mosquitto_message_callback_set(rt.mosq, on_message);
         /* last will: health "down" */
@@ -275,7 +824,10 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
             snprintf(cap_topic, sizeof cap_topic,
                      "te/device/main/service/%s/ot/capabilities",
                      cfg->service_name);
-            publish(&rt, cap_topic, conn->capabilities_json, true);
+            char *caps = augmented_capabilities(conn->capabilities_json);
+            publish(&rt, cap_topic, caps ? caps : conn->capabilities_json,
+                    true);
+            free(caps);
         }
     }
 
@@ -309,6 +861,8 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
                 tdot_sample_t s;
                 tdot_sample_init(&s);
                 int rc = conn->read_point(conn, dev, pt, &s);
+                if (pt->mode == TDOT_MODE_RAW)
+                    s.value.kind = TDOT_VAL_NONE; /* raw: bytes only */
                 emit_sample(&rt, dev, pt, &s);
                 pt->next_due = now + pt->poll_interval_s;
                 polled++;

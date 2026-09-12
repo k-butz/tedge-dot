@@ -10,9 +10,29 @@ class of bug the others cannot.
 | Property-based tests | `crates/sdk/tests/properties.rs` | Invariant violations across the whole input space | `just test-properties` |
 | Fuzzing | `crates/sdk/fuzz/` | Panics/crashes on hostile or malformed input | `just fuzz <target>` |
 | Integration tests | `crates/connector-*/tests/` | Protocol framing against an in-process or scripted peer | `just test` |
-| Simulator e2e | `connectors/<proto>/sim/`, `demo/docker-compose.yaml` | Real protocol stacks end to end | `just test-e2e <proto>` |
+| Simulator e2e | `connectors/<proto>/` (sim, compose, Robot suite) | Real protocol stacks end to end, both implementations | `just test-e2e <proto>` / `just test-e2e-c <proto>` |
 | Flow tests | `flows/test-flows.sh` (`tedge flows test`) | Sample→measurement/alarm/event mapping, offline | `just test-flows` |
-| Cloud e2e | `cloud/<proto>/tests/*.robot` | Cumulocity operation round-trips on a live tenant | Robot Framework |
+| Cloud e2e | `cloud/<proto>/tests/*.robot` | Cumulocity operation round-trips on a live tenant | `just test-cloud <proto>` |
+
+### The suites own their stack and device
+
+Both e2e layers are self-contained: nothing has to be started before a run, and nothing has to
+be cleaned up afterwards. Each suite's setup hands its `docker-compose.yaml` to
+**DeviceLibrary** (`connectors/_shared/stack.resource`, `cloud/_shared/device.resource`), which
+
+- starts the stack as its own compose project named after a randomly generated device serial
+  (isolated network and volumes, so suites never collide and can run in parallel),
+- exposes the other services of the stack to the suite (`Execute Command … device_name=${SERIAL}:broker`),
+- resolves the broker's *ephemeral* host port (`Get Service Port`) instead of a hardcoded one,
+- for the cloud layer, bootstraps the generated device id against the tenant and deletes the
+  device and its user again at teardown,
+- stops and removes the project when the suite ends.
+
+Put the setup keyword in `Suite Setup` for one stack per file (what the suites do today, and
+what the ordered cloud suites need) or in `Test Setup` for a fresh stack per test case.
+Consequence for compose files: **no fixed published host ports** (DeviceLibrary rejects them —
+they break parallel runs); pin them through the documented env vars when poking at a stack by
+hand (`just e2e-up`, `just sim`).
 
 ## Property-based tests (proptest)
 

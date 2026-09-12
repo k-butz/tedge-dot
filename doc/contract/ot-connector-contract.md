@@ -87,6 +87,8 @@ protocol      = "<protocol>"    # protocol module id (MUST match a compiled-in m
 service_name  = "tedge-dot"
 poll_interval = "2s"            # default poll interval (duration string); per-point override allowed
 log_level     = "info"
+operation_timeout = "30s"       # optional: upper bound on one protocol-module call (§8.1)
+stall_timeout     = "120s"      # optional: restart the connector if its loop stops moving (§8.1)
 
 [mqtt]
 host = "127.0.0.1"
@@ -159,7 +161,7 @@ default_mode  = "typed"         # optional; default output mode for this device'
 | `access` | `"read"` \| `"write"` \| `"read_write"` | no | Default `"read"`. |
 | `unit` | string | no | Opaque hint echoed into the sample for flows. |
 | `transform` | object | no | Per-point linear scale `(value*multiplier*10^decimal_shift/divisor)+offset`; see §4.2. |
-| `meta` | object | no | Free-form signal metadata echoed verbatim as `meta` in every sample envelope. Never interpreted by the connector; flows read it for per-signal behaviour (e.g. `on_change`, `deadband`, `min_interval`, `debounce`). |
+| `meta` | object | no | Free-form signal metadata echoed verbatim as `meta` in every sample envelope. Never interpreted by the connector; flows and tooling read it for per-signal behaviour (e.g. `on_change`, `deadband`, `min_interval`, `debounce`) and for exposing the point as an operator-editable *parameter* (`meta.parameter`, see §5.2). |
 | `subscribe` | boolean | no | Default `true`. `false` keeps the point on the polling schedule even when the connector supports push delivery. |
 | `address` | object | yes | **Protocol-specific**; shape defined by the connector spec. |
 
@@ -287,6 +289,7 @@ native address so flows can route or debug). The example below uses Modbus to ma
 | `raw` | string (hex, space-grouped per word) | yes | The bytes read; always present in both modes. |
 | `quality` | `"good"` \| `"bad"` \| `"stale"` | yes | See §5.1. |
 | `unit` | string | no | Echo of the point's `unit` hint. |
+| `access` | `"read"` \| `"write"` \| `"read_write"` | no | Echo of the point's declared `access` (SDK runtimes always set it). Lets consumers tell writable points apart without the configuration file (§5.2). |
 | `addr` | object | yes | Protocol-specific address echo (for flow routing/debug). |
 | `seq` | integer | no | Monotonic per-point counter; helps detect drops. |
 | `error` | string | when `quality = bad` | Human-readable failure reason. |
@@ -304,6 +307,18 @@ native address so flows can route or debug). The example below uses Modbus to ma
   (a failed raw read is `bad` with no `raw`, or `raw` omitted).
 - A connector MUST publish `bad` samples for failed reads rather than silently dropping
   them, so flows and operators can react. A connector MAY rate-limit repeated `bad` samples.
+
+### 5.2 Parameters (writable points as device state)
+
+A point whose `access` permits writes is, to an operator, a *parameter*: a setting with a
+current value and a control to change it. The contract deliberately adds no mechanism for
+this beyond echoing `access` (and `meta`) in samples: a flow (`ot-parameter-state`) derives one
+retained twin fragment per *parameter set* from the samples and acknowledged writes, and
+cloud-specific tooling (`tedge-dot describe`) renders the same sets as cloud-side definitions.
+The set a point belongs to is `meta.parameter.set` (default `<protocol>_parameters`); a
+read-only point can opt in with `meta.parameter = true`, a writable point can opt out with
+`meta.parameter = false`. Because point ids become the fragment keys, parameter ids SHOULD be
+plain identifiers (`[A-Za-z0-9_]`). See [RFC 0003](../rfc/0003-parameter-writes.md).
 
 ## 6. Command protocol
 
@@ -440,10 +455,58 @@ Removes the named device (and its points) from the configuration and disconnects
 { "status": "init", "device": "plc-9" }
 ```
 
+### 6.4 The `write-batch` verb (standard, SDK-provided)
+
+A parameter set edited in a cloud UI, a recipe download, or a setpoint change that spans several
+registers must update *several points as one request*. Rather than have every requester fan out
+N `write` commands and reassemble their results, the SDK runtime implements `write-batch` once,
+on top of the module's `write`: the writes are executed **sequentially, in request order**, and
+the batch **stops at the first failure** (later points are left untouched). The runtime advertises
+the verb for every module that implements `write`.
+
+Request (`status: "init"`):
+
+```json
+{
+  "status": "init",
+  "writes": [
+    { "point": "setpoint", "value": 21.5 },
+    { "point": "run_command", "value": true },
+    { "point": "mask", "raw": "00ff" }
+  ]
+}
+```
+
+Each entry follows the `write` request rules (`value` for typed points, `raw` for raw points). An
+empty `writes` array is rejected (`failed`), so a malformed request cannot succeed without touching
+the device. Any other request field (e.g. `origin`) is ignored by the connector and left on the
+retained `init` message for requesters and flows to correlate with.
+
+Transitions: `executing` carries `points` (the ids about to be written); the terminal message
+carries `results`, one entry per *attempted* write in order:
+
+```json
+{ "status": "successful",
+  "results": [ { "point": "setpoint", "status": "successful", "value": 21.5 },
+               { "point": "run_command", "status": "successful", "value": true } ] }
+```
+
+```json
+{ "status": "failed",
+  "reason": "write to run_command failed: access denied: point run_command is not writable",
+  "results": [ { "point": "setpoint", "status": "successful", "value": 21.5 },
+               { "point": "run_command", "status": "failed",
+                 "reason": "write to run_command failed: access denied: point run_command is not writable" } ] }
+```
+
+The batch is **not atomic**: a failed batch may have applied the writes listed as `successful`.
+A connector MAY implement `write-batch` natively (e.g. one Modbus FC16 for contiguous registers) as
+long as it keeps these semantics.
+
 #### Other verbs
 
 `write` is the only point-I/O verb a conformant connector MUST support (for writable points), and
-SDK-based connectors additionally provide the three management verbs above. Connectors MAY support
+SDK-based connectors additionally provide `write-batch` and the three management verbs above. Connectors MAY support
 further verbs (e.g. `read-now`, `rescan`); any such verb MUST be declared in the capability
 descriptor (§7) and documented in the connector spec.
 
@@ -475,7 +538,7 @@ same fields with its own values (and typically `"subscribe": true`):
 | `modes` | Output modes supported. MUST include at least one of `raw`/`typed`. |
 | `datatypes` | Subset of §4 the connector can decode in `typed` mode. |
 | `point_kinds` | Protocol-specific kinds the connector understands (free strings, documented per spec). |
-| `command_verbs` | Verbs accepted on `cmd/<verb>`. MUST include `write` if any point is writable. |
+| `command_verbs` | Verbs accepted on `cmd/<verb>`. MUST include `write` if any point is writable; SDK-based connectors also list `write-batch` (§6.4) and the management verbs (§6.3). |
 | `features` | Optional capability tags: `polling`, `subscribe`, `bitfield`, `string`, `bulk_read`, … |
 | `subscribe` | Whether the connector supports event-driven (push) reads in addition to polling. |
 
@@ -495,6 +558,24 @@ Tooling and the conformance suite use the descriptor to decide which tests apply
   ```
 
   with `status` ∈ `{"connected","disconnected","degraded"}` and an optional `reason`.
+
+### 8.1 Liveness
+
+A connector that *hangs* is worse than one that fails: a protocol call which never returns
+blocks the loop that publishes samples, health and link status, so the device goes silent with
+nothing logged and nothing in the cloud marking it unhealthy. An SDK-based connector is
+therefore bounded on two levels, both configured in `[connector]`:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `operation_timeout` | `30s` | Upper bound on one protocol-module call (read batch, write, connect, subscribe). Exceeding it is reported as an ordinary transport error, so the existing `degraded` link and reconnect-with-backoff handling applies. |
+| `stall_timeout` | `120s` | How long the loop may make no progress before the connector is considered wedged, cancelled and restarted. The MQTT last will then marks the service `down`, so the outage is visible. Must exceed `operation_timeout`; `0` disables it. |
+
+A connector SHOULD additionally bound its own protocol requests (the Modbus module's
+`connection.request_timeout_s`, the OPC UA module's `connection.request_timeout_s`): failing one
+request fast keeps the poll cycle on schedule, where the runtime's bound is a backstop that
+treats the whole batch as failed. The conformance suite checks this behaviour with a peer that
+accepts the connection and answers nothing (check B5, silent peer).
 
 ## 9. Timestamps, encoding and ordering
 
@@ -519,7 +600,8 @@ A connector is **contract-conformant** when it:
 
 1. publishes valid samples (§5) for every configured point in its declared modes,
 2. publishes a valid capability descriptor (§7) and health/status (§8),
-3. implements the `write` verb (§6) for all writable points,
+3. implements the `write` verb (§6) for all writable points (SDK-based connectors get
+   `write-batch` for free),
 4. validates its configuration (§3) and protocol-specific schemas,
 5. passes the shared [conformance suite](../conformance/conformance-suite.md), including the
    golden decode vectors for every `typed` datatype it advertises.

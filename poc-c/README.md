@@ -12,8 +12,52 @@ class-1 master, TCP transport) — exploring two questions:
 It speaks the same [OT Connector Contract](../doc/contract/) as the Rust
 implementation: same TOML config files (the untouched configs in
 [demo/config/](../demo/config/) work as-is), same MQTT topics, same JSON
-sample/command envelopes, same decode semantics (validated against the Rust
-SDK's golden vectors).
+sample/command envelopes (including the `access` echo and the runtime-provided
+`write-batch` verb that the device-parameter flows rely on, see
+[RFC 0003](../doc/rfc/0003-parameter-writes.md), whose parameter derivation and
+`tedge-dot describe` rendering this build shares), the SDK management verbs
+(`set-config`, `define-device`, `remove-device`: the runtime patches the
+config document, validates it with the loader and the module, persists it and
+live-reloads — comments are not preserved, tomlc99 being read-only), `raw`
+mode and Modbus bit fields, same decode semantics (validated against the Rust
+SDK's golden vectors). The one deliberate gap is push delivery (`subscribe`):
+the PoC polls only, which its conformance manifests declare.
+
+## Tests
+
+The C build is held to the same coverage as the Rust one:
+
+- **unit tests** — `just c-test` (`ctest --test-dir poc-c/build`): the golden decode vectors
+  shared with the Rust SDK, and the device-parameter/`describe` checks, which assert the same
+  facts over the same fixture config as `crates/sdk/src/descriptor.rs`;
+- **describe parity** — [`ci/describe-parity.sh`](ci/describe-parity.sh) (`just
+  c-describe-parity`) renders the Cumulocity DTM definitions of every connector config in the
+  repo with both binaries and compares them parsed, so the tenant-side declaration cannot drift
+  between the implementations; CI runs it in the `c-poc` job;
+- **e2e Robot suites** — the per-protocol stacks under [connectors/](../connectors/) run
+  their Robot suite against the C connector with `just test-e2e-c <proto>` (the stack's
+  `connector` service is swapped for [`connectors/_shared/Dockerfile.connector-c`](../connectors/_shared/Dockerfile.connector-c));
+  CI runs it for every protocol (`e2e-c` matrix);
+- **cloud Robot suites** — the live Cumulocity harness under [cloud/](../cloud/) builds this
+  implementation into the thin-edge demo image with `just test-cloud-c <proto>` (`IMPL=c`
+  selects a connector-install stage that compiles poc-c/ instead of installing the Rust
+  package), so child registration, measurements, operations, the Cloud Fieldbus import and the
+  device-parameter round-trip are all covered for the C build too;
+- **smoke** — [`ci/smoke.sh <proto>`](ci/smoke.sh), a fast broker-and-simulator check
+  without Docker for the connector itself (used by the `c-poc` CI job).
+
+- **conformance** — the contract conformance suite (layers 1-3, built-in broker and
+  simulators) runs against the C binary as an external connector:
+  `just conformance-c modbus|opcua` (manifests `connectors/<proto>/conformance-c.toml`,
+  same claims as the Rust ones except `subscribe`); CI runs it in the `c-poc` job. Both
+  connectors are fully conformant, hot reload through the management verbs included.
+
+Liveness: the C runtime has no equivalent of the Rust SDK's `operation_timeout` /
+`stall_timeout`. It relies on the response timeouts of libmodbus and open62541, which is enough
+for conformance check B5's silent peer (verified for both protocols), but a call that hangs
+*inside* a library would still wedge the C loop. Those two config keys are accepted and ignored.
+
+Debugging: `TDOT_OPCUA_DEBUG=1` keeps open62541's client handshake log on stdout.
 
 ## Packaging & releases
 
@@ -71,21 +115,25 @@ worker thread per file), matching the Rust single-service model.
 | Path | Contents | Rust counterpart |
 |---|---|---|
 | `sdk/include/tedge_dot/` | public headers: model, config, connector vtable, decode, runtime | `crates/sdk` |
-| `sdk/src/` | config loader (tomlc99), decode/encode, envelope builder (cJSON), poll-loop runtime (mosquitto) | `crates/sdk` |
+| `sdk/src/` | config loader (tomlc99), decode/encode, envelope builder (cJSON), poll-loop runtime (mosquitto), device parameters + Cumulocity DTM rendering | `crates/sdk` |
 | `connectors/modbus/` | libmodbus connector (TCP + RTU, 4 tables, typed decode, writes) | `crates/connector-modbus` |
 | `connectors/opcua/` | open62541 connector (client session, node-id points, typed reads/writes) | `crates/connector-opcua` |
 | `connectors/canbus/` | SocketCAN connector + minimal DBC parser (BO_/SG_, Intel & Motorola layouts) | `crates/connector-canbus` |
 | `connectors/canopen/` | expedited SDO client over raw SocketCAN (no CANopen library) | `crates/connector-canopen` |
 | `connectors/profibus/` | minimal DP-V0 master (Diag→Prm→Cfg→Data_Exchange, bus thread, tcp:// transport) | `crates/connector-profibus` |
-| `src/main.c` | `read` / `write` / `run` CLI | `src/main.rs` |
+| `src/main.c` | `read` / `write` / `run` / `describe` CLI | `src/main.rs` |
 | `tests/golden.c` | conformance runner for `crates/sdk/conformance/vectors.json` | `tests/golden_vectors.rs` |
+| `tests/describe.c` | device-parameter derivation + DTM rendering checks | `crates/sdk/src/descriptor.rs` tests |
+| `ci/describe-parity.sh` | `tedge-dot describe` output compared between the Rust and C binaries | — |
 | `ci/smoke.sh` | e2e smoke: connector ⇄ simulator ⇄ broker, per protocol (used by the `c-poc` CI job) | conformance/e2e suites |
 | `cross/` | zig + Debian-multiarch cross-compilation image, build and verify scripts | goreleaser/zig |
 | `third_party/tomlc99/` | vendored TOML parser (MIT) | serde/toml |
 
 The Rust `Connector` trait maps to a C vtable (`tdot_connector_t` in
 [connector.h](sdk/include/tedge_dot/connector.h)): `configure`,
-`connect_device`, `read_point`, `write_point`, `disconnect_device`. Protocol
+`connect_device`, `read_point`, `write_point`, `disconnect_device`, plus the
+optional `device_info` (the link status `info` descriptor, which the c8y
+registration flow turns into the `c8y_ModbusDevice` twin fragment). Protocol
 modules are selected by `tdot_connector_factory(protocol)` and compiled in
 behind CMake options (`-DTDOT_MODBUS=ON/OFF`, `-DTDOT_OPCUA=ON/OFF`) —
 the C analogue of the cargo feature flags.
@@ -109,8 +157,14 @@ cmake --build build
 ./build/tedge-dot run   -c ../demo/config/modbus.toml --output stdout --duration 10s
 ./build/tedge-dot run   -c ../demo/config/opcua.toml   # publishes to MQTT broker
 
-# conformance
+# the writable points as Cumulocity DTM property definitions, for a tenant admin to
+# register once (needs no device, broker or protocol module):
+./build/tedge-dot describe -c ../demo/config/modbus.toml
+./build/tedge-dot describe -c ../demo/config/modbus.toml -d plc1 --compact
+
+# tests
 ./build/tedge-dot-golden ../crates/sdk/conformance/vectors.json
+./build/tedge-dot-describe
 ```
 
 ## What was verified (2026-07-02/03, against the demo simulators)
@@ -191,8 +245,6 @@ What this PoC shows about the MCU question:
 
 ## PoC scope cuts (vs. the Rust implementation)
 
-- **Typed mode only** — `mode = "raw"` points are not implemented (raw hex is
-  still echoed in every envelope).
 - **Polling only** — no OPC UA monitored-item push subscriptions, and the
   push-based canbus connector is rendered as drain-into-cache polling
   (`read_point` waits up to ~1.2 s for the first broadcast of a frame).
@@ -200,18 +252,14 @@ What this PoC shows about the MCU question:
   report a bad sample), and **PROFIBUS is tcp:// transport only** (no serial
   PHY, no FDL token timing — fine for the sim, not yet for a multi-master
   RS-485 bus).
-- **No management verbs / hot reload** — the runtime does not implement
-  `set-config` / `define-device` / `remove-device`, so the full Rust
-  conformance suite's B8/B9 checks would fail by design; the `c-poc` CI job
-  runs golden vectors + a live simulator smoke instead.
 - **No OPC UA security** — `security_policy = "None"` only (open62541
   supports Basic256Sha256 etc.; wiring it up is config + cert plumbing).
-- **Bitfield extraction** exists in the SDK (`tdot_bitfield_extract`, golden
-  vectors pass) but is not wired into the Modbus point config.
-- **One config file per process** (the Rust binary supervises all configs in
-  `/etc/tedge/plugins/ot/` from one process).
-- `stale` quality (last-good cache) and the `set-config` / `define-device`
-  management verbs are not implemented.
+- `stale` quality (last-good cache) is not implemented.
+- **No stall watchdog** — the Rust runtime bounds every protocol call and
+  restarts a connector that stops making progress (`operation_timeout` /
+  `stall_timeout`, contract §8.1); here the protection is whatever response
+  timeout the protocol library enforces (libmodbus and open62541 both have
+  one), which is why the conformance silent-peer checks pass.
 - Fixed-size buffers cap strings/raw values at 64 bytes.
 
 ## Licensing

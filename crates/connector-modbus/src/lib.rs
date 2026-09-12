@@ -11,6 +11,7 @@ pub use config::{ModbusAddress, ModbusConnection, ProtocolAddress, SerialDefault
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::time::Duration;
 use tedge_dot_sdk::{
     decode_primitive, encode_primitive, extract_bitfield, Access, Capabilities, CommandRequest,
     CommandResult, ConfigError, Connector, ConnectorConfig, ConnectorError, DataType, DeviceId,
@@ -47,6 +48,8 @@ struct DeviceModel {
 #[derive(Default)]
 pub struct ModbusConnector {
     serial: SerialDefaults,
+    /// Per-request bound; see [`ModbusConnection::request_timeout_s`].
+    request_timeout: Duration,
     devices: HashMap<String, DeviceModel>,
     contexts: HashMap<String, Context>,
 }
@@ -56,12 +59,28 @@ pub fn factory() -> Box<dyn Connector> {
     Box::<ModbusConnector>::default()
 }
 
+impl ModbusConnector {
+    /// Per-request bound, with a fallback: the struct derives `Default`, so the field is zero
+    /// until `configure` has run, and a zero timeout would fire instantly.
+    fn request_timeout(&self) -> Duration {
+        if self.request_timeout.is_zero() {
+            Duration::from_secs(5)
+        } else {
+            self.request_timeout
+        }
+    }
+}
+
 #[async_trait]
 impl Connector for ModbusConnector {
     fn configure(&mut self, config: &ConnectorConfig) -> Result<(), ConfigError> {
         let conn: ModbusConnection =
             serde_json::from_value(config.connection.clone()).unwrap_or_default();
         self.serial = conn.serial;
+        self.request_timeout = Duration::try_from_secs_f64(conn.request_timeout_s)
+            .ok()
+            .filter(|d| !d.is_zero())
+            .unwrap_or_else(|| Duration::from_secs(5));
         self.devices.clear();
 
         for d in &config.devices {
@@ -172,6 +191,7 @@ impl Connector for ModbusConnector {
         device: &DeviceId,
         points: &[PointRef],
     ) -> Result<Vec<Sample>, ConnectorError> {
+        let timeout = self.request_timeout();
         // Resolve unit id and per-point models, ending the immutable borrow on `self.devices`
         // before borrowing `self.contexts` mutably.
         let (unit_id, models): (u8, Vec<(String, Option<ModbusPoint>)>) =
@@ -202,6 +222,9 @@ impl Connector for ModbusConnector {
             }
         };
 
+        // Set once a request times out: every remaining point of this batch is reported
+        // without retrying, so one dead device cannot stretch a poll cycle by N timeouts.
+        let mut dead = false;
         let mut out = Vec::with_capacity(models.len());
         for (id, model) in models {
             let model = match model {
@@ -211,7 +234,21 @@ impl Connector for ModbusConnector {
                     continue;
                 }
             };
-            out.push(read_one(ctx, &id, &model, unit_id).await);
+            if dead {
+                // The peer already stopped answering this cycle: report the rest without
+                // waiting for another timeout each.
+                out.push(bad_sample(
+                    &id,
+                    Some(&model),
+                    unit_id,
+                    if model.address.table.is_bit() { 1 } else { 2 },
+                    "skipped: device stopped answering",
+                ));
+                continue;
+            }
+            let (sample, timed_out) = read_one(ctx, &id, &model, unit_id, timeout).await;
+            dead = timed_out;
+            out.push(sample);
         }
         Ok(out)
     }
@@ -268,13 +305,22 @@ impl Connector for ModbusConnector {
         if !model.access.can_write() || !model.address.table.is_writable() {
             return Err(ConnectorError::AccessDenied(request.point.clone()));
         }
+        let timeout = self.request_timeout();
 
         let ctx = self
             .contexts
             .get_mut(device)
             .ok_or_else(|| ConnectorError::NotConnected(device.clone()))?;
 
-        write_point(ctx, &model, request).await?;
+        match tokio::time::timeout(timeout, write_point(ctx, &model, request)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(ConnectorError::Transport(format!(
+                    "write request timed out after {:.3}s (connection.request_timeout_s)",
+                    timeout.as_secs_f64()
+                )))
+            }
+        }
         Ok(CommandResult {
             point: request.point.clone(),
             value: request.value.clone(),
@@ -289,7 +335,36 @@ impl Connector for ModbusConnector {
 }
 
 /// Read a single point and build its sample.
-async fn read_one(ctx: &mut Context, id: &str, model: &ModbusPoint, unit_id: u8) -> Sample {
+/// Read one point under the per-request bound. Returns the sample and whether the request
+/// timed out — the caller stops the batch then, and the runtime's degraded-link handling
+/// re-establishes the transport (a cancelled request leaves the connection mid-frame, so it
+/// must not be reused).
+async fn read_one(
+    ctx: &mut Context,
+    id: &str,
+    model: &ModbusPoint,
+    unit_id: u8,
+    timeout: Duration,
+) -> (Sample, bool) {
+    match tokio::time::timeout(timeout, read_one_unbounded(ctx, id, model, unit_id)).await {
+        Ok(sample) => (sample, false),
+        Err(_) => {
+            let group = if model.address.table.is_bit() { 1 } else { 2 };
+            let reason = format!(
+                "request timed out after {:.3}s (connection.request_timeout_s)",
+                timeout.as_secs_f64()
+            );
+            (bad_sample(id, Some(model), unit_id, group, &reason), true)
+        }
+    }
+}
+
+async fn read_one_unbounded(
+    ctx: &mut Context,
+    id: &str,
+    model: &ModbusPoint,
+    unit_id: u8,
+) -> Sample {
     let addr = &model.address;
     if addr.table.is_bit() {
         let count = addr.count.unwrap_or(1);

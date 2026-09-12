@@ -4,26 +4,66 @@
   "title": "OT Connector Configuration",
   "description": "TOML configuration for a tedge-dot instance, expressed as JSON Schema. Protocol-specific objects (connection, device.protocol_address, point.address) are validated by each connector's own schema.",
   "type": "object",
-  "required": ["connector"],
+  "required": [
+    "connector"
+  ],
   "additionalProperties": false,
   "properties": {
     "connector": {
       "type": "object",
-      "required": ["protocol"],
+      "required": [
+        "protocol"
+      ],
       "additionalProperties": false,
       "properties": {
-        "protocol": { "type": "string", "minLength": 1 },
-        "service_name": { "type": "string", "default": "tedge-dot" },
-        "poll_interval": { "$ref": "#/$defs/duration", "default": "2s" },
-        "log_level": { "enum": ["error", "warn", "info", "debug", "trace"], "default": "info" }
+        "protocol": {
+          "type": "string",
+          "minLength": 1
+        },
+        "service_name": {
+          "type": "string",
+          "default": "tedge-dot"
+        },
+        "poll_interval": {
+          "$ref": "#/$defs/duration",
+          "default": "2s"
+        },
+        "operation_timeout": {
+          "type": "string",
+          "default": "30s",
+          "description": "Upper bound on a single protocol-module call (read batch, write, connect, subscribe). A module that never returns — what a half-open socket produces: no answer, no error, no reset — would otherwise block the connector's loop forever, stopping samples, health and link status with nothing logged. The runtime turns the bound into an ordinary transport error, so the usual degraded-link and reconnect handling applies."
+        },
+        "stall_timeout": {
+          "type": "string",
+          "default": "120s",
+          "description": "How long the connector's loop may make no progress before it is treated as wedged and restarted (the supervisor cancels and re-runs it; the MQTT last will marks the service down). Must exceed operation_timeout; \"0\" disables the watchdog."
+        },
+        "log_level": {
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "default": "info"
+        }
       }
     },
     "mqtt": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "host": { "type": "string", "default": "127.0.0.1" },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 1883 }
+        "host": {
+          "type": "string",
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 1883
+        }
       }
     },
     "connection": {
@@ -32,7 +72,9 @@
     },
     "device": {
       "type": "array",
-      "items": { "$ref": "#/$defs/device" }
+      "items": {
+        "$ref": "#/$defs/device"
+      }
     }
   },
   "$defs": {
@@ -43,45 +85,100 @@
     },
     "device": {
       "type": "object",
-      "required": ["name", "protocol_address"],
+      "required": [
+        "name",
+        "protocol_address"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
         "protocol_address": {
           "type": "object",
           "description": "Protocol-specific device address. Shape defined by the connector spec."
         },
-        "poll_interval": { "$ref": "#/$defs/duration" },
-        "default_mode": { "enum": ["raw", "typed"] },
+        "poll_interval": {
+          "$ref": "#/$defs/duration"
+        },
+        "default_mode": {
+          "enum": [
+            "raw",
+            "typed"
+          ]
+        },
         "point": {
           "type": "array",
-          "items": { "$ref": "#/$defs/point" }
+          "items": {
+            "$ref": "#/$defs/point"
+          }
         }
       }
     },
     "point": {
       "type": "object",
-      "required": ["id", "address"],
+      "required": [
+        "id",
+        "address"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "mode": { "enum": ["raw", "typed"] },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "enum": [
+            "raw",
+            "typed"
+          ]
+        },
         "datatype": {
           "enum": [
             "bool",
-            "int8", "uint8",
-            "int16", "uint16",
-            "int32", "uint32",
-            "int64", "uint64",
-            "float32", "float64",
-            "string", "bytes"
+            "int8",
+            "uint8",
+            "int16",
+            "uint16",
+            "int32",
+            "uint32",
+            "int64",
+            "uint64",
+            "float32",
+            "float64",
+            "string",
+            "bytes"
           ]
         },
-        "endianness": { "enum": ["big", "little"], "default": "big" },
-        "word_order": { "enum": ["big", "little"], "default": "big" },
-        "poll_interval": { "$ref": "#/$defs/duration" },
-        "access": { "enum": ["read", "write", "read_write"], "default": "read" },
-        "unit": { "type": "string" },
+        "endianness": {
+          "enum": [
+            "big",
+            "little"
+          ],
+          "default": "big"
+        },
+        "word_order": {
+          "enum": [
+            "big",
+            "little"
+          ],
+          "default": "big"
+        },
+        "poll_interval": {
+          "$ref": "#/$defs/duration"
+        },
+        "access": {
+          "enum": [
+            "read",
+            "write",
+            "read_write"
+          ],
+          "default": "read"
+        },
+        "unit": {
+          "type": "string"
+        },
         "address": {
           "type": "object",
           "description": "Protocol-specific point address. Shape defined by the connector spec."
@@ -91,10 +188,22 @@
           "additionalProperties": false,
           "description": "Linear engineering transform applied by the connector after decode: (value * multiplier * 10^decimal_shift / divisor) + offset.",
           "properties": {
-            "multiplier": { "type": "number", "default": 1 },
-            "divisor": { "type": "number", "default": 1 },
-            "decimal_shift": { "type": "integer", "default": 0 },
-            "offset": { "type": "number", "default": 0 }
+            "multiplier": {
+              "type": "number",
+              "default": 1
+            },
+            "divisor": {
+              "type": "number",
+              "default": 1
+            },
+            "decimal_shift": {
+              "type": "integer",
+              "default": 0
+            },
+            "offset": {
+              "type": "number",
+              "default": 0
+            }
           }
         },
         "meta": {
@@ -109,21 +218,53 @@
       },
       "allOf": [
         {
-          "if": { "properties": { "mode": { "const": "typed" } }, "required": ["mode"] },
-          "then": { "required": ["datatype"] }
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "typed"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "datatype"
+            ]
+          }
         }
       ]
     }
   },
   "examples": [
     {
-      "connector": { "protocol": "modbus", "poll_interval": "2s", "log_level": "info" },
-      "mqtt": { "host": "127.0.0.1", "port": 1883 },
-      "connection": { "serial": { "baudrate": 9600, "parity": "N", "stopbits": 2, "databits": 8 } },
+      "connector": {
+        "protocol": "modbus",
+        "poll_interval": "2s",
+        "log_level": "info"
+      },
+      "mqtt": {
+        "host": "127.0.0.1",
+        "port": 1883
+      },
+      "connection": {
+        "serial": {
+          "baudrate": 9600,
+          "parity": "N",
+          "stopbits": 2,
+          "databits": 8
+        }
+      },
       "device": [
         {
           "name": "plc-1",
-          "protocol_address": { "transport": "tcp", "host": "192.168.0.10", "port": 502, "unit_id": 1 },
+          "protocol_address": {
+            "transport": "tcp",
+            "host": "192.168.0.10",
+            "port": 502,
+            "unit_id": 1
+          },
           "default_mode": "typed",
           "point": [
             {
@@ -133,15 +274,27 @@
               "endianness": "big",
               "word_order": "big",
               "access": "read",
-              "address": { "table": "holding", "address": 7, "count": 2 },
+              "address": {
+                "table": "holding",
+                "address": 7,
+                "count": 2
+              },
               "unit": "°C",
-              "meta": { "on_change": true, "deadband": 0.5, "min_interval": "10s" }
+              "meta": {
+                "on_change": true,
+                "deadband": 0.5,
+                "min_interval": "10s"
+              }
             },
             {
               "id": "run_command",
               "mode": "raw",
               "access": "read_write",
-              "address": { "table": "coil", "address": 0, "count": 1 }
+              "address": {
+                "table": "coil",
+                "address": 0,
+                "count": 1
+              }
             }
           ]
         }

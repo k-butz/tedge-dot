@@ -1,34 +1,60 @@
-# End-to-end harness for the Rust OPC-UA connector.
+# End-to-end harness for the OPC UA connector.
 #
-#   broker     - lightweight MQTT broker (no cloud)
-#   simulator  - python-asyncua OPC-UA server (a real OPC-UA TCP server)
-#   connector  - the Rust tedge-dot (opcua module) reading the simulator
+# The stack is started by the Robot suite itself (DeviceLibrary, see
+# connectors/_shared/stack.resource): every setup creates its own compose project with a
+# random name, so suites are isolated and nothing has to be started beforehand.
 #
-# The Robot suite runs on the host and connects to the broker on localhost:12883.
+# Ports are therefore published WITHOUT a fixed host port (parallel-safe); the suite resolves
+# the broker's ephemeral port with `Get Service Port`. For manual work the host ports can be
+# pinned via the env vars below (`just sim opcua` / `just e2e-up opcua` do this):
+#   BROKER_PORT
+#   OPCUA_SIM_PORT
 services:
   broker:
     image: public.ecr.aws/docker/library/eclipse-mosquitto:2
     volumes:
       - ../_shared/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     ports:
-      # Host port 12883 avoids clashing with a local tedge broker (1883) and the
-      # modbus e2e harness (11883).
-      - "12883:1883"
+      - target: 1883
+        published: "${BROKER_PORT:-}"
 
   simulator:
     build:
       context: ../..
       dockerfile: connectors/opcua/sim/Dockerfile
+    ports:
+      - target: 4840
+        published: "${OPCUA_SIM_PORT:-}"
     environment:
       # Advertise the docker service hostname so the client's endpoint matches.
       OPCUA_ENDPOINT_HOST: simulator
-    ports:
-      - "4840:4840"
 
   connector:
+    # Stable image name so every (randomly named) project reuses the built image instead of
+    # rebuilding it. IMPL/CONNECTOR_DOCKERFILE select the implementation under test:
+    # the Rust build by default, the C build (poc-c/) via `just test-e2e-c opcua`.
+    image: tedge-dot-${IMPL:-rust}-opcua-connector
     build:
       context: ../..
-      dockerfile: connectors/opcua/Dockerfile.connector
+      dockerfile: ${CONNECTOR_DOCKERFILE:-connectors/opcua/Dockerfile.connector}
+      args:
+        PROTOCOL: opcua
+    labels:
+      # Marks the service DeviceLibrary treats as the device under test, so `Execute Command`
+      # runs inside the connector container ("${SERIAL}:broker" etc. address the others).
+      device-test-core.role: main
     depends_on:
       - broker
       - simulator
+
+  # thin-edge flows engine (user-defined mapper, no cloud) running this repo's flows against
+  # the same broker, so the suite can drive the device-side command/parameter bridge end to end.
+  flows:
+    build:
+      context: ../..
+      dockerfile: connectors/_shared/Dockerfile.flows
+      args:
+        PROTOCOL: opcua
+    depends_on:
+      broker:
+        condition: service_started

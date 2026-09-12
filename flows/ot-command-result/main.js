@@ -2,11 +2,13 @@
 //
 // Direction: OT protocol format -> thin-edge.io data model.
 //   in:  te/device/<device>/ot/<protocol>/cmd/<verb>/<id>  {"status":"executing|successful|failed",...}
-//   out: te/device/<device>///cmd/ot_<verb>/<id>           (same payload, retained)
+//   out: te/device/<device>///cmd/<command type>/<id>      (same payload, retained)
 //
 // Protocol-neutral and verb-neutral: mirrors any connector's command result onto the matching
 // generic `ot_<verb>` command (the connector verb's `-` becomes `_` and gains the `ot_` prefix:
 // write -> ot_write, set-config -> ot_set_config, define-device -> ot_define_device, ...).
+// A request whose init carried `origin.command` (ot-command-forward sets it when it reshapes a
+// command, e.g. parameter_update -> write-batch) is mirrored onto that command type instead.
 // Only connector-driven transitions are mirrored (status != init), so the original request that
 // ot-command-forward sends to the connector is not echoed back (no loop).
 
@@ -19,7 +21,6 @@ export function onMessage(message, context) {
   const device = parts[2];
   const verb = parts[parts.length - 2];
   const id = `${parts[parts.length - 1]}`.replace(/^ot--/, "");
-  const commandType = prefix + verb.split("-").join("_");
 
   let payload;
   try {
@@ -29,7 +30,7 @@ export function onMessage(message, context) {
   }
   const status = payload?.status ?? "";
 
-  // On init: cache the full payload so metadata (e.g. "c8y-mapper") can be
+  // On init: cache the full payload so metadata (e.g. "c8y-mapper", "origin") can be
   // re-attached to connector result messages that won't carry those keys.
   if (status === "init") {
     context.script.set(id, payload);
@@ -37,9 +38,18 @@ export function onMessage(message, context) {
   }
   if (status === "") return []; // ignore clearing/non-JSON messages
 
-  // Merge stored init metadata with the connector result; connector fields win.
   const initPayload = context.script.get(id) ?? {};
-  const merged = { ...initPayload, ...payload };
+  const origin = initPayload.origin && typeof initPayload.origin === "object" ? initPayload.origin : null;
+  const commandType = origin?.command || prefix + verb.split("-").join("_");
+
+  // Merge stored init metadata with the connector result; connector fields win. The request
+  // body of a reshaped command (`writes`) is not echoed: the thin-edge command keeps its own
+  // shape (`origin.set` / `origin.parameters` say what was asked).
+  const { writes: _writes, ...initMeta } = initPayload;
+  const merged = { ...initMeta, ...payload };
+  if (status === "failed" && origin?.error) {
+    merged.reason = [origin.error, payload.reason].filter((r) => r).join("; ");
+  }
 
   // Clean up cached state once the command reaches a terminal state.
   if (status === "successful" || status === "failed") {

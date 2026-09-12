@@ -1,26 +1,83 @@
-# Full Cumulocity end-to-end image: thin-edge.io demo base + the Rust OT connector,
-# its thin-edge flows, and the Cumulocity operation shims. This REPLACES the legacy Python
-# plugin: no Python Modbus code is installed here.
+# Full Cumulocity end-to-end image: thin-edge.io demo base + the OT connector, its thin-edge
+# flows, and the Cumulocity operation shims. This REPLACES the legacy Python plugin: no Python
+# Modbus code is installed here.
 #
-# Build context is the repository root. Run `just build` first to populate dist/ with the
-# cross-compiled .deb packages; Docker selects the correct arch via TARGETARCH automatically.
-FROM ghcr.io/thin-edge/tedge-demo-main-systemd:latest
+# IMPL selects the implementation under test, exactly as the connector e2e stacks do:
+#
+#   rust (default) — the cross-compiled .deb from dist/; run `just build` first.
+#   c              — the C proof of concept (poc-c/), compiled in a builder stage here, so
+#                    nothing has to be built beforehand and dist/ is not read at all
+#                    (BuildKit skips the stage that COPYs it).
+#
+# Everything after the connector install is shared, so both implementations get the same
+# flows, configs and operation shims — `just test-cloud modbus` / `just test-cloud-c modbus`.
+#
+# Build context is the repository root. Docker selects the correct arch via TARGETARCH.
+ARG BASE_REGISTRY=public.ecr.aws/docker/library
+ARG DEMO_IMAGE=ghcr.io/thin-edge/tedge-demo-main-systemd:latest
+ARG IMPL=rust
 
-# --- Rust connector package (binary + systemd unit + default config) -----------------------
+# --- C connector build (only when IMPL=c) --------------------------------------------------
+# Debian bookworm matches the demo image, so the binary links against the same libc/libmodbus.
+# Only the modbus module is compiled in — this is the modbus cloud harness.
+FROM ${BASE_REGISTRY}/debian:bookworm AS build-c
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build pkg-config git ca-certificates python3 \
+        libmodbus-dev libmosquitto-dev libcjson-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY poc-c /src/poc-c
+COPY crates/sdk/conformance /src/crates/sdk/conformance
+RUN cmake -S poc-c -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DTDOT_MODBUS=ON -DTDOT_OPCUA=OFF -DTDOT_PROFIBUS=OFF \
+        -DTDOT_CANBUS=OFF -DTDOT_CANOPEN=OFF \
+    && cmake --build build --target tedge-dot \
+    && cp build/tedge-dot /usr/local/bin/tedge-dot
+
+# --- connector install, Rust: the packaged .deb (binary + systemd unit + default configs) ---
 # Copy both amd64 and arm64 debs; the shell selects the right one at install time via
 # `dpkg --print-architecture` (Docker COPY does not apply globs after variable substitution).
+FROM ${DEMO_IMAGE} AS connector-rust
 RUN mkdir -p /opt/debs/
 COPY dist/*.deb /opt/debs/
-# jq + curl are runtime dependencies of the Cloud Fieldbus import shim (c8y-fieldbus-import).
 RUN arch=$(dpkg --print-architecture) \
     && apt-get update \
-    && apt-get install -y --no-install-recommends --allow-downgrades jq curl /opt/debs/tedge-dot_*_linux_${arch}.deb \
-    && rm -rf /tmp/debs \
+    && apt-get install -y --no-install-recommends --allow-downgrades \
+        /opt/debs/tedge-dot_*_linux_${arch}.deb \
+    && rm -rf /opt/debs \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- connector install, C: the same layout the C package would produce ---------------------
+# poc-c/packaging/nfpm.yaml declares the C package a drop-in replacement for the Rust one
+# (same binary path, same unit, same config directory), so this stage reproduces that layout
+# by hand rather than building a package inside the image.
+FROM ${DEMO_IMAGE} AS connector-c
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libmodbus5 libmosquitto1 libcjson1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build-c /usr/local/bin/tedge-dot /usr/bin/tedge-dot
+COPY packaging/tedge-dot.service /lib/systemd/system/tedge-dot.service
+# The service runs as tedge and persists management-command config changes back into this
+# directory (define-device), so tedge must own it.
+RUN chmod 0755 /usr/bin/tedge-dot \
+    && chmod 0644 /lib/systemd/system/tedge-dot.service \
+    && install -d -o tedge -g tedge -m 0755 /etc/tedge/plugins/ot
+
+# --- everything below is shared by both implementations ------------------------------------
+FROM connector-${IMPL}
+
+# jq + curl are runtime dependencies of the Cloud Fieldbus import shim (c8y-fieldbus-import).
+# tedge-parameter-plugin (thin-edge community repo) owns the c8y_ParameterUpdate operation
+# template; the OT child devices advertise its `parameter_update` command and the flows serve it
+# (see doc/rfc/0003-parameter-writes.md).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends jq curl tedge-parameter-plugin \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Connector configuration pointing at the simulator -------------------------------------
-# The package's tedge-dot supervisor launches one connector per /etc/tedge/plugins/ot/*.toml.
-# Replace the demo configs with the single modbus config for this harness (host "simulator").
+# The tedge-dot supervisor launches one connector per /etc/tedge/plugins/ot/*.toml.
+# Replace the packaged defaults with the single modbus config for this harness (host "simulator").
 COPY cloud/modbus/modbus.toml /etc/tedge/plugins/ot/modbus.toml
 RUN rm -f /etc/tedge/plugins/ot/canbus.toml /etc/tedge/plugins/ot/canopen.toml \
     /etc/tedge/plugins/ot/opcua.toml /etc/tedge/plugins/ot/profibus.toml
@@ -32,6 +89,9 @@ COPY flows/ot-command-forward /etc/tedge/mappers/c8y/flows/ot-command-forward
 COPY flows/ot-command-result  /etc/tedge/mappers/c8y/flows/ot-command-result
 COPY flows/ot-alarm           /etc/tedge/mappers/c8y/flows/ot-alarm
 COPY flows/ot-event           /etc/tedge/mappers/c8y/flows/ot-event
+# Device parameters: writable points as twin fragments (the plugin's c8y_ParameterUpdate
+# operation is bridged by the command flows above).
+COPY flows/ot-parameter-state   /etc/tedge/mappers/c8y/flows/ot-parameter-state
 
 # Enable the c8y_ModbusDevice twin fragment on registration.
 COPY cloud/modbus/params/ot-registration.params.toml /etc/tedge/mappers/c8y/flows/ot-registration/params.toml

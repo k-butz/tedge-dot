@@ -1,0 +1,21 @@
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python3",
+    "python.envFile": "${workspaceFolder}/.env",
+    "python.terminal.useEnvFile": true,
+    "robotcode.debug.attachPython": true,
+    // NOTE: do not set "robotcode.robot.paths" to both test roots. It becomes
+    // `-dp connectors -dp cloud` (two robot data sources), and when RobotCode runs a single
+    // test it adds `--parseinclude <that file>`, which leaves the other root empty and robot
+    // aborts with "Suite 'Connectors' contains no tests or tasks.". With no paths setting the
+    // workspace root is the single data source and discovery still finds both trees.
+    "robotcode.workspace.excludePatterns": [
+        "**/.venv/**",
+        "**/target/**",
+        "**/output/**",
+        "**/output-c/**"
+    ],
+    "cmake.sourceDirectory": "/Users/reubenmiller/dev/projects/thin-edge.io/code/tedge-dot/poc-c",
+    "robotcode.profiles": [
+        "c"
+    ],
+}

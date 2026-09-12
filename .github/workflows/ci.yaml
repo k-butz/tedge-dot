@@ -66,6 +66,7 @@ jobs:
         protocol: [modbus, opcua, canbus, canopen, profibus]
     steps:
       - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
       - name: Install C toolchain + libraries
         run: |
           sudo apt-get update
@@ -89,13 +90,29 @@ jobs:
         run: |
           sudo systemctl start mosquitto || mosquitto -d -p 1883
           timeout 10 sh -c 'until nc -z 127.0.0.1 1883; do sleep 0.5; done'
+      # `just sim` pins the host port the demo configs (and smoke.sh) expect; the e2e stacks
+      # leave it ephemeral so they stay parallel-safe.
       - name: Start protocol simulator
-        run: docker compose -f connectors/${{ matrix.protocol }}/docker-compose.yaml up -d --build --wait simulator
+        run: just sim ${{ matrix.protocol }}
       - name: Smoke test against simulator + broker
         run: ./poc-c/ci/smoke.sh ${{ matrix.protocol }}
+      # The contract conformance suite (layers 1-3) against the C build, for the protocols the
+      # harness has a built-in simulator for. Same checks as the Rust `conformance` job.
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.protocol == 'modbus' || matrix.protocol == 'opcua'
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.protocol == 'modbus' || matrix.protocol == 'opcua'
+      - name: Conformance suite against the C build
+        if: matrix.protocol == 'modbus' || matrix.protocol == 'opcua'
+        run: cargo run -p ot-conformance -- check --spec connectors/${{ matrix.protocol }}/conformance-c.toml
+      # `tedge-dot describe` must render the same Cumulocity DTM definitions in both builds;
+      # runs once (it covers every config in the repo) where the Rust toolchain is set up.
+      - name: Describe parity (Rust vs C)
+        if: matrix.protocol == 'modbus'
+        run: just c-describe-parity
       - name: Connector log + simulator log on failure
         if: failure()
-        run: docker compose -f connectors/${{ matrix.protocol }}/docker-compose.yaml logs simulator || true
+        run: docker compose -p tedge-dot-sim-${{ matrix.protocol }} -f connectors/${{ matrix.protocol }}/docker-compose.yaml logs simulator || true
 
   conformance:
     name: Conformance (${{ matrix.protocol }})
@@ -138,4 +155,30 @@ jobs:
         with:
           name: robot-output-${{ matrix.protocol }}
           path: connectors/${{ matrix.protocol }}/output/
+          if-no-files-found: ignore
+
+  e2e-c:
+    name: e2e, C connector (${{ matrix.protocol }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: [modbus, opcua, canbus, canopen, profibus]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load vcan kernel module (SocketCAN suites)
+        if: matrix.protocol == 'canbus' || matrix.protocol == 'canopen'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-modules-extra-$(uname -r)
+          sudo modprobe vcan
+      - uses: extractions/setup-just@v2
+      - name: Run e2e suite against the C connector
+        run: just test-e2e-c ${{ matrix.protocol }}
+      - name: Upload robot output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-output-c-${{ matrix.protocol }}
+          path: connectors/${{ matrix.protocol }}/output-c/
           if-no-files-found: ignore

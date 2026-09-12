@@ -34,6 +34,7 @@ add_library(tedge_dot_sdk STATIC
   sdk/src/model.c
   sdk/src/decode.c
   sdk/src/config.c
+  sdk/src/descriptor.c
   sdk/src/envelope.c
   sdk/src/runtime.c
   sdk/src/factory.c
@@ -123,6 +124,12 @@ target_link_libraries(tedge-dot-golden PRIVATE tedge_dot_sdk)
 add_test(NAME golden-vectors
          COMMAND tedge-dot-golden
                  ${CMAKE_CURRENT_SOURCE_DIR}/../crates/sdk/conformance/vectors.json)
+
+# Device parameters / `describe`: the same assertions as the Rust SDK's
+# descriptor tests (crates/sdk/src/descriptor.rs), over the same fixture config.
+add_executable(tedge-dot-describe tests/describe.c)
+target_link_libraries(tedge-dot-describe PRIVATE tedge_dot_sdk)
+add_test(NAME describe COMMAND tedge-dot-describe)
 
 # Strip in release-style builds for a honest size comparison
 if(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel" AND NOT APPLE)

@@ -12,17 +12,14 @@ Documentation       End-to-end tests for the PROFIBUS-DP connector against the
 ...
 ...                 Run via:  just test-e2e-profibus
 
-Library             ../../_shared/MqttClient.py
+Resource            ../../_shared/stack.resource
 Library             Collections
 
-Suite Setup         Connect And Subscribe
-Suite Teardown      Disconnect Broker
+Suite Setup         Setup OT Stack    profibus
+Suite Teardown      Teardown OT Stack
 
 
 *** Variables ***
-${BROKER_HOST}          localhost
-${BROKER_PORT}          11884
-
 ${DEVICE}               remote_io
 ${PROTOCOL}             profibus
 ${SERVICE}              tedge-dot
@@ -98,10 +95,6 @@ Writes Digital Output And Reads It Back
 
 
 *** Keywords ***
-Connect And Subscribe
-    Connect Broker    ${BROKER_HOST}    ${BROKER_PORT}
-    Subscribe    te/#
-
 Sample Should Be Good
     [Arguments]    ${payload}
     ${quality}=    Get Json Field    ${payload}    quality

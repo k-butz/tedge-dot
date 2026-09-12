@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cjson/cJSON.h"
 #include "tedge_dot/connector.h"
 #include "tedge_dot/decode.h"
 
@@ -23,6 +24,8 @@ typedef enum {
 typedef struct {
     mb_table_t table;
     uint16_t address;
+    uint32_t start_bit; /* bit-field refinement (contract §4); bit_count 0 = whole value */
+    uint32_t bit_count;
     uint16_t count; /* registers or bits */
 } mb_point_t;
 
@@ -48,13 +51,13 @@ typedef struct {
 
 static const char CAPABILITIES[] =
     "{\"protocol\":\"modbus\",\"version\":\"0.1.0-poc\","
-    "\"modes\":[\"typed\"],"
-    "\"datatypes\":[\"bool\",\"int8\",\"uint8\",\"int16\",\"uint16\","
+    "\"modes\":[\"raw\",\"typed\"],"
+    "\"datatypes\":[\"bool\",\"int16\",\"uint16\","
     "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\"],"
     "\"point_kinds\":[\"coil\",\"discrete_input\",\"holding_register\","
     "\"input_register\"],"
-    "\"command_verbs\":[\"write\"],"
-    "\"features\":[\"polling\"],\"subscribe\":false}";
+    "\"command_verbs\":[\"write\",\"write-coil\",\"write-batch\"],"
+    "\"features\":[\"polling\",\"bitfield\"],\"subscribe\":false}";
 
 static int parse_table(const char *s, mb_table_t *out) {
     if (strcmp(s, "coil") == 0)
@@ -178,6 +181,11 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
             free(ts.u.s);
             mp->address = (uint16_t)ad.u.i;
 
+            toml_datum_t bd;
+            if ((bd = toml_int_in(pt->address, "start_bit")).ok)
+                mp->start_bit = (uint32_t)bd.u.i;
+            if ((bd = toml_int_in(pt->address, "bit_count")).ok)
+                mp->bit_count = (uint32_t)bd.u.i;
             toml_datum_t cn = toml_int_in(pt->address, "count");
             if (cn.ok) {
                 mp->count = (uint16_t)cn.u.i;
@@ -225,7 +233,11 @@ static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
     mb_device_t *mb = dev->proto;
     disconnect_device(self, dev);
 
-    mb->ctx = mb->tcp ? modbus_new_tcp(mb->host, mb->port)
+    /* modbus_new_tcp() accepts IP literals only; the _pi variant resolves host
+     * names (docker service names, DNS) like the Rust connector does. */
+    char port_str[16];
+    snprintf(port_str, sizeof port_str, "%d", mb->port);
+    mb->ctx = mb->tcp ? modbus_new_tcp_pi(mb->host, port_str)
                       : modbus_new_rtu(mb->serial, mb->baudrate, mb->parity,
                                        mb->databits, mb->stopbits);
     if (!mb->ctx) {
@@ -300,8 +312,8 @@ static int read_point(tdot_connector_t *self, tdot_device_t *dev,
         return -1; /* transport down -> runtime reconnects */
     }
 
-    if (pt->datatype == TDOT_DT_NONE) {
-        out->value.kind = TDOT_VAL_NONE;
+    if (pt->mode == TDOT_MODE_RAW || pt->datatype == TDOT_DT_NONE) {
+        out->value.kind = TDOT_VAL_NONE; /* raw mode: wire bytes only */
         return 0;
     }
 
@@ -313,8 +325,16 @@ static int read_point(tdot_connector_t *self, tdot_device_t *dev,
         out->value.b = out->raw[0] != 0;
         return 0;
     }
-    if (tdot_decode(pt->datatype, out->raw, out->raw_len, pt->endianness,
-                    pt->word_order, &out->value, err, sizeof err) != 0) {
+    if (mp->bit_count > 0) {
+        /* Bit-field refinement: extract the declared bits of the (reordered)
+         * integer instead of decoding the whole word. */
+        out->value.kind = TDOT_VAL_NUM;
+        out->value.num = (double)tdot_bitfield_extract(
+            out->raw, out->raw_len, pt->endianness, pt->word_order,
+            mp->start_bit, mp->bit_count);
+    } else if (tdot_decode(pt->datatype, out->raw, out->raw_len,
+                           pt->endianness, pt->word_order, &out->value, err,
+                           sizeof err) != 0) {
         tdot_sample_bad(out, "decode error: %s", err);
         return 0;
     }
@@ -368,6 +388,55 @@ static int write_point(tdot_connector_t *self, tdot_device_t *dev,
     return 0;
 }
 
+/* Device descriptor for the link status `info` (mirrors device_descriptor() in
+ * crates/connector-modbus/src/lib.rs, field for field, so the c8y_ModbusDevice
+ * twin fragment the registration flow builds from it is the same in both
+ * implementations). The RTU serial options are read from the configured address
+ * rather than the resolved defaults, which is what the Rust connector reports. */
+static char *device_info(tdot_connector_t *self, const tdot_device_t *dev) {
+    (void)self;
+    const mb_device_t *mb = dev->proto;
+    if (!mb)
+        return NULL; /* not configured yet */
+
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "protocol", "modbus");
+    if (mb->tcp) {
+        cJSON_AddStringToObject(obj, "transport", "tcp");
+        cJSON_AddStringToObject(obj, "host", mb->host);
+        cJSON_AddNumberToObject(obj, "port", mb->port);
+        cJSON_AddNumberToObject(obj, "unit_id", mb->unit_id);
+    } else {
+        cJSON_AddStringToObject(obj, "transport", "rtu");
+        cJSON_AddStringToObject(obj, "serial_port", mb->serial);
+        cJSON_AddNumberToObject(obj, "unit_id", mb->unit_id);
+        /* Unset options are reported as null, as the Rust connector does. */
+        toml_table_t *pa = dev->protocol_address;
+        toml_datum_t d;
+        if (pa && (d = toml_int_in(pa, "baudrate")).ok)
+            cJSON_AddNumberToObject(obj, "baudrate", (double)d.u.i);
+        else
+            cJSON_AddNullToObject(obj, "baudrate");
+        if (pa && (d = toml_string_in(pa, "parity")).ok) {
+            cJSON_AddStringToObject(obj, "parity", d.u.s);
+            free(d.u.s);
+        } else {
+            cJSON_AddNullToObject(obj, "parity");
+        }
+        if (pa && (d = toml_int_in(pa, "stopbits")).ok)
+            cJSON_AddNumberToObject(obj, "stopbits", (double)d.u.i);
+        else
+            cJSON_AddNullToObject(obj, "stopbits");
+        if (pa && (d = toml_int_in(pa, "databits")).ok)
+            cJSON_AddNumberToObject(obj, "databits", (double)d.u.i);
+        else
+            cJSON_AddNullToObject(obj, "databits");
+    }
+    char *json = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+    return json;
+}
+
 static void destroy(tdot_connector_t *self) {
     free(self->state);
     free(self);
@@ -383,6 +452,7 @@ tdot_connector_t *tdot_connector_modbus_new(void) {
     c->read_point = read_point;
     c->write_point = write_point;
     c->disconnect_device = disconnect_device;
+    c->device_info = device_info;
     c->destroy = destroy;
     return c;
 }

@@ -11,13 +11,93 @@ use crate::decode::{Endianness, WordOrder};
 use crate::model::{format_rfc3339_ms, Mode, Sample};
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value as EditValue};
 use tracing::{debug, error, info, warn};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Liveness marker for a connector's loop, shared with whoever supervises it.
+///
+/// The loop stamps it on every iteration; a supervisor that sees it go stale knows the loop is
+/// wedged (a protocol call that never returns) and can cancel and restart the connector — the
+/// loop itself cannot do that, since the hang is *inside* it. Monotonic: it measures elapsed
+/// time from a shared start instant, so a wall-clock change cannot make a live loop look stuck.
+#[derive(Clone, Debug)]
+pub struct Progress(Arc<(Instant, AtomicU64)>);
+
+impl Progress {
+    pub fn new() -> Self {
+        let progress = Progress(Arc::new((Instant::now(), AtomicU64::new(0))));
+        progress.mark();
+        progress
+    }
+
+    /// Record that the loop just made progress.
+    pub fn mark(&self) {
+        let elapsed = self.0 .0.elapsed().as_millis() as u64;
+        self.0 .1.store(elapsed, Ordering::Relaxed);
+    }
+
+    /// How long since the last `mark()`.
+    pub fn idle(&self) -> Duration {
+        let now = self.0 .0.elapsed().as_millis() as u64;
+        Duration::from_millis(now.saturating_sub(self.0 .1.load(Ordering::Relaxed)))
+    }
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Progress::new()
+    }
+}
+
+/// Bounds the runtime puts on the protocol module. Carried to the few helpers that call it.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    /// Upper bound on one protocol-module call (`ConnectorSection::operation_timeout`).
+    operation: Duration,
+}
+
+impl Limits {
+    fn from_config(config: &ConnectorConfig) -> Self {
+        let operation = parse_duration(&config.connector.operation_timeout)
+            .filter(|d| !d.is_zero())
+            .unwrap_or_else(|| {
+                warn!(
+                    "invalid connector.operation_timeout '{}'; using 30s",
+                    config.connector.operation_timeout
+                );
+                Duration::from_secs(30)
+            });
+        Limits { operation }
+    }
+}
+
+/// Run one protocol-module call under the runtime's operation bound.
+///
+/// A module that hangs instead of failing (a half-open socket answers nothing and never resets)
+/// would otherwise block the connector's whole loop: no samples, no health, no link status, and
+/// nothing logged, because every one of those is published from that loop. Turning the hang into
+/// a transport error lets the existing degraded-link and reconnect-with-backoff handling run.
+async fn bounded<T>(
+    limits: Limits,
+    what: &str,
+    call: impl Future<Output = Result<T, ConnectorError>>,
+) -> Result<T, ConnectorError> {
+    match tokio::time::timeout(limits.operation, call).await {
+        Ok(result) => result,
+        Err(_) => Err(ConnectorError::Transport(format!(
+            "{what} did not return within {}s (operation_timeout)",
+            limits.operation.as_secs()
+        ))),
+    }
+}
 
 /// Tracks the last published link status per device so the runtime can publish the
 /// contract-required transitions: `degraded` when a whole poll batch fails (e.g. the device
@@ -147,11 +227,18 @@ async fn attempt_reconnect(
     client: &AsyncClient,
     links: &mut LinkTracker,
     device: &str,
+    limits: Limits,
 ) {
     debug!(%device, "attempting reconnect");
-    let reports: Vec<LinkReport> = match connector.reconnect(&device.to_string()).await {
+    let reports: Vec<LinkReport> = match bounded(
+        limits,
+        "reconnect",
+        connector.reconnect(&device.to_string()),
+    )
+    .await
+    {
         Ok(report) => vec![report],
-        Err(ConnectorError::Unsupported(_)) => match connector.connect().await {
+        Err(ConnectorError::Unsupported(_)) => match bounded(limits, "connect", connector.connect()).await {
             Ok(reports) => reports,
             Err(e) => {
                 warn!(%device, "reconnect (full connect) failed: {e}");
@@ -236,11 +323,24 @@ pub async fn shutdown_signal() {
 /// This is the composable variant of [`run`]: a host binary that runs several connectors in
 /// one process passes each instance the same shutdown trigger and supervises them itself.
 pub async fn run_until(
+    connector: Box<dyn Connector>,
+    config: ConnectorConfig,
+    config_path: PathBuf,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> Result<(), BoxError> {
+    run_until_watched(connector, config, config_path, shutdown, Progress::new()).await
+}
+
+/// Same as [`run_until`], but stamping `progress` on every loop iteration so a supervisor can
+/// tell a wedged connector from a quiet one and restart it (see [`Progress`]).
+pub async fn run_until_watched(
     mut connector: Box<dyn Connector>,
     mut config: ConnectorConfig,
     config_path: PathBuf,
     shutdown: impl std::future::Future<Output = ()> + Send,
+    progress: Progress,
 ) -> Result<(), BoxError> {
+    let limits = Limits::from_config(&config);
     let protocol = config.connector.protocol.clone();
     let service = config.connector.service_name.clone();
 
@@ -257,6 +357,7 @@ pub async fn run_until(
         .map_err(|e| format!("configure failed: {e}"))?;
     let mut caps = connector.capabilities();
     augment_management_caps(&mut caps);
+    augment_batch_caps(&mut caps);
 
     // 2. MQTT setup.
     let health_topic = format!("te/device/main/service/{service}/status/health");
@@ -320,17 +421,16 @@ pub async fn run_until(
 
     // 4. Connect to devices and publish link status.
     let mut links = LinkTracker::new(&protocol);
-    match connector.connect().await {
+    match bounded(limits, "connect", connector.connect()).await {
         Ok(reports) => links.publish_reports(&client, &reports).await?,
         Err(e) => warn!("initial connect failed: {e}"),
     }
-
     // 5. Set up push delivery for subscribe-capable connectors, then build the polling
     // schedule for everything that is not pushed. The runtime keeps `sample_tx` alive for
     // the whole run so re-subscribing after a config reload reuses the same channel.
     let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel::<Sample>(256);
     let mut subscribed =
-        setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx).await;
+        setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx, limits).await;
     let mut schedule = build_schedule(&config, &subscribed);
     let mut meta_index = build_meta_index(&config);
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
@@ -360,7 +460,7 @@ pub async fn run_until(
                 }
                 for (device_index, points) in due {
                     let device = config.devices[device_index].name.clone();
-                    match connector.read_points(&device, &points).await {
+                    match bounded(limits, "read", connector.read_points(&device, &points)).await {
                         Ok(mut samples) => {
                             for s in samples.iter_mut() {
                                 // The runtime owns the device identity for polled reads:
@@ -393,6 +493,9 @@ pub async fn run_until(
                         }
                     }
                 }
+                // The loop completed an iteration: samples published, reconnects attempted.
+                // A supervisor watching this marker restarts the connector if it stops moving.
+                progress.mark();
                 // Re-establish unhealthy devices on their backoff schedule. Entries stay
                 // until reads succeed: a transport that reconnects while the device still
                 // fails (application-level outage) keeps backing off instead of storming.
@@ -403,7 +506,7 @@ pub async fn run_until(
                     .map(|(device, _)| device.clone())
                     .collect();
                 for device in due {
-                    attempt_reconnect(&mut connector, &client, &mut links, &device).await;
+                    attempt_reconnect(&mut connector, &client, &mut links, &device, limits).await;
                     if let Some(entry) = reconnects.get_mut(&device) {
                         entry.re_arm();
                     }
@@ -412,19 +515,20 @@ pub async fn run_until(
             Some(mut sample) = sample_rx.recv() => {
                 publish_sample(&client, &protocol, &mut sample, &mut seq_counters, &meta_index)
                     .await;
+                progress.mark();
             }
             Some(p) = incoming_rx.recv() => {
                 match handle_command(
                     &mut connector, &client, &protocol, &mut links,
                     &mut config, &mut config_doc, &config_path,
-                    &p.topic, &p.payload,
+                    &p.topic, &p.payload, limits,
                 ).await {
                     // A management command changed the config: re-establish push
                     // delivery (the reload disconnected the old subscriptions) and
                     // rebuild the polling schedule.
                     Ok(true) => {
                         subscribed = setup_subscriptions(
-                            &mut connector, &config, caps.subscribe, &sample_tx,
+                            &mut connector, &config, caps.subscribe, &sample_tx, limits,
                         ).await;
                         schedule = build_schedule(&config, &subscribed);
                         meta_index = build_meta_index(&config);
@@ -435,12 +539,13 @@ pub async fn run_until(
                     Ok(false) => {}
                     Err(e) => warn!("command handling error: {e}"),
                 }
+                progress.mark();
             }
         }
     }
 
     // 7. Clean shutdown.
-    let _ = connector.disconnect().await;
+    let _ = bounded(limits, "disconnect", connector.disconnect()).await;
     publish_health(&client, &health_topic, "down").await.ok();
     Ok(())
 }
@@ -459,12 +564,13 @@ pub async fn run_stdout_until(
     config: ConnectorConfig,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<(), BoxError> {
+    let limits = Limits::from_config(&config);
     connector
         .configure(&config)
         .map_err(|e| format!("configure failed: {e}"))?;
     let caps = connector.capabilities();
 
-    match connector.connect().await {
+    match bounded(limits, "connect", connector.connect()).await {
         Ok(reports) => {
             for report in &reports {
                 info!(device = %report.device, status = report.status.as_str(),
@@ -475,7 +581,8 @@ pub async fn run_stdout_until(
     }
 
     let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel::<Sample>(256);
-    let subscribed = setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx).await;
+    let subscribed =
+        setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx, limits).await;
     let mut schedule = build_schedule(&config, &subscribed);
     let meta_index = build_meta_index(&config);
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
@@ -499,7 +606,7 @@ pub async fn run_stdout_until(
                 }
                 for (device_index, points) in due {
                     let device = config.devices[device_index].name.clone();
-                    match connector.read_points(&device, &points).await {
+                    match bounded(limits, "read", connector.read_points(&device, &points)).await {
                         Ok(mut samples) => {
                             for s in samples.iter_mut() {
                                 s.device = device.clone();
@@ -547,7 +654,7 @@ pub async fn run_stdout_until(
         }
     }
 
-    let _ = connector.disconnect().await;
+    let _ = bounded(limits, "disconnect", connector.disconnect()).await;
     Ok(())
 }
 
@@ -556,7 +663,7 @@ pub async fn run_stdout_until(
 fn print_sample(
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
-    meta_index: &HashMap<(String, String), serde_json::Value>,
+    meta_index: &MetaIndex,
 ) {
     let counter = seq_counters
         .entry((sample.device.clone(), sample.point.clone()))
@@ -612,6 +719,7 @@ async fn setup_subscriptions(
     config: &ConnectorConfig,
     subscribe_capable: bool,
     sink: &SampleSink,
+    limits: Limits,
 ) -> HashSet<(usize, String)> {
     let mut subscribed = HashSet::new();
     if !subscribe_capable {
@@ -643,7 +751,13 @@ async fn setup_subscriptions(
         if points.is_empty() {
             continue;
         }
-        match connector.subscribe(&device.name, &points, sink.clone()).await {
+        match bounded(
+            limits,
+            "subscribe",
+            connector.subscribe(&device.name, &points, sink.clone()),
+        )
+        .await
+        {
             Ok(()) => {
                 info!(device = %device.name, points = points.len(), "subscribed (push delivery)");
                 for p in &points {
@@ -663,26 +777,50 @@ async fn setup_subscriptions(
 
 /// Per-point `meta` lookup, keyed by `(device name, point id)`; injected into every published
 /// sample envelope so flows can apply per-signal behaviour without their own config.
-fn build_meta_index(config: &ConnectorConfig) -> HashMap<(String, String), serde_json::Value> {
+/// Per-point configuration echoed into every sample envelope beyond what the driver produces:
+/// the free-form `meta` table and the declared `access` (so consumers can tell writable
+/// points — parameters — apart without the configuration file).
+#[derive(Clone, Debug)]
+struct PointExtras {
+    meta: Option<serde_json::Value>,
+    access: Access,
+}
+
+type MetaIndex = HashMap<(String, String), PointExtras>;
+
+fn build_meta_index(config: &ConnectorConfig) -> MetaIndex {
     let mut index = HashMap::new();
     for device in &config.devices {
         for point in &device.points {
-            if let Some(meta) = &point.meta {
-                index.insert((device.name.clone(), point.id.clone()), meta.clone());
-            }
+            index.insert(
+                (device.name.clone(), point.id.clone()),
+                PointExtras {
+                    meta: point.meta.clone(),
+                    access: Access::parse(point.access.as_deref()),
+                },
+            );
         }
     }
     index
 }
 
-/// The sample envelope as published: the contract envelope plus the point's `meta`, if any.
-fn envelope_with_meta(
-    sample: &Sample,
-    meta_index: &HashMap<(String, String), serde_json::Value>,
-) -> serde_json::Value {
+fn access_str(access: Access) -> &'static str {
+    match access {
+        Access::Read => "read",
+        Access::Write => "write",
+        Access::ReadWrite => "read_write",
+    }
+}
+
+/// The sample envelope as published: the contract envelope plus the point's `meta` (if any)
+/// and its `access`.
+fn envelope_with_meta(sample: &Sample, meta_index: &MetaIndex) -> serde_json::Value {
     let mut envelope = sample.to_envelope();
-    if let Some(meta) = meta_index.get(&(sample.device.clone(), sample.point.clone())) {
-        envelope["meta"] = meta.clone();
+    if let Some(extras) = meta_index.get(&(sample.device.clone(), sample.point.clone())) {
+        if let Some(meta) = &extras.meta {
+            envelope["meta"] = meta.clone();
+        }
+        envelope["access"] = serde_json::Value::String(access_str(extras.access).into());
     }
     envelope
 }
@@ -694,7 +832,7 @@ async fn publish_sample(
     protocol: &str,
     sample: &mut Sample,
     seq_counters: &mut HashMap<(String, String), u64>,
-    meta_index: &HashMap<(String, String), serde_json::Value>,
+    meta_index: &MetaIndex,
 ) {
     let counter = seq_counters
         .entry((sample.device.clone(), sample.point.clone()))
@@ -738,6 +876,7 @@ async fn handle_command(
     config_path: &Path,
     topic: &str,
     payload: &[u8],
+    limits: Limits,
 ) -> Result<bool, BoxError> {    // Expect te/device/<device>/ot/<protocol>/cmd/<verb>/<id>
     let parts: Vec<&str> = topic.split('/').collect();
     if parts.len() != 8
@@ -765,9 +904,16 @@ async fn handle_command(
     // the connector configuration, then live-reload the protocol module.
     if is_management_verb(verb) {
         return handle_management(
-            connector, client, links, config, config_doc, config_path, topic, verb, &json,
+            connector, client, links, config, config_doc, config_path, topic, verb, &json, limits,
         )
         .await;
+    }
+
+    // `write-batch` (§6.4) is implemented once here on top of the module's `write`.
+    if verb == "write-batch" {
+        handle_write_batch(connector, client, topic, &device, &json, limits).await?;
+        debug!(%device, %verb, "command handled");
+        return Ok(false);
     }
 
     let point = json
@@ -793,7 +939,7 @@ async fn handle_command(
     )
     .await?;
 
-    match connector.execute(&device, verb, &request).await {
+    match bounded(limits, "write", connector.execute(&device, verb, &request)).await {
         Ok(result) => {
             let mut obj = serde_json::Map::new();
             obj.insert("status".into(), serde_json::Value::String("successful".into()));
@@ -822,6 +968,144 @@ async fn handle_command(
     }
     debug!(%device, %verb, "command handled");
     Ok(false)
+}
+
+/// Advertise the runtime-provided `write-batch` verb for every module that implements
+/// `write` (the runtime executes the batch as a sequence of `write` calls).
+fn augment_batch_caps(caps: &mut Capabilities) {
+    if caps.command_verbs.iter().any(|v| v == "write")
+        && !caps.command_verbs.iter().any(|v| v == "write-batch")
+    {
+        caps.command_verbs.push("write-batch".to_string());
+    }
+}
+
+/// One entry of a `write-batch` request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchWrite {
+    pub point: String,
+    pub value: Option<serde_json::Value>,
+    pub raw: Option<String>,
+}
+
+/// Parse the `writes` array of a `write-batch` request (§6.4). Each entry needs a `point`
+/// and either a `value` (typed write) or `raw` (hex bytes); an empty batch is rejected so a
+/// malformed request cannot "succeed" without touching the device.
+pub fn parse_batch_writes(json: &serde_json::Value) -> Result<Vec<BatchWrite>, String> {
+    let writes = json
+        .get("writes")
+        .and_then(|w| w.as_array())
+        .ok_or_else(|| "write-batch request needs a `writes` array".to_string())?;
+    if writes.is_empty() {
+        return Err("write-batch request has no writes".into());
+    }
+    let mut out = Vec::with_capacity(writes.len());
+    for (i, w) in writes.iter().enumerate() {
+        let point = w
+            .get("point")
+            .and_then(|p| p.as_str())
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| format!("writes[{i}] has no `point`"))?
+            .to_string();
+        let value = w.get("value").cloned().filter(|v| !v.is_null());
+        let raw = w.get("raw").and_then(|r| r.as_str()).map(String::from);
+        if value.is_none() && raw.is_none() {
+            return Err(format!("writes[{i}] ({point}) has neither `value` nor `raw`"));
+        }
+        out.push(BatchWrite { point, value, raw });
+    }
+    Ok(out)
+}
+
+/// Execute a `write-batch`: the writes run sequentially in request order through the
+/// module's `write` verb and stop at the first failure (later points are left untouched).
+/// The result carries one entry per attempted write so a requester can tell what was
+/// applied before a failure.
+async fn handle_write_batch(
+    connector: &mut Box<dyn Connector>,
+    client: &AsyncClient,
+    topic: &str,
+    device: &str,
+    json: &serde_json::Value,
+    limits: Limits,
+) -> Result<(), BoxError> {
+    let writes = match parse_batch_writes(json) {
+        Ok(w) => w,
+        Err(reason) => {
+            publish_retained(
+                client,
+                topic,
+                serde_json::json!({ "status": "failed", "reason": reason, "results": [] })
+                    .to_string(),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let points: Vec<&str> = writes.iter().map(|w| w.point.as_str()).collect();
+    publish_retained(
+        client,
+        topic,
+        serde_json::json!({ "status": "executing", "points": points }).to_string(),
+    )
+    .await?;
+
+    let mut results: Vec<serde_json::Value> = Vec::with_capacity(writes.len());
+    let mut failure: Option<String> = None;
+    for w in &writes {
+        let request = CommandRequest {
+            point: w.point.clone(),
+            value: w.value.clone(),
+            value_repr: None,
+            raw: w.raw.clone(),
+        };
+        match bounded(
+            limits,
+            "write",
+            connector.execute(&device.to_string(), "write", &request),
+        )
+        .await
+        {
+            Ok(result) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("point".into(), serde_json::Value::String(result.point));
+                obj.insert("status".into(), serde_json::Value::String("successful".into()));
+                if let Some(v) = result.value {
+                    obj.insert("value".into(), v);
+                }
+                if let Some(r) = result.raw {
+                    obj.insert("raw".into(), serde_json::Value::String(r));
+                }
+                results.push(serde_json::Value::Object(obj));
+            }
+            Err(e) => {
+                let reason = format!("write to {} failed: {e}", w.point);
+                results.push(serde_json::json!({
+                    "point": w.point,
+                    "status": "failed",
+                    "reason": reason,
+                }));
+                failure = Some(reason);
+                break;
+            }
+        }
+    }
+    let payload = batch_result(failure, results);
+    publish_retained(client, topic, payload.to_string()).await?;
+    Ok(())
+}
+
+/// Shape the terminal `write-batch` envelope: `successful` with every result, or `failed`
+/// with the first failure's reason and the results up to and including it.
+pub fn batch_result(failure: Option<String>, results: Vec<serde_json::Value>) -> serde_json::Value {
+    match failure {
+        None => serde_json::json!({ "status": "successful", "results": results }),
+        Some(reason) => serde_json::json!({
+            "status": "failed",
+            "reason": reason,
+            "results": results,
+        }),
+    }
 }
 
 /// The protocol-neutral management verbs the SDK runtime implements for every connector.
@@ -854,6 +1138,7 @@ async fn handle_management(
     topic: &str,
     verb: &str,
     json: &serde_json::Value,
+    limits: Limits,
 ) -> Result<bool, BoxError> {
     publish_retained(
         client,
@@ -896,8 +1181,8 @@ async fn handle_management(
     *config = new_config;
 
     // Reconnect with the new configuration and republish link status.
-    let _ = connector.disconnect().await;
-    match connector.connect().await {
+    let _ = bounded(limits, "disconnect", connector.disconnect()).await;
+    match bounded(limits, "connect", connector.connect()).await {
         Ok(reports) => links.publish_reports(client, &reports).await?,
         Err(e) => warn!("reconnect after reconfigure failed: {e}"),
     }
@@ -1351,7 +1636,9 @@ protocol_address = { host = "127.0.0.1" }
         )
         .unwrap();
         let index = build_meta_index(&cfg);
-        let meta = index.get(&("plc-1".to_string(), "temp".to_string())).unwrap();
+        let extras = index.get(&("plc-1".to_string(), "temp".to_string())).unwrap();
+        let meta = extras.meta.as_ref().unwrap();
+        assert_eq!(extras.access, Access::Read);
         assert_eq!(meta["on_change"], serde_json::json!(true));
         assert_eq!(meta["min_interval"], serde_json::json!("5s"));
         assert_eq!(meta["room"], serde_json::json!("boiler"));
@@ -1378,13 +1665,18 @@ protocol_address = { host = "127.0.0.1" }
         let mut index = HashMap::new();
         index.insert(
             ("plc-1".to_string(), "temp".to_string()),
-            serde_json::json!({ "on_change": true }),
+            PointExtras {
+                meta: Some(serde_json::json!({ "on_change": true })),
+                access: Access::ReadWrite,
+            },
         );
         let env = envelope_with_meta(&sample, &index);
         assert_eq!(env["meta"]["on_change"], serde_json::json!(true));
-        // a sample without indexed meta has no meta key
+        assert_eq!(env["access"], serde_json::json!("read_write"));
+        // a sample of an unindexed point has neither meta nor access
         let env2 = envelope_with_meta(&sample, &HashMap::new());
         assert!(env2.get("meta").is_none());
+        assert!(env2.get("access").is_none());
     }
 
     #[test]
@@ -1427,6 +1719,76 @@ protocol_address = { host = "127.0.0.1" }
         // a device that never connected stays disconnected
         assert_eq!(next_link_state(Some(Disconnected), false), None);
         assert_eq!(next_link_state(None, false), None);
+    }
+
+    #[test]
+    fn batch_writes_parse_typed_and_raw_entries() {
+        let json = serde_json::json!({
+            "status": "init",
+            "writes": [
+                { "point": "setpoint", "value": 21.5 },
+                { "point": "mask", "raw": "00ff" }
+            ]
+        });
+        let writes = parse_batch_writes(&json).unwrap();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].point, "setpoint");
+        assert_eq!(writes[0].value, Some(serde_json::json!(21.5)));
+        assert_eq!(writes[1].raw.as_deref(), Some("00ff"));
+        assert_eq!(writes[1].value, None);
+    }
+
+    #[test]
+    fn batch_writes_reject_malformed_requests() {
+        let missing = serde_json::json!({ "status": "init" });
+        assert!(parse_batch_writes(&missing).unwrap_err().contains("`writes`"));
+        let empty = serde_json::json!({ "writes": [] });
+        assert!(parse_batch_writes(&empty).unwrap_err().contains("no writes"));
+        let no_point = serde_json::json!({ "writes": [{ "value": 1 }] });
+        assert!(parse_batch_writes(&no_point).unwrap_err().contains("`point`"));
+        let no_value = serde_json::json!({ "writes": [{ "point": "x" }] });
+        assert!(parse_batch_writes(&no_value).unwrap_err().contains("neither"));
+        let null_value = serde_json::json!({ "writes": [{ "point": "x", "value": null }] });
+        assert!(parse_batch_writes(&null_value).is_err());
+    }
+
+    #[test]
+    fn batch_result_shapes_success_and_failure() {
+        let ok = batch_result(None, vec![serde_json::json!({ "point": "a", "status": "successful" })]);
+        assert_eq!(ok["status"], "successful");
+        assert_eq!(ok["results"].as_array().unwrap().len(), 1);
+        let failed = batch_result(
+            Some("write to b failed: boom".into()),
+            vec![
+                serde_json::json!({ "point": "a", "status": "successful" }),
+                serde_json::json!({ "point": "b", "status": "failed", "reason": "write to b failed: boom" }),
+            ],
+        );
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["reason"], "write to b failed: boom");
+        assert_eq!(failed["results"][1]["status"], "failed");
+    }
+
+    #[test]
+    fn batch_caps_follow_write_support() {
+        let mut caps = Capabilities {
+            protocol: "x",
+            version: "0",
+            modes: vec![],
+            datatypes: vec![],
+            point_kinds: vec![],
+            command_verbs: vec!["write".into()],
+            features: vec![],
+            subscribe: false,
+        };
+        augment_batch_caps(&mut caps);
+        assert!(caps.command_verbs.iter().any(|v| v == "write-batch"));
+        augment_batch_caps(&mut caps); // idempotent
+        assert_eq!(caps.command_verbs.iter().filter(|v| *v == "write-batch").count(), 1);
+        let mut read_only = caps.clone();
+        read_only.command_verbs = vec![];
+        augment_batch_caps(&mut read_only);
+        assert!(read_only.command_verbs.is_empty());
     }
 
     #[test]
