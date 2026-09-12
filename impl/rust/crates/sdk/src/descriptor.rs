@@ -18,6 +18,12 @@
 //! unit     = "°C"
 //! meta.parameter = { set = "boiler", title = "Setpoint", min = 0, max = 120, order = 1 }
 //! ```
+//!
+//! `set` doubles as the twin fragment name and DTM identifier, so it has to stay a plain
+//! identifier — other code (flows, twin topics) matches it verbatim. `set_title`, set on any
+//! point of the set, overrides just the DTM property's display title (shown to an operator in
+//! Cumulocity) without touching `set` itself, e.g. `set = "VibrationThreshold", set_title =
+//! "Vibration Threshold"`. Without it, the title falls back to `set` (via `title_from_key`).
 
 use crate::config::{ConnectorConfig, PointConfig};
 use crate::connector::Access;
@@ -120,7 +126,17 @@ pub fn c8y_dtm_definitions(config: &ConnectorConfig, default_set: Option<&str>) 
         .unwrap_or_else(|| self::default_set(&config.connector.protocol));
     // set -> ordered (key, property schema)
     let mut sets: Vec<(String, Vec<(String, Value)>)> = Vec::new();
+    // set -> display title (meta.parameter.set_title, first one seen wins), independent of the
+    // `set` string itself: `set` is also the twin fragment name and DTM identifier, so it must
+    // stay a plain identifier (matched verbatim elsewhere, e.g. by flows), while the title shown
+    // to an operator in Cumulocity is free text and may want spaces/punctuation `set` can't have.
+    let mut set_titles: Map<String, Value> = Map::new();
     for param in parameters(config, &default_set) {
+        if !set_titles.contains_key(&param.set) {
+            if let Some(t) = param.options.get("set_title").and_then(|v| v.as_str()) {
+                set_titles.insert(param.set.clone(), json!(t));
+            }
+        }
         let entry = match sets.iter_mut().find(|(name, _)| *name == param.set) {
             Some(e) => e,
             None => {
@@ -143,11 +159,16 @@ pub fn c8y_dtm_definitions(config: &ConnectorConfig, default_set: Option<&str>) 
                 }
                 properties.insert(key, schema);
             }
+            let title = set_titles
+                .get(&set)
+                .and_then(|t| t.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| title_from_key(&set));
             json!({
                 "identifier": set,
                 "jsonSchema": {
                     "$schema": "http://json-schema.org/draft-07/schema#",
-                    "title": title_from_key(&set),
+                    "title": title,
                     "description": format!(
                         "Writable {} points exposed by tedge-dot (generated from the connector configuration)",
                         config.connector.protocol
@@ -367,5 +388,45 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
     fn dtm_default_set_override() {
         let defs = c8y_dtm_definitions(&cfg(), Some("plant_settings"));
         assert_eq!(defs[0]["identifier"], "plant_settings");
+    }
+
+    #[test]
+    fn dtm_set_title_overrides_display_title_not_identifier() {
+        const CFG: &str = r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc1"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+
+  [[device.point]]
+  id = "vibration_min"
+  datatype = "float32"
+  access = "read_write"
+  address = { table = "holding", address = 1, count = 2 }
+  meta = { parameter = { set = "VibrationThreshold", set_title = "Vibration Threshold", title = "Min", order = 1 } }
+
+  [[device.point]]
+  id = "vibration_max"
+  datatype = "float32"
+  access = "read_write"
+  address = { table = "holding", address = 3, count = 2 }
+  meta = { parameter = { set = "VibrationThreshold", title = "Max", order = 2 } }
+"#;
+        let cfg: ConnectorConfig = toml::from_str(CFG).unwrap();
+        let defs = c8y_dtm_definitions(&cfg, None);
+        assert_eq!(defs.len(), 1);
+        // Identifier (twin fragment / DTM key, matched verbatim elsewhere) is untouched.
+        assert_eq!(defs[0]["identifier"], "VibrationThreshold");
+        // Display title picks up set_title instead of falling back to title_from_key(set).
+        assert_eq!(defs[0]["jsonSchema"]["title"], "Vibration Threshold");
+    }
+
+    #[test]
+    fn dtm_set_title_absent_falls_back_to_title_from_key() {
+        let defs = c8y_dtm_definitions(&cfg(), None);
+        // "pump" set (no set_title anywhere in CONFIG) still falls back as before.
+        assert_eq!(defs[1]["jsonSchema"]["title"], "Pump");
     }
 }
