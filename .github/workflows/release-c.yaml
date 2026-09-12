@@ -116,6 +116,10 @@ jobs:
             cp "poc-c/dist/$arch/tedge-dot" "pkgroot/$staging/"
             cp poc-c/README.md "pkgroot/$staging/"
             cp -r poc-c/packaging/config "pkgroot/$staging/config-defaults"
+            # The device-side flows, as the packages ship them (see flows/README.md):
+            # a tarball install is manual, so the whole set travels with the binary.
+            mkdir -p "pkgroot/$staging/flows"
+            cp -r flows/ot-* flows/README.md "pkgroot/$staging/flows/"
             tar -czf "dist/${staging}.tar.gz" -C pkgroot "$staging"
           done
           ( cd dist && sha256sum ./* > ../SHA256SUMS.tmp && mv ../SHA256SUMS.tmp SHA256SUMS )
@@ -134,6 +138,18 @@ jobs:
           echo "== packaged binary runs =="
           command -v tedge-dot
           tedge-dot run /nonexistent 2>&1 | head -1 || true
+          # The connector is a dumb driver: without the flows nothing it publishes
+          # reaches the cloud, so the package must deploy the core pipeline active.
+          echo "== flows deployed =="
+          for flow in ot-measurement ot-registration ot-command-forward \
+                      ot-command-result ot-parameter-state; do
+            test -f "/etc/tedge/mappers/c8y/flows/$flow/flow.toml"
+            test -f "/etc/tedge/mappers/c8y/flows/$flow/main.js"
+          done
+          # ...and ship the opt-in ones for the admin to enable.
+          test -f /usr/share/tedge-dot/flows/ot-alarm/flow.toml
+          test -f /usr/share/tedge-dot/flows/ot-event/flow.toml
+          ls -R /etc/tedge/mappers/c8y/flows /usr/share/tedge-dot/flows
 
       - uses: actions/upload-artifact@v4
         with:

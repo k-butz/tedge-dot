@@ -134,6 +134,8 @@ sudo cp operations/c8y_SetRegister /etc/tedge/operations/c8y/c8y_SetRegister.tem
 sudo cp operations/c8y_SetCoil     /etc/tedge/operations/c8y/c8y_SetCoil.template
 sudo cp operations/c8y_ModbusDevice operations/c8y_ModbusConfiguration operations/c8y_SerialConfiguration /etc/tedge/operations/c8y/
 sudo install -m 0755 operations/c8y-fieldbus-import /usr/bin/c8y-fieldbus-import  # needs jq + curl
+# The three flows below are already in place on a packaged install; from a
+# source checkout, copy them yourself (see ../flows/README.md):
 sudo cp -Ra flows/ot-command-forward flows/ot-command-result /etc/tedge/mappers/c8y/flows/
 sudo cp -Ra flows/ot-parameter-state /etc/tedge/mappers/c8y/flows/
 ```

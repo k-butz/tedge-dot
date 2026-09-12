@@ -96,6 +96,48 @@ contents:
     type: config|noreplace
     file_info: { owner: tedge, group: tedge, mode: 0644 }
 
+  # thin-edge.io flows: the device-side mapping between the connector's generic
+  # OT envelopes and the thin-edge.io data model. The connector is a dumb driver,
+  # so without these flows its samples, registrations and command results never
+  # reach the cloud — the core pipeline therefore ships ACTIVE, in the c8y
+  # mapper's flows directory (the mapper hot-reloads it, no restart needed).
+  #
+  # Only the flow logic is packaged (flow.toml, main.js) plus the documented
+  # params.toml.template. The per-deployment settings live in a `params.toml`
+  # the admin writes next to the template, which is never packaged — so an
+  # upgrade replaces the logic and leaves the tuning untouched.
+  - dst: /etc/tedge/mappers/c8y/flows
+    type: dir
+    file_info: { owner: tedge, group: tedge, mode: 0755 }
+  - src: flows/ot-measurement/*
+    dst: /etc/tedge/mappers/c8y/flows/ot-measurement/
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: flows/ot-registration/*
+    dst: /etc/tedge/mappers/c8y/flows/ot-registration/
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: flows/ot-command-forward/*
+    dst: /etc/tedge/mappers/c8y/flows/ot-command-forward/
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: flows/ot-command-result/*
+    dst: /etc/tedge/mappers/c8y/flows/ot-command-result/
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: flows/ot-parameter-state/*
+    dst: /etc/tedge/mappers/c8y/flows/ot-parameter-state/
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+
+  # Opt-in flows. Alarms and events are only meaningful once a threshold or an
+  # event type has been chosen for a specific signal, so these ship inert: copy
+  # the directory into /etc/tedge/mappers/c8y/flows/ and add a params.toml.
+  - src: flows/ot-alarm/*
+    dst: /usr/share/tedge-dot/flows/ot-alarm/
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: flows/ot-event/*
+    dst: /usr/share/tedge-dot/flows/ot-event/
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+  - src: flows/README.md
+    dst: /usr/share/tedge-dot/flows/README.md
+    file_info: { owner: tedge, group: tedge, mode: 0644 }
+
   # Demo connector configs (one per OT protocol), paired with the simulators
   # in demo/docker-compose.yaml. Copy to /etc/tedge/plugins/ot/ to run them.
   - src: demo/config/modbus.toml
