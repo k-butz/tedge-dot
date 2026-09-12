@@ -1020,6 +1020,15 @@ async fn handle_command(
             }
             publish_retained(client, topic, serde_json::Value::Object(obj).to_string()).await?;
         }
+        // `UnknownPoint` means THIS connector doesn't have `point` configured for `device` — not
+        // necessarily that the command is malformed — see `is_foreign_batch_point`'s own doc
+        // comment for the full reasoning (this single-write path can't reuse that helper
+        // directly, since there's no partial-batch-progress case here, but the same "another
+        // connector process shares this device name" scenario applies).
+        Err(ConnectorError::UnknownPoint { .. }) => {
+            debug!(%device, %verb, %point, "not this connector's point, ignoring");
+            return Ok(false);
+        }
         Err(e) => {
             publish_retained(
                 client,
@@ -1085,6 +1094,29 @@ pub fn parse_batch_writes(json: &serde_json::Value) -> Result<Vec<BatchWrite>, S
     Ok(out)
 }
 
+/// Whether an `UnknownPoint` failure partway through a write-batch means "this command wasn't
+/// meant for this connector" (silently ignore, publish nothing) rather than a real failure.
+///
+/// The command topic is not scoped by which connector subscribed to it: every connector for a
+/// given protocol subscribes to the same `te/device/+/ot/<protocol>/cmd/+/+` wildcard (see
+/// `cmd_sub` below). Two connector *processes* that share one protocol but manage disjoint point
+/// sets for the same device name — e.g. one connector configured only for device "sensor-1"'s
+/// measurement points, a separate one configured for the same device's read/write parameter
+/// points — therefore both receive every command for that device. Publishing `failed` from the
+/// connector that doesn't own the point would race the OTHER connector's own `successful` result
+/// on the SAME retained topic: Cumulocity's operation state machine does not accept a transition
+/// out of a terminal status, so whichever connector's result the mapper observes first as
+/// `failed` sticks — the operation shows as permanently failed even though the device ends up
+/// with the correct value.
+///
+/// Only applies before anything in the batch has been written yet (`results_so_far == 0`): an
+/// `UnknownPoint` after some earlier point in the SAME batch already succeeded means this
+/// connector genuinely does own the device but not every point in the batch — a real,
+/// inconsistent request worth surfacing rather than silently discarding a partial write.
+fn is_foreign_batch_point(error: &ConnectorError, results_so_far: usize) -> bool {
+    results_so_far == 0 && matches!(error, ConnectorError::UnknownPoint { .. })
+}
+
 /// Execute a `write-batch`: the writes run sequentially in request order through the
 /// module's `write` verb and stop at the first failure (later points are left untouched).
 /// The result carries one entry per attempted write so a requester can tell what was
@@ -1145,6 +1177,10 @@ async fn handle_write_batch(
                     obj.insert("raw".into(), serde_json::Value::String(r));
                 }
                 results.push(serde_json::Value::Object(obj));
+            }
+            Err(e) if is_foreign_batch_point(&e, results.len()) => {
+                debug!(%device, point = %w.point, "not this connector's point, ignoring batch");
+                return Ok(());
             }
             Err(e) => {
                 let reason = format!("write to {} failed: {e}", w.point);
@@ -1866,6 +1902,22 @@ protocol_address = { host = "127.0.0.1" }
         assert_eq!(failed["status"], "failed");
         assert_eq!(failed["reason"], "write to b failed: boom");
         assert_eq!(failed["results"][1]["status"], "failed");
+    }
+
+    #[test]
+    fn foreign_batch_point_only_before_any_success() {
+        let unknown = ConnectorError::UnknownPoint {
+            device: "sensor-1".to_string(),
+            point: "threshold".to_string(),
+        };
+        // Nothing written yet: treat as "not my point", stay silent.
+        assert!(is_foreign_batch_point(&unknown, 0));
+        // Something in the batch already succeeded: a real, inconsistent failure now.
+        assert!(!is_foreign_batch_point(&unknown, 1));
+        // Any other error kind is always a real failure, regardless of progress.
+        let denied = ConnectorError::AccessDenied("temperature_min".to_string());
+        assert!(!is_foreign_batch_point(&denied, 0));
+        assert!(!is_foreign_batch_point(&denied, 1));
     }
 
     #[test]
