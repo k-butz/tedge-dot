@@ -231,6 +231,20 @@ stall_timeout = "0"
         assert_eq!(parse_duration(&cfg.connector.stall_timeout), Some(Duration::ZERO));
     }
 
+    /// The service name addresses the connector's management commands (contract §6.3), and the
+    /// flows default to `tedge-dot-<protocol>` when a command names none: the connector default
+    /// must be that same name, whatever the protocol.
+    #[test]
+    fn service_name_defaults_to_the_protocol_service() {
+        let cfg: ConnectorConfig = toml::from_str("[connector]\nprotocol = \"opcua\"\n").unwrap();
+        assert_eq!(cfg.connector.service_name(), "tedge-dot-opcua");
+
+        let cfg: ConnectorConfig =
+            toml::from_str("[connector]\nprotocol = \"opcua\"\nservice_name = \"plant-a\"\n")
+                .unwrap();
+        assert_eq!(cfg.connector.service_name(), "plant-a");
+    }
+
     #[test]
     fn durations() {
         assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
