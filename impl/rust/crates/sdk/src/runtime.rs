@@ -369,7 +369,23 @@ pub async fn run_until_watched(
     // 2. MQTT setup.
     let health_topic = format!("te/device/main/service/{service}/status/health");
     let cap_topic = format!("te/device/main/service/{service}/ot/capabilities");
-    let cmd_sub = format!("te/device/+/ot/{protocol}/cmd/+/+");
+    // Scoped to the devices THIS task's own config actually defines, not a `+` wildcard across
+    // all devices under the protocol: when a directory of one-device-per-file configs (as
+    // opcua-gateway's generate-configs.py produces) spawns one run_until_watched task per file,
+    // a wildcard here means every task's client subscribes to every OTHER task's device
+    // commands too. Each task's own execute() then correctly rejects a foreign device with
+    // UnknownPoint (its `devices` map only ever held its own), but that rejection is fast (a
+    // synchronous HashMap miss) while the one task that actually owns the device may still be
+    // mid-flight on a real, slower protocol round-trip — so the wrong task's fast, spurious
+    // failure reaches the command result first and wins, even though the right task would have
+    // succeeded moments later. Confirmed live: a write-batch command for `encoder2` executed in
+    // all ten running encoder tasks, nine logging `UnknownPoint` before the tenth (the real
+    // owner) even replied.
+    let cmd_subs: Vec<String> = config
+        .devices
+        .iter()
+        .map(|d| format!("te/device/{}/ot/{protocol}/cmd/+/+", d.name))
+        .collect();
 
     let mut opts = MqttOptions::new(
         format!("{service}-{protocol}"),
@@ -423,7 +439,9 @@ pub async fn run_until_watched(
     // 3. Publish capability descriptor + service health (retained).
     publish_retained(&client, &cap_topic, caps.to_json().to_string()).await?;
     publish_health(&client, &health_topic, "up").await?;
-    client.subscribe(&cmd_sub, QoS::AtLeastOnce).await?;
+    for sub in &cmd_subs {
+        client.subscribe(sub, QoS::AtLeastOnce).await?;
+    }
     info!(%protocol, %service, "connector started");
 
     // 4. Connect to devices and publish link status.
