@@ -1,0 +1,28 @@
+# Point library for the pymodbus simulator used by the Modbus e2e harness
+# (contract §3.4). The connector image installs it at
+# /usr/share/tedge-dot/points.d/modbus/plc-sim.toml -- the packaged location --
+# so connector.toml reaches it by name alone, exactly as a device pack would be
+# consumed on a real gateway.
+#
+# Half of the harness's points live here and half stay inline in
+# connector.toml, so both paths are exercised by the same suite: every
+# assertion on these two points is also an assertion that library resolution
+# produced the identical point the inline definition used to.
+
+[library]
+protocol    = "modbus"
+description = "pymodbus simulator (connectors/modbus/sim/modbus.json)"
+
+# uint32 across two registers -> 617001
+[[point]]
+id       = "count_u32"
+datatype = "uint32"
+address  = { table = "holding", address = 4, count = 2 }
+
+# float32 across two registers -> ~404.17. connector.toml overrides `unit` on
+# this point, which is what pins the override rule down end to end.
+[[point]]
+id       = "level_f32"
+datatype = "float32"
+address  = { table = "holding", address = 6, count = 2 }
+unit     = "packaged"

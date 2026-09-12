@@ -14,6 +14,7 @@ pub enum Kind {
     Command,
     Status,
     Config,
+    PointLibrary,
 }
 
 impl Kind {
@@ -23,15 +24,22 @@ impl Kind {
             Kind::Command => "command",
             Kind::Status => "status",
             Kind::Config => "config",
+            Kind::PointLibrary => "point-library",
         }
     }
 }
 
-const SOURCES: [(Kind, &str); 4] = [
+const CONFIG_SCHEMA: &str = include_str!("../../../../../doc/contract/schemas/config.schema.json");
+
+const SOURCES: [(Kind, &str); 5] = [
     (Kind::Sample, include_str!("../../../../../doc/contract/schemas/sample.schema.json")),
     (Kind::Command, include_str!("../../../../../doc/contract/schemas/command.schema.json")),
     (Kind::Status, include_str!("../../../../../doc/contract/schemas/status.schema.json")),
-    (Kind::Config, include_str!("../../../../../doc/contract/schemas/config.schema.json")),
+    (Kind::Config, CONFIG_SCHEMA),
+    (
+        Kind::PointLibrary,
+        include_str!("../../../../../doc/contract/schemas/point-library.schema.json"),
+    ),
 ];
 
 pub struct Schemas {
@@ -40,11 +48,28 @@ pub struct Schemas {
 
 impl Schemas {
     pub fn load() -> Result<Schemas, String> {
+        // The point-library schema reuses config.schema.json's point definition rather than
+        // restating it, so the config schema must be resolvable by its $id while compiling.
+        // Registered from the embedded copy: the harness never reaches the network.
+        let config: serde_json::Value = serde_json::from_str(CONFIG_SCHEMA)
+            .map_err(|e| format!("config schema is not valid JSON: {e}"))?;
+        let config_id = config
+            .get("$id")
+            .and_then(|id| id.as_str())
+            .ok_or("config schema has no $id for other schemas to reference")?
+            .to_string();
+        let registry = jsonschema::Registry::new()
+            .add(config_id, jsonschema::Resource::from_contents(config))
+            .and_then(|builder| builder.prepare())
+            .map_err(|e| format!("cannot register the config schema: {e}"))?;
+
         let mut compiled = Vec::new();
         for (kind, source) in SOURCES {
             let schema: serde_json::Value = serde_json::from_str(source)
                 .map_err(|e| format!("{} schema is not valid JSON: {e}", kind.name()))?;
-            let validator = jsonschema::validator_for(&schema)
+            let validator = jsonschema::options()
+                .with_registry(&registry)
+                .build(&schema)
                 .map_err(|e| format!("{} schema does not compile: {e}", kind.name()))?;
             compiled.push((kind, schema, validator));
         }

@@ -230,6 +230,662 @@ static void check_subscribe_defaults_on(void) {
     tdot_config_free(cfg);
 }
 
+/* ---- point libraries (contract §3.4) -------------------------------------
+ * These mirror impl/rust/crates/sdk/src/library.rs's tests case for case: the
+ * two implementations must resolve the same references to the same points, in
+ * the same order, with the same merge rules -- a divergence here means the
+ * same config samples different signals depending on which package is
+ * installed. */
+
+/* Scratch directory for one library test; `write_file` creates parents. */
+typedef struct {
+    char dir[256];
+} scratch_t;
+
+static void scratch_init(scratch_t *s) {
+    char template[] = "/tmp/tdot-library-XXXXXX";
+    char *dir = mkdtemp(template);
+    if (!dir) {
+        perror("mkdtemp");
+        exit(2);
+    }
+    snprintf(s->dir, sizeof s->dir, "%s", dir);
+}
+
+/* rm -rf, deep enough for the two levels these tests create. */
+static void scratch_free(scratch_t *s) {
+    char cmd[512];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", s->dir);
+    if (system(cmd) != 0)
+        printf("warn: could not clean %s\n", s->dir);
+}
+
+static char *scratch_path(scratch_t *s, const char *rel) {
+    static char path[512];
+    snprintf(path, sizeof path, "%s/%s", s->dir, rel);
+    return path;
+}
+
+/* Write `contents` to `rel` inside the scratch dir, creating parent dirs. */
+static void write_file(scratch_t *s, const char *rel, const char *contents) {
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s", s->dir, rel);
+    char *slash = strrchr(path, '/');
+    if (slash) {
+        *slash = '\0';
+        char cmd[640];
+        snprintf(cmd, sizeof cmd, "mkdir -p '%s'", path);
+        if (system(cmd) != 0) {
+            printf("FAIL mkdir -p %s\n", path);
+            failures++;
+            return;
+        }
+        *slash = '/';
+    }
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        printf("FAIL cannot write %s\n", path);
+        failures++;
+        return;
+    }
+    fputs(contents, fp);
+    fclose(fp);
+}
+
+static const char *LIBRARY =
+    "[library]\n"
+    "protocol = \"modbus\"\n"
+    "\n"
+    "[[point]]\n"
+    "id       = \"boiler_temp\"\n"
+    "datatype = \"float32\"\n"
+    "unit     = \"C\"\n"
+    "address  = { table = \"holding\", address = 7, count = 2 }\n"
+    "\n"
+    "[[point]]\n"
+    "id       = \"pump_run\"\n"
+    "datatype = \"bool\"\n"
+    "access   = \"read_write\"\n"
+    "address  = { table = \"coil\", address = 0, count = 1 }\n";
+
+/* A connector config whose single device references `refs` and inlines
+ * `inline_points`, with the library search path pinned to the scratch dir. */
+static tdot_config_t *load_with_libs(scratch_t *s, const char *refs,
+                                     const char *inline_points, char *err,
+                                     size_t errlen) {
+    char body[4096];
+    snprintf(body, sizeof body,
+             "[connector]\n"
+             "protocol = \"modbus\"\n"
+             "point_library_path = [\"%s\"]\n"
+             "\n"
+             "[[device]]\n"
+             "name = \"plc1\"\n"
+             "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+             "port = 502, unit_id = 1 }\n"
+             "points_from = [%s]\n"
+             "%s",
+             s->dir, refs, inline_points);
+    write_file(s, "etc/modbus.toml", body);
+    return tdot_config_load(scratch_path(s, "etc/modbus.toml"), err, errlen);
+}
+
+static void check_named_library_is_inherited(void) {
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/acme-meter.toml", LIBRARY);
+
+    char err[256] = "";
+    tdot_config_t *cfg = load_with_libs(&s, "\"acme-meter\"", "", err, sizeof err);
+    if (!cfg) {
+        printf("FAIL named library did not load: %s\n", err);
+        failures++;
+        scratch_free(&s);
+        return;
+    }
+    tdot_device_t *dev = &cfg->devices[0];
+    CHECK(dev->npoints == 2, "expected 2 inherited points, got %zu", dev->npoints);
+    if (dev->npoints == 2) {
+        CHECK(strcmp(dev->points[0].id, "boiler_temp") == 0,
+              "first point should be boiler_temp, got %s", dev->points[0].id);
+        CHECK(strcmp(dev->points[1].id, "pump_run") == 0,
+              "second point should be pump_run, got %s", dev->points[1].id);
+        CHECK(dev->points[0].datatype == TDOT_DT_FLOAT32,
+              "inherited datatype should be float32");
+        CHECK(dev->points[0].address != NULL,
+              "the address table must stay reachable after the library doc is owned "
+              "by the config");
+        CHECK(dev->points[1].access == (TDOT_ACCESS_READ | TDOT_ACCESS_WRITE),
+              "inherited access should be read_write");
+    }
+    CHECK(dev->npoints_from == 1, "points_from should be recorded, got %zu",
+          dev->npoints_from);
+    tdot_config_free(cfg);
+    scratch_free(&s);
+}
+
+static void check_library_is_protocol_scoped(void) {
+    /* The same library name for two protocols; only the connector's own must
+     * be picked up. */
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/shared-name.toml", LIBRARY);
+    write_file(&s, "opcua/shared-name.toml",
+               "[library]\nprotocol = \"opcua\"\n\n[[point]]\nid = \"wrong\"\n"
+               "datatype = \"bool\"\naddress = { node = \"ns=1;i=1\" }\n");
+
+    char err[256] = "";
+    tdot_config_t *cfg = load_with_libs(&s, "\"shared-name\"", "", err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].npoints == 2 &&
+                  strcmp(cfg->devices[0].points[0].id, "boiler_temp") == 0,
+              "the modbus library must be chosen, not the opcua one");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL protocol-scoped lookup failed: %s\n", err);
+        failures++;
+    }
+    scratch_free(&s);
+}
+
+static void check_search_path_order(void) {
+    /* An earlier search-path entry shadows a later one, which is how a site
+     * copy overrides a packaged list of the same name. */
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "site/modbus/acme-meter.toml",
+               "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"site_point\"\n"
+               "datatype = \"bool\"\naddress = { table = \"coil\", address = 1, count = 1 }\n");
+    write_file(&s, "packaged/modbus/acme-meter.toml", LIBRARY);
+
+    char body[1024];
+    snprintf(body, sizeof body,
+             "[connector]\n"
+             "protocol = \"modbus\"\n"
+             "point_library_path = [\"%s/site\", \"%s/packaged\"]\n"
+             "\n"
+             "[[device]]\n"
+             "name = \"plc1\"\n"
+             "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+             "port = 502, unit_id = 1 }\n"
+             "points_from = [\"acme-meter\"]\n",
+             s.dir, s.dir);
+    write_file(&s, "etc/modbus.toml", body);
+    char err[256] = "";
+    tdot_config_t *cfg =
+        tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].npoints == 1 &&
+                  strcmp(cfg->devices[0].points[0].id, "site_point") == 0,
+              "the site copy must shadow the packaged one");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL search-path order: %s\n", err);
+        failures++;
+    }
+    scratch_free(&s);
+}
+
+static void check_relative_path_reference(void) {
+    /* A path reference resolves against the config file's own directory. */
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "lists/meter.toml", LIBRARY);
+
+    char err[256] = "";
+    tdot_config_t *cfg =
+        load_with_libs(&s, "\"../lists/meter.toml\"", "", err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].npoints == 2,
+              "a relative path reference should resolve against the config dir, got %zu points",
+              cfg->devices[0].npoints);
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL relative path reference: %s\n", err);
+        failures++;
+    }
+    scratch_free(&s);
+}
+
+static void check_libraries_apply_in_order(void) {
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/base.toml", LIBRARY);
+    write_file(&s, "modbus/extras.toml",
+               "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"site_extra\"\n"
+               "datatype = \"uint16\"\naddress = { table = \"holding\", address = 99, count = 1 }\n");
+
+    char err[256] = "";
+    tdot_config_t *cfg =
+        load_with_libs(&s, "\"base\", \"extras\"", "", err, sizeof err);
+    if (cfg) {
+        tdot_device_t *dev = &cfg->devices[0];
+        CHECK(dev->npoints == 3, "expected 3 points from two libraries, got %zu",
+              dev->npoints);
+        if (dev->npoints == 3)
+            CHECK(strcmp(dev->points[2].id, "site_extra") == 0,
+                  "the second library's point must come last, got %s", dev->points[2].id);
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL multiple libraries: %s\n", err);
+        failures++;
+    }
+    scratch_free(&s);
+}
+
+static void check_repeated_id_patches(void) {
+    /* A repeated id patches the inherited definition instead of adding a
+     * second point, so a tweak need not restate the address. */
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/base.toml", LIBRARY);
+    write_file(&s, "modbus/tweaks.toml",
+               "[library]\nprotocol = \"modbus\"\n\n[[point]]\n"
+               "id = \"boiler_temp\"\npoll_interval = \"30s\"\n");
+
+    char err[256] = "";
+    tdot_config_t *cfg =
+        load_with_libs(&s, "\"base\", \"tweaks\"", "", err, sizeof err);
+    if (cfg) {
+        tdot_device_t *dev = &cfg->devices[0];
+        CHECK(dev->npoints == 2, "a patch must not add a point, got %zu", dev->npoints);
+        if (dev->npoints >= 1) {
+            CHECK(dev->points[0].poll_interval_s == 30.0,
+                  "the patch's poll_interval should apply, got %.1f",
+                  dev->points[0].poll_interval_s);
+            CHECK(dev->points[0].datatype == TDOT_DT_FLOAT32,
+                  "unpatched fields must be inherited");
+            CHECK(dev->points[0].unit && strcmp(dev->points[0].unit, "C") == 0,
+                  "the inherited unit must survive the patch");
+        }
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL repeated id patch: %s\n", err);
+        failures++;
+    }
+    scratch_free(&s);
+}
+
+static void check_inline_points_win(void) {
+    /* The device's own points are applied last: extend a packaged list, or
+     * adjust one of its points, without touching the packaged file. */
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/acme-meter.toml", LIBRARY);
+
+    char err[256] = "";
+    tdot_config_t *cfg = load_with_libs(
+        &s, "\"acme-meter\"",
+        "\n  [[device.point]]\n"
+        "  id = \"boiler_temp\"\n"
+        "  unit = \"K\"\n"
+        "\n  [[device.point]]\n"
+        "  id = \"local_only\"\n"
+        "  datatype = \"uint16\"\n"
+        "  address = { table = \"holding\", address = 42, count = 1 }\n",
+        err, sizeof err);
+    if (cfg) {
+        tdot_device_t *dev = &cfg->devices[0];
+        CHECK(dev->npoints == 3, "expected 2 inherited + 1 inline, got %zu", dev->npoints);
+        if (dev->npoints == 3) {
+            CHECK(dev->points[0].unit && strcmp(dev->points[0].unit, "K") == 0,
+                  "the inline unit must win over the library's, got %s",
+                  dev->points[0].unit ? dev->points[0].unit : "(null)");
+            CHECK(dev->points[0].datatype == TDOT_DT_FLOAT32,
+                  "the inline override must inherit what it does not restate");
+            CHECK(strcmp(dev->points[2].id, "local_only") == 0,
+                  "the inline-only point must be appended, got %s", dev->points[2].id);
+        }
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL inline override: %s\n", err);
+        failures++;
+    }
+    scratch_free(&s);
+}
+
+static void check_meta_merges_and_address_replaces(void) {
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/base.toml",
+               "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"flow\"\n"
+               "datatype = \"uint16\"\n"
+               "address = { table = \"holding\", address = 7, count = 1 }\n"
+               "transform = { multiplier = 2, decimal_shift = -3 }\n"
+               "meta = { on_change = true, deadband = 0.5, parameter = { title = \"Flow\" } }\n");
+
+    char err[256] = "";
+    tdot_config_t *cfg = load_with_libs(
+        &s, "\"base\"",
+        "\n  [[device.point]]\n"
+        "  id = \"flow\"\n"
+        "  address = { table = \"input\", address = 9 }\n"
+        "  transform = { decimal_shift = -1 }\n"
+        "  meta = { deadband = 2.0, parameter = { max = 100 } }\n",
+        err, sizeof err);
+    if (!cfg) {
+        printf("FAIL merge rules: %s\n", err);
+        failures++;
+        scratch_free(&s);
+        return;
+    }
+    tdot_point_t *pt = &cfg->devices[0].points[0];
+
+    /* transform merges key by key. */
+    CHECK(pt->transform.multiplier == 2.0,
+          "the inherited multiplier must survive, got %.1f", pt->transform.multiplier);
+    CHECK(pt->transform.decimal_shift == -1,
+          "the override's decimal_shift must apply, got %d", pt->transform.decimal_shift);
+
+    /* address replaces wholesale: a half-inherited protocol address is not
+     * meaningful. `count` is gone, and the table is the override's. */
+    toml_datum_t table = toml_string_in(pt->address, "table");
+    CHECK(table.ok && strcmp(table.u.s, "input") == 0, "address.table should be 'input'");
+    if (table.ok)
+        free(table.u.s);
+    CHECK(!toml_int_in(pt->address, "count").ok,
+          "address must replace wholesale, so the inherited count is gone");
+
+    /* meta merges recursively, so meta.parameter keeps both fields. */
+    CHECK(pt->meta_json != NULL, "meta should be present");
+    if (pt->meta_json) {
+        CHECK(strstr(pt->meta_json, "\"on_change\":true") != NULL,
+              "inherited meta.on_change must survive: %s", pt->meta_json);
+        CHECK(strstr(pt->meta_json, "\"deadband\":2") != NULL,
+              "meta.deadband must be overridden: %s", pt->meta_json);
+        CHECK(strstr(pt->meta_json, "\"title\":\"Flow\"") != NULL,
+              "meta.parameter.title must survive the nested merge: %s", pt->meta_json);
+        CHECK(strstr(pt->meta_json, "\"max\":100") != NULL,
+              "meta.parameter.max must be added by the nested merge: %s", pt->meta_json);
+    }
+    tdot_config_free(cfg);
+    scratch_free(&s);
+}
+
+static void check_one_library_shared_by_two_devices(void) {
+    /* Two instances of the same device type: one list, two connections, and a
+     * per-device override that must not leak into the other. */
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/acme-meter.toml", LIBRARY);
+
+    char body[1536];
+    snprintf(body, sizeof body,
+             "[connector]\n"
+             "protocol = \"modbus\"\n"
+             "point_library_path = [\"%s\"]\n"
+             "\n"
+             "[[device]]\n"
+             "name = \"plc1\"\n"
+             "protocol_address = { transport = \"tcp\", host = \"10.0.0.1\", "
+             "port = 502, unit_id = 1 }\n"
+             "points_from = [\"acme-meter\"]\n"
+             "\n"
+             "[[device]]\n"
+             "name = \"plc2\"\n"
+             "protocol_address = { transport = \"tcp\", host = \"10.0.0.2\", "
+             "port = 502, unit_id = 1 }\n"
+             "points_from = [\"acme-meter\"]\n"
+             "\n"
+             "  [[device.point]]\n"
+             "  id = \"boiler_temp\"\n"
+             "  unit = \"K\"\n",
+             s.dir);
+    write_file(&s, "etc/modbus.toml", body);
+    char err[256] = "";
+    tdot_config_t *cfg =
+        tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+    if (!cfg) {
+        printf("FAIL shared library: %s\n", err);
+        failures++;
+        scratch_free(&s);
+        return;
+    }
+    CHECK(cfg->ndevices == 2, "expected 2 devices, got %zu", cfg->ndevices);
+    CHECK(cfg->nlibs == 1, "a shared library must be parsed once, got %zu", cfg->nlibs);
+    if (cfg->ndevices == 2) {
+        CHECK(cfg->devices[0].npoints == 2 && cfg->devices[1].npoints == 2,
+              "both devices should get the library's points");
+        CHECK(cfg->devices[0].points[0].unit &&
+                  strcmp(cfg->devices[0].points[0].unit, "C") == 0,
+              "the second device's override must not leak into the first, got %s",
+              cfg->devices[0].points[0].unit ? cfg->devices[0].points[0].unit : "(null)");
+        CHECK(cfg->devices[1].points[0].unit &&
+                  strcmp(cfg->devices[1].points[0].unit, "K") == 0,
+              "the second device's own override must apply");
+    }
+    tdot_config_free(cfg);
+    scratch_free(&s);
+}
+
+/* Load with the given refs/inline and expect failure, with `needle` in the
+ * message: a wrong reference must be reported, not silently yield no points. */
+static void check_rejects(const char *what, scratch_t *s, const char *refs,
+                          const char *needle) {
+    char err[256] = "";
+    tdot_config_t *cfg = load_with_libs(s, refs, "", err, sizeof err);
+    if (cfg) {
+        printf("FAIL %s: expected a failure, config loaded with %zu point(s)\n", what,
+               cfg->devices[0].npoints);
+        failures++;
+        tdot_config_free(cfg);
+        return;
+    }
+    CHECK(strstr(err, needle) != NULL, "%s: expected '%s' in the error, got: %s", what,
+          needle, err);
+}
+
+static void check_bad_references_are_reported(void) {
+    scratch_t s;
+    scratch_init(&s);
+
+    check_rejects("unknown name", &s, "\"nope\"", "unknown point library 'nope'");
+    check_rejects("missing path", &s, "\"../lists/gone.toml\"", "gone.toml");
+
+    write_file(&s, "modbus/wrong.toml",
+               "[library]\nprotocol = \"opcua\"\n\n[[point]]\nid = \"x\"\n"
+               "datatype = \"bool\"\naddress = { node = \"ns=1;i=1\" }\n");
+    check_rejects("protocol mismatch", &s, "\"wrong\"", "not 'modbus'");
+
+    write_file(&s, "modbus/bare.toml",
+               "[[point]]\nid = \"x\"\ndatatype = \"bool\"\n"
+               "address = { table = \"coil\", address = 1, count = 1 }\n");
+    check_rejects("no [library] protocol", &s, "\"bare\"", "missing [library] protocol");
+
+    write_file(&s, "modbus/oops.toml",
+               "[connector]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"x\"\n"
+               "datatype = \"bool\"\naddress = { table = \"coil\", address = 1, count = 1 }\n");
+    check_rejects("a connector config", &s, "\"oops\"",
+                  "is a connector configuration, not a point library");
+
+    write_file(&s, "modbus/empty.toml", "[library]\nprotocol = \"modbus\"\n");
+    check_rejects("no points", &s, "\"empty\"", "declares no [[point]] entries");
+
+    write_file(&s, "modbus/dup.toml",
+               "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"x\"\n"
+               "datatype = \"bool\"\naddress = { table = \"coil\", address = 1, count = 1 }\n"
+               "\n[[point]]\nid = \"x\"\ndatatype = \"bool\"\n"
+               "address = { table = \"coil\", address = 2, count = 1 }\n");
+    check_rejects("duplicate id", &s, "\"dup\"", "declares point 'x' twice");
+
+    /* A patch nobody defines a base for stays a point with no address, and the
+     * loader must reject it rather than the connector failing later. */
+    write_file(&s, "modbus/orphan.toml",
+               "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"stray\"\n"
+               "datatype = \"uint16\"\npoll_interval = \"30s\"\n");
+    check_rejects("orphan patch", &s, "\"orphan\"", "address");
+
+    scratch_free(&s);
+}
+
+/* Load a config body verbatim and expect it to fail with `needle` in the error. */
+static void check_body_rejected(const char *what, scratch_t *s, const char *body,
+                                const char *needle) {
+    write_file(s, "etc/modbus.toml", body);
+    char err[256] = "";
+    tdot_config_t *cfg =
+        tdot_config_load(scratch_path(s, "etc/modbus.toml"), err, sizeof err);
+    if (cfg) {
+        printf("FAIL %s: expected a failure, config loaded\n", what);
+        failures++;
+        tdot_config_free(cfg);
+        return;
+    }
+    CHECK(strstr(err, needle) != NULL, "%s: expected '%s' in the error, got: %s", what,
+          needle, err);
+}
+
+/* An explicit search path REPLACES the default, so it has to name somewhere.
+ * Treating an empty or unusable list as "unset" and falling back is what made
+ * this loader resolve a config the Rust one rejected -- the same file starting
+ * under one package and failing under the other. */
+static void check_explicit_search_path_must_name_somewhere(void) {
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/acme-meter.toml", LIBRARY);
+
+    /* Set the env var too: falling back to it is exactly what is being ruled out. */
+    setenv("TEDGE_DOT_POINT_LIBRARY_PATH", s.dir, 1);
+
+    const char *head = "[connector]\nprotocol = \"modbus\"\n";
+    const char *tail = "\n[[device]]\nname = \"plc1\"\n"
+                       "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+                       "port = 502, unit_id = 1 }\npoints_from = [\"acme-meter\"]\n";
+    char body[1024];
+
+    snprintf(body, sizeof body, "%spoint_library_path = []\n%s", head, tail);
+    check_body_rejected("empty search path", &s, body, "point_library_path is empty");
+
+    snprintf(body, sizeof body, "%spoint_library_path = \"/etc/points.d\"\n%s", head, tail);
+    check_body_rejected("scalar search path", &s, body, "must be an array");
+
+    snprintf(body, sizeof body, "%spoint_library_path = [42]\n%s", head, tail);
+    check_body_rejected("non-string entry", &s, body, "must be directory strings");
+
+    unsetenv("TEDGE_DOT_POINT_LIBRARY_PATH");
+    scratch_free(&s);
+}
+
+/* A library declaring an empty list, not a missing one. Left to resolve, the
+ * device would come up healthy with no points and publish nothing -- the
+ * failure mode contract §3.4 calls out, and what a generated library that
+ * found nothing looks like. */
+static void check_library_with_empty_point_list_is_rejected(void) {
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/generated.toml",
+               "point = []\n\n[library]\nprotocol = \"modbus\"\n");
+    check_rejects("empty point list", &s, "\"generated\"", "declares no [[point]] entries");
+    scratch_free(&s);
+}
+
+/* The field is validated even by a config that references no library at all: a
+ * typo belongs in the load error, and the Rust loader validates at the same
+ * point -- when one was eager and the other lazy, the same file loaded under
+ * one package and failed under the other. */
+/* §3.3: unique within a connector -- see the Rust counterpart
+ * (library.rs, a_repeated_device_name_is_rejected). */
+static void check_repeated_device_name_is_rejected(void) {
+    scratch_t s;
+    scratch_init(&s);
+    const char *body =
+        "[connector]\nprotocol = \"modbus\"\n"
+        "\n[[device]]\nname = \"plc1\"\n"
+        "protocol_address = { transport = \"tcp\", host = \"10.0.0.1\", port = 502, "
+        "unit_id = 1 }\n"
+        "\n  [[device.point]]\n  id = \"a\"\n  datatype = \"uint16\"\n"
+        "  address = { table = \"holding\", address = 1, count = 1 }\n"
+        "\n[[device]]\nname = \"plc1\"\n"
+        "protocol_address = { transport = \"tcp\", host = \"10.0.0.2\", port = 502, "
+        "unit_id = 1 }\n"
+        "\n  [[device.point]]\n  id = \"b\"\n  datatype = \"uint16\"\n"
+        "  address = { table = \"holding\", address = 2, count = 1 }\n";
+    check_body_rejected("repeated device name", &s, body, "defined more than once");
+    scratch_free(&s);
+}
+
+static void check_search_path_validated_without_any_reference(void) {
+    scratch_t s;
+    scratch_init(&s);
+    const char *body =
+        "[connector]\nprotocol = \"modbus\"\npoint_library_path = []\n"
+        "\n[[device]]\nname = \"plc1\"\n"
+        "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+        "port = 502, unit_id = 1 }\n"
+        "\n  [[device.point]]\n  id = \"inline_only\"\n  datatype = \"uint16\"\n"
+        "  address = { table = \"holding\", address = 3, count = 1 }\n";
+    check_body_rejected("empty search path, no references", &s, body,
+                        "point_library_path is empty");
+
+    /* ...and a usable one still loads a library-free config. */
+    char ok[1024];
+    snprintf(ok, sizeof ok,
+             "[connector]\nprotocol = \"modbus\"\npoint_library_path = [\"%s\"]\n"
+             "\n[[device]]\nname = \"plc1\"\n"
+             "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+             "port = 502, unit_id = 1 }\n"
+             "\n  [[device.point]]\n  id = \"inline_only\"\n  datatype = \"uint16\"\n"
+             "  address = { table = \"holding\", address = 3, count = 1 }\n",
+             s.dir);
+    write_file(&s, "etc/modbus.toml", ok);
+    char err[256] = "";
+    tdot_config_t *cfg =
+        tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].npoints == 1,
+              "a library-free config with a usable search path should load its inline point, "
+              "got %zu",
+              cfg->devices[0].npoints);
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL usable search path without references: %s\n", err);
+        failures++;
+    }
+    scratch_free(&s);
+}
+
+static void check_malformed_points_from(void) {
+    scratch_t s;
+    scratch_init(&s);
+    char body[1024];
+    snprintf(body, sizeof body,
+             "[connector]\n"
+             "protocol = \"modbus\"\n"
+             "point_library_path = [\"%s\"]\n"
+             "\n"
+             "[[device]]\n"
+             "name = \"plc1\"\n"
+             "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+             "port = 502, unit_id = 1 }\n"
+             "points_from = \"acme-meter\"\n",
+             s.dir);
+    write_file(&s, "etc/modbus.toml", body);
+    char err[256] = "";
+    tdot_config_t *cfg =
+        tdot_config_load(scratch_path(&s, "etc/modbus.toml"), err, sizeof err);
+    if (cfg) {
+        printf("FAIL a scalar points_from should be rejected\n");
+        failures++;
+        tdot_config_free(cfg);
+    } else {
+        CHECK(strstr(err, "points_from must be an array") != NULL,
+              "expected an array-shape error, got: %s", err);
+    }
+    scratch_free(&s);
+}
+
+static void check_config_without_references_is_unchanged(void) {
+    /* The common case must be untouched by the feature. */
+    tdot_config_t *cfg = load("", "");
+    if (!cfg)
+        return;
+    CHECK(cfg->devices[0].npoints == 1, "expected the single inline point, got %zu",
+          cfg->devices[0].npoints);
+    CHECK(cfg->devices[0].npoints_from == 0, "no libraries should be recorded");
+    CHECK(cfg->nlibs == 0, "no library documents should be parsed");
+    tdot_config_free(cfg);
+}
+
 static void check_stall_decision(void) {
     /* Not stalled yet: idle is below the limit. */
     CHECK(tdot_runtime_stall_idle(1000, 3000, 5.0) < 0,
@@ -281,6 +937,22 @@ int main(void) {
     check_point_interval_resolution();
     check_connector_interval_is_the_last_resort();
     check_subscribe_defaults_on();
+    check_config_without_references_is_unchanged();
+    check_named_library_is_inherited();
+    check_library_is_protocol_scoped();
+    check_search_path_order();
+    check_relative_path_reference();
+    check_libraries_apply_in_order();
+    check_repeated_id_patches();
+    check_inline_points_win();
+    check_meta_merges_and_address_replaces();
+    check_one_library_shared_by_two_devices();
+    check_bad_references_are_reported();
+    check_malformed_points_from();
+    check_explicit_search_path_must_name_somewhere();
+    check_search_path_validated_without_any_reference();
+    check_repeated_device_name_is_rejected();
+    check_library_with_empty_point_list_is_rejected();
     check_stall_decision();
     check_watchdog_period();
 

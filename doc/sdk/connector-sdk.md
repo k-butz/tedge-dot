@@ -77,7 +77,9 @@ use async_trait::async_trait;
 pub trait Connector: Send + Sync {
     /// Validate & parse the protocol-specific parts of the configuration
     /// (connection, device.protocol_address, point.address) into a typed model.
-    /// Called once at startup and on every hot-reload.
+    /// Called once at startup and on every hot-reload. Every device's points are
+    /// already fully resolved: a module never sees a `points_from` reference
+    /// (contract §3.4), only the points it expanded to.
     fn configure(&mut self, config: &ConnectorConfig) -> Result<(), ConfigError>;
 
     /// Declare what this connector supports. Drives the capability descriptor and

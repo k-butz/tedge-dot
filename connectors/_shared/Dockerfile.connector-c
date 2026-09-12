@@ -39,6 +39,10 @@ COPY --from=build /usr/local/bin/tedge-dot /usr/bin/tedge-dot
 COPY connectors/${PROTOCOL} /opt/connector
 RUN cp /opt/connector/connector.toml /etc/connector.toml \
     && cp /opt/connector/entrypoint.sh /entrypoint.sh && chmod +x /entrypoint.sh \
+    # Point libraries the stack's config references (contract §3.4), at the packaged
+    # search-path location; only some stacks have them.
+    && if [ -d /opt/connector/points.d ]; then mkdir -p /usr/share/tedge-dot \
+        && cp -r /opt/connector/points.d /usr/share/tedge-dot/points.d; fi \
     && if [ -f /opt/connector/sim/test.dbc ]; then cp /opt/connector/sim/test.dbc /test.dbc; fi \
     && rm -rf /opt/connector
 ENTRYPOINT ["/entrypoint.sh"]

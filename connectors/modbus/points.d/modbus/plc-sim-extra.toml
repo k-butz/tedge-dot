@@ -1,0 +1,22 @@
+# A second point library for the Modbus e2e harness, referenced by connector.toml
+# through the PATH form of points_from (contract §3.4) rather than by name.
+#
+# It is here for two reasons beyond the extra point:
+#   * the path form is a documented way to reference a list that sits next to a
+#     config, and nothing else in the suites exercised it;
+#   * a path reference in a config FILE is legal, while one arriving through a
+#     management command is refused. Judging the whole candidate rather than
+#     what the command changed made every management verb fail on a config
+#     shaped like this one, so the suite's define-device test now depends on
+#     the distinction being drawn correctly.
+
+[library]
+protocol    = "modbus"
+description = "extra points, referenced by path"
+
+# Holding register 3 again (the simulator seeds it to 17001), under its own id.
+[[point]]
+id       = "temp_u16_alias"
+datatype = "uint16"
+address  = { table = "holding", address = 3, count = 1 }
+unit     = "alias"

@@ -42,6 +42,21 @@ impl Drop for TempDir {
     }
 }
 
+/// Make every relative path in a TOML string array absolute against `base`. Bare
+/// point-library *names* are left alone: those resolve through the search path, not the
+/// configuration's directory.
+fn absolutise_paths(value: Option<&mut toml::Value>, base: &Path) {
+    let Some(entries) = value.and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for entry in entries {
+        let Some(text) = entry.as_str() else { continue };
+        if tedge_dot_sdk::library::is_path_reference(text) && !Path::new(text).is_absolute() {
+            *entry = toml::Value::String(base.join(text).display().to_string());
+        }
+    }
+}
+
 /// Rewrite the connector config template: `[mqtt]` points at the test broker, every device's
 /// `protocol_address` points at the simulator. Returns the rewritten path and the parsed
 /// config the checks inspect.
@@ -51,6 +66,7 @@ pub fn rewrite_config(
     broker_port: u16,
     sim: &dyn Simulator,
 ) -> Result<(PathBuf, ConnectorConfig), String> {
+    let template_dir = tedge_dot_sdk::library::config_base_dir(template);
     let text = std::fs::read_to_string(template)
         .map_err(|e| format!("failed to read config '{}': {e}", template.display()))?;
     let mut doc: toml::Value = toml::from_str(&text)
@@ -71,8 +87,15 @@ pub fn rewrite_config(
                 .get_mut("protocol_address")
                 .ok_or("device without protocol_address")?;
             sim.rewrite_protocol_address(address)?;
+            absolutise_paths(device.get_mut("points_from"), template_dir);
         }
     }
+    // The rewritten config lands in `out_dir`, so relative point-library references (§3.4)
+    // would otherwise resolve against the wrong directory.
+    absolutise_paths(
+        root.get_mut("connector").and_then(|c| c.get_mut("point_library_path")),
+        template_dir,
+    );
 
     let rewritten = toml::to_string_pretty(&doc).map_err(|e| format!("re-serialize config: {e}"))?;
     let out = out_dir.join(
@@ -82,8 +105,8 @@ pub fn rewrite_config(
     );
     std::fs::write(&out, &rewritten).map_err(|e| format!("write {}: {e}", out.display()))?;
 
-    let parsed: ConnectorConfig =
-        toml::from_str(&rewritten).map_err(|e| format!("rewritten config is invalid: {e}"))?;
+    let parsed = tedge_dot_sdk::library::resolve(&rewritten, out_dir)
+        .map_err(|e| format!("rewritten config is invalid: {e}"))?;
     Ok((out, parsed))
 }
 
@@ -125,10 +148,7 @@ impl Host {
         config_path: &Path,
     ) -> Result<Host, String> {
         if command.is_empty() {
-            let text = std::fs::read_to_string(config_path)
-                .map_err(|e| format!("read {}: {e}", config_path.display()))?;
-            let config: ConnectorConfig =
-                toml::from_str(&text).map_err(|e| format!("parse config: {e}"))?;
+            let config = tedge_dot_sdk::library::load(config_path)?;
             let connector = build_connector(protocol)?;
             let (shutdown, mut shutdown_rx) = watch::channel(false);
             let path = config_path.to_path_buf();

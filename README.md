@@ -93,6 +93,33 @@ sudo systemctl restart tedge-dot
 tedge mqtt sub 'te/+/+/+/+/m/+'    # watch the measurements arrive
 ```
 
+## One point list, many devices
+
+A device's point list belongs to its *type*, not to the instance: every ACME meter of the same
+firmware has the same registers, and only the address differs. So a point list can live in its
+own file — a **point library** — and a device reference it:
+
+```toml
+[[device]]
+name             = "plc-7"
+protocol_address = { transport = "tcp", host = "192.168.0.17", port = 502, unit_id = 1 }
+points_from      = ["acme-meter-v2"]     # /usr/share/tedge-dot/points.d/modbus/acme-meter-v2.toml
+```
+
+Libraries are looked up as `<dir>/<protocol>/<name>.toml` under
+`/etc/tedge/plugins/ot/points.d` (a site's own) and then `/usr/share/tedge-dot/points.d`
+(packaged), so a site copy shadows a packaged list of the same name. A device may reference
+several and add or adjust points of its own — the later definition of a point id patches the
+earlier one — which is how a packaged list gets extended without editing the file a package
+upgrade replaces.
+
+Because only the *reference* is stored, `define-device` can add an instance at runtime from
+its address alone, which is what lets your own discovery (mDNS, a subnet scan, an asset
+inventory) onboard a known device type without shipping its point list. See
+[RFC 0004](doc/rfc/0004-point-libraries.md), the normative
+[contract §3.4](doc/contract/ot-connector-contract.md#34-point-libraries), and
+[demo/config/modbus-library.toml](demo/config/modbus-library.toml) for a runnable example.
+
 ## Try it without hardware
 
 Each protocol has a Docker simulator. No broker or cloud needed for a first
@@ -144,6 +171,7 @@ the same config. See [RFC 0003](doc/rfc/0003-parameter-writes.md), [flows/](flow
 | [connectors/](connectors/) | per-protocol e2e test stacks: simulator, Docker compose, Robot suites |
 | [cloud/](cloud/) | Cumulocity cloud e2e suites (live tenant) |
 | [packaging/](packaging/) | installed default configs, systemd unit, package scripts |
+| [demo/points.d/](demo/points.d/) | example point libraries (a device type's point list, packaged on its own) |
 | [doc/](doc/) | proposal, RFCs, contract + schemas, connector specs, testing strategy |
 | [demo/](demo/) | simulator compose file + demo configs: local CLI exploration and the all-protocols on-device demo |
 

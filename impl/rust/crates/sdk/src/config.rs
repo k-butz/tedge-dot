@@ -39,6 +39,13 @@ pub struct ConnectorSection {
     /// down so the cloud sees the outage). `"0"` disables the watchdog.
     #[serde(default = "default_stall_timeout")]
     pub stall_timeout: String,
+    /// Directories searched for the point libraries devices name in `points_from`
+    /// ([`crate::library`]). Unset means the built-in path: the site directory
+    /// `/etc/tedge/plugins/ot/points.d` first, then the packaged
+    /// `/usr/share/tedge-dot/points.d`. Relative entries resolve against the configuration
+    /// file's own directory.
+    #[serde(default)]
+    pub point_library_path: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,6 +74,14 @@ pub struct DeviceConfig {
     pub poll_interval: Option<String>,
     #[serde(default)]
     pub default_mode: Option<Mode>,
+    /// Point libraries this device inherits its points from, in order (§3.4). Names are
+    /// resolved against the library search path; entries containing `/` or ending in `.toml`
+    /// are paths, relative ones against the configuration file's directory. Resolution
+    /// happens in [`crate::library`] when the configuration is loaded, so by the time a
+    /// connector sees this config `points` already holds the fully-resolved list and this
+    /// field is only a record of where it came from.
+    #[serde(default)]
+    pub points_from: Vec<String>,
     #[serde(rename = "point", default)]
     pub points: Vec<PointConfig>,
 }

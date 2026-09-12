@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thin-edge.io/ot-connector/point-library.schema.json",
+  "title": "OT Connector Point Library",
+  "description": "A point library (contract §3.4): the data point list of one device type, in its own TOML file, carrying no connection information. Device instances reference it by name or path through `points_from` and supply only their own address. Point entries use the same fields as `device.point` in config.schema.json; only `id` is required, because a library may also carry a patch of a point another library in the same chain supplies.",
+  "type": "object",
+  "required": [
+    "library",
+    "point"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "library": {
+      "type": "object",
+      "required": [
+        "protocol"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The protocol module these points address. MUST equal the referencing connector's `[connector] protocol`: a point's `address` is protocol-specific, so a library is only ever valid for one protocol."
+        },
+        "description": {
+          "type": "string",
+          "description": "Informational: what device type this list describes."
+        },
+        "version": {
+          "type": "string",
+          "description": "Informational: the version of the device type or of the list itself. Not interpreted; a library is identified by its file name."
+        }
+      }
+    },
+    "point": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The points, in order. A repeated `id` within one library is an error, not an override — there is no order in which to apply it (§3.4).",
+      "items": {
+        "$ref": "https://thin-edge.io/ot-connector/config.schema.json#/$defs/point"
+      }
+    }
+  },
+  "examples": [
+    {
+      "library": {
+        "protocol": "modbus",
+        "description": "ACME meter, firmware 2.x",
+        "version": "2.1"
+      },
+      "point": [
+        {
+          "id": "boiler_temp",
+          "mode": "typed",
+          "datatype": "float32",
+          "address": {
+            "table": "holding",
+            "address": 7,
+            "count": 2
+          },
+          "unit": "°C"
+        },
+        {
+          "id": "run_command",
+          "access": "read_write",
+          "datatype": "bool",
+          "address": {
+            "table": "coil",
+            "address": 0,
+            "count": 1
+          },
+          "meta": {
+            "parameter": {
+              "title": "Run"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

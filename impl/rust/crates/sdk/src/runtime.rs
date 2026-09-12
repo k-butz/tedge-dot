@@ -1226,7 +1226,24 @@ async fn handle_management(
             }
         }
     };
-    let new_config: ConnectorConfig = match toml::from_str(&candidate.to_string()) {
+    // Resolve the candidate the same way the loader does, so a device that only references
+    // point libraries (§3.4) is validated with its points expanded. The document itself keeps
+    // the `points_from` reference: persisting it must never bake a library's points into the
+    // user's file.
+    let candidate_text = candidate.to_string();
+    // A command may name a point library, never a path: see `reject_path_references`. Judged
+    // against the document as it stood, so only a reference the command itself introduced is
+    // refused — and refused before the resolver runs, so the path is never opened and no
+    // filesystem detail reaches the command result.
+    if let Err(e) = crate::library::reject_path_references(&config_doc.to_string(), &candidate_text)
+    {
+        publish_failed(client, topic, &e).await?;
+        return Ok(false);
+    }
+    let new_config: ConnectorConfig = match crate::library::resolve(
+        &candidate_text,
+        crate::library::config_base_dir(config_path),
+    ) {
         Ok(c) => c,
         Err(e) => {
             publish_failed(client, topic, &format!("resulting config is invalid: {e}")).await?;
@@ -1584,6 +1601,61 @@ default_mode = "typed"
         apply_management(verb, &json, &mut d).expect("apply ok");
         let cfg: ConnectorConfig = toml::from_str(&d.to_string()).expect("valid config");
         (d, cfg)
+    }
+
+    /// `define-device` with only connection information and a library reference is what a
+    /// discovery script (mDNS and friends) publishes for an instance of a known device type.
+    /// The persisted document must keep the reference: baking the library's points into the
+    /// user's file would undo the decoupling on the first management command.
+    #[test]
+    fn define_device_persists_a_point_library_reference_not_its_points() {
+        let dir = std::env::temp_dir().join(format!("tdot-rt-library-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("points.d/modbus")).unwrap();
+        std::fs::write(
+            dir.join("points.d/modbus/acme-meter.toml"),
+            "[library]\nprotocol = \"modbus\"\n\n[[point]]\nid = \"from_library\"\n\
+             datatype = \"uint16\"\naddress = { table = \"holding\", address = 9, count = 1 }\n",
+        )
+        .unwrap();
+
+        let mut d = BASE
+            .replace(
+                "[connector]",
+                &format!(
+                    "[connector]\npoint_library_path = [\"{}\"]",
+                    dir.join("points.d").display()
+                ),
+            )
+            .parse::<DocumentMut>()
+            .unwrap();
+        apply_management(
+            "define-device",
+            &serde_json::json!({
+                "device": {
+                    "name": "plc-2",
+                    "protocol_address": { "transport": "tcp", "host": "10.0.0.2", "port": 502, "unit_id": 1 },
+                    "points_from": ["acme-meter"],
+                }
+            }),
+            &mut d,
+        )
+        .expect("apply ok");
+
+        let text = d.to_string();
+        assert!(text.contains(r#"points_from = ["acme-meter"]"#), "reference persisted: {text}");
+        assert!(
+            !text.contains("from_library"),
+            "the library's points must NOT be written into the config: {text}"
+        );
+
+        // ...and resolving that same document is what the runtime hands the protocol module.
+        let cfg = crate::library::resolve(&text, &dir).expect("resolves");
+        let plc2 = cfg.devices.iter().find(|d| d.name == "plc-2").expect("plc-2");
+        assert_eq!(plc2.points.len(), 1);
+        assert_eq!(plc2.points[0].id, "from_library");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

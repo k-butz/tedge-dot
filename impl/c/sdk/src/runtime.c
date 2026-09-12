@@ -679,6 +679,68 @@ static void deep_merge(cJSON *target, const cJSON *patch) {
     }
 }
 
+/* True when `doc` already gives `device` this exact points_from reference. */
+static bool has_path_reference(const cJSON *doc, const char *device,
+                               const char *reference) {
+    const cJSON *devices = cJSON_GetObjectItem(doc, "device");
+    if (!cJSON_IsArray(devices))
+        return false;
+    const cJSON *dev;
+    cJSON_ArrayForEach(dev, devices) {
+        const cJSON *name = cJSON_GetObjectItem(dev, "name");
+        if (!cJSON_IsString(name) || strcmp(name->valuestring, device) != 0)
+            continue;
+        const cJSON *refs = cJSON_GetObjectItem(dev, "points_from");
+        if (!cJSON_IsArray(refs))
+            return false;
+        const cJSON *ref;
+        cJSON_ArrayForEach(ref, refs)
+            if (cJSON_IsString(ref) && strcmp(ref->valuestring, reference) == 0)
+                return true;
+        return false;
+    }
+    return false;
+}
+
+/* A management command may name a point library, never a path (contract §3.4).
+ * A config file is edited by root or tedge; a command is a different trust
+ * boundary -- anything that can publish on the broker could otherwise name an
+ * arbitrary path and read the loader's verdict (does it exist, and through a
+ * parse error a line of its contents) out of the retained command result.
+ * Names are all a discovery mechanism needs, so only names are accepted.
+ *
+ * Only what the command CHANGED is judged, against `before`: the path
+ * references a device already had stay legal, so an unrelated set-config (or a
+ * remove-device) on a configuration that uses the path form still works.
+ * Checked before the candidate is written or loaded. */
+static int reject_path_references(const cJSON *before, const cJSON *after,
+                                  char *reason, size_t rlen) {
+    const cJSON *devices = cJSON_GetObjectItem(after, "device");
+    if (!cJSON_IsArray(devices))
+        return 0;
+    const cJSON *dev;
+    cJSON_ArrayForEach(dev, devices) {
+        const cJSON *name = cJSON_GetObjectItem(dev, "name");
+        const cJSON *refs = cJSON_GetObjectItem(dev, "points_from");
+        if (!cJSON_IsArray(refs))
+            continue;
+        const char *device = cJSON_IsString(name) ? name->valuestring : "<unnamed>";
+        const cJSON *ref;
+        cJSON_ArrayForEach(ref, refs) {
+            if (!cJSON_IsString(ref) || !tdot_is_path_reference(ref->valuestring))
+                continue;
+            if (has_path_reference(before, device, ref->valuestring))
+                continue; /* already in the configuration; not this command's doing */
+            snprintf(reason, rlen,
+                     "device '%s': points_from '%s' is a path; a management command may only "
+                     "name a point library, not a path",
+                     device, ref->valuestring);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static cJSON *find_device(cJSON *devices, const char *name, int *index) {
     int i = 0;
     cJSON *d;
@@ -789,7 +851,12 @@ static void handle_management(rt_t *rt, const char *topic, const char *verb,
         publish_status(rt, topic, "failed", "cannot read the running configuration document");
         return;
     }
-    if (apply_management(doc, verb, req, reason, sizeof reason) != 0) {
+    cJSON *before = cJSON_Duplicate(doc, 1); /* apply_management mutates `doc` in place */
+    int rc = apply_management(doc, verb, req, reason, sizeof reason);
+    if (rc == 0)
+        rc = reject_path_references(before, doc, reason, sizeof reason);
+    cJSON_Delete(before);
+    if (rc != 0) {
         cJSON_Delete(doc);
         publish_status(rt, topic, "failed", reason);
         logmsg("warn", "cmd %s: %s", verb, reason);
@@ -885,6 +952,22 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
     if (conn->configure(conn, cfg, err, sizeof err) != 0) {
         logmsg("error", "configure failed: %s", err);
         return -1;
+    }
+
+    /* Say where a device's points came from when it references point libraries
+     * (contract §3.4): with the list in another file, "which points did I
+     * actually get" is the first question a misconfiguration raises. */
+    for (size_t i = 0; i < cfg->ndevices; i++) {
+        const tdot_device_t *dev = &cfg->devices[i];
+        if (!dev->npoints_from)
+            continue;
+        char refs[512] = "";
+        size_t used = 0;
+        for (size_t j = 0; j < dev->npoints_from && used < sizeof refs - 1; j++)
+            used += (size_t)snprintf(refs + used, sizeof refs - used, "%s%s",
+                                     used ? ", " : "", dev->points_from[j]);
+        logmsg("info", "device %s: %zu point(s) resolved from point librar%s %s",
+               dev->name, dev->npoints, dev->npoints_from == 1 ? "y" : "ies", refs);
     }
 
     if (rt.output == TDOT_OUTPUT_MQTT) {

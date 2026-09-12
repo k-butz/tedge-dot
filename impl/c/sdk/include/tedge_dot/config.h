@@ -76,6 +76,12 @@ typedef struct tdot_device {
     double poll_interval_s;
     tdot_point_t *points;
     size_t npoints;
+    /* Point libraries this device inherited its points from, in order
+     * (contract §3.4, `points_from`). Resolved by the loader, so `points`
+     * already holds the fully-merged list; kept only as a record of where it
+     * came from. */
+    char **points_from;
+    size_t npoints_from;
 
     void *proto; /* connector per-device state (e.g. modbus_t*, UA_Client*) */
 
@@ -119,16 +125,36 @@ typedef struct tdot_config {
     size_t ndevices;
 
     toml_table_t *root; /* owns all borrowed tables above */
+
+    /* Parsed point-library documents (contract §3.4). A point's `address` is
+     * borrowed from the document it was declared in, so every library a device
+     * referenced must stay alive for as long as the config does. Libraries are
+     * parsed once each and shared between the devices that reference them. */
+    toml_table_t **libs;
+    char **lib_paths; /* resolved path of libs[i], the cache key */
+    size_t nlibs;
 } tdot_config_t;
 
-/* Load and validate one connector config. Returns NULL and fills err on
- * failure. */
+/* Load and validate one connector config, resolving the point libraries its
+ * devices reference (contract §3.4, `points_from`). Returns NULL and fills err
+ * on failure.
+ *
+ * Only the in-memory device/point lists are expanded: `cfg->root` keeps the
+ * document exactly as it was written, references and all, so the management
+ * verbs (§6.3) patch and persist a reference rather than baking a library's
+ * points into the user's file. */
 tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen);
 void tdot_config_free(tdot_config_t *cfg);
 
 /* Parse durations like "500ms", "2s", "5m", "2h" (also bare seconds).
  * Returns seconds, or -1.0 on parse failure. */
 double tdot_duration_parse(const char *s);
+
+/* True when a `points_from` entry names a path rather than a point library
+ * (contract §3.4). The runtime uses it to refuse path references arriving
+ * through a management command, which is a different trust boundary from a
+ * config file: see tdot_runtime's handling of set-config/define-device. */
+bool tdot_is_path_reference(const char *ref);
 
 tdot_device_t *tdot_config_device(tdot_config_t *cfg, const char *name);
 tdot_point_t *tdot_device_point(tdot_device_t *dev, const char *id);

@@ -20,6 +20,18 @@ Build the connector once:
 cargo build --manifest-path impl/rust/Cargo.toml
 ```
 
+> The configs in [config/](config/) inline their points, which keeps the point
+> syntax in front of you. [config/modbus-library.toml](config/modbus-library.toml)
+> is the same demo written the other way: its points come from the *point
+> library* [points.d/modbus/pymodbus-demo.toml](points.d/modbus/pymodbus-demo.toml),
+> so two device instances share one list (contract §3.4). From a checkout the
+> library is not in its packaged location yet, so point the search path at it:
+>
+> ```sh
+> TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d \
+>   cargo run --manifest-path impl/rust/Cargo.toml -- read -c demo/config/modbus-library.toml -d plc1
+> ```
+
 ### Modbus
 
 The Modbus simulator (pymodbus) runs in Docker and exposes port 502 as host

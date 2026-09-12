@@ -29,6 +29,10 @@ parity   = "N"
 stopbits = 2
 databits = 8
 
+# Where bare point-library names in `points_from` are looked up (see below).
+# Shown with its default; relative entries resolve against this file's directory.
+# point_library_path = ["/etc/tedge/plugins/ot/points.d", "/usr/share/tedge-dot/points.d"]
+
 # Add devices below, for example:
 #
 # [[device]]
@@ -40,3 +44,21 @@ databits = 8
 #   mode     = "typed"
 #   datatype = "float32"
 #   address  = { table = "holding", address = 7, count = 2 }
+#
+# ...or, when several devices share one device type's point list, keep that list
+# in a POINT LIBRARY and give the instance only its address:
+#
+# [[device]]
+# name             = "plc-2"
+# protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 2 }
+# points_from      = ["acme-meter-v2"]   # points.d/modbus/acme-meter-v2.toml
+#
+#   # An instance may still add or adjust points without touching the library:
+#   # a repeated id patches it, and only the fields named here change.
+#   [[device.point]]
+#   id   = "boiler_temp"
+#   unit = "K"
+#
+# Libraries live in /etc/tedge/plugins/ot/points.d/<protocol>/ (yours; these
+# shadow packaged ones of the same name) or /usr/share/tedge-dot/points.d/<protocol>/
+# (shipped by a package). See /usr/share/tedge-dot/points.d/README.md.

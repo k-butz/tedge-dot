@@ -56,6 +56,7 @@ are still inert. CI runs it.
 | Modbus, OPC UA, CAN bus, CANopen | ✅ | ✅ | |
 | PROFIBUS-DP | ⚠️ source only | ✅ | The Rust package omits it: its serial dependency has a native libudev build script that does not cross-compile. The C package ships it. |
 | Push delivery (`subscribe`) | ✅ | ✅ | OPC UA monitored items. See "Push delivery" below for the CAN bus difference. |
+| Point libraries (`points_from`) | ✅ | ✅ | Same search path, protocol scoping and merge rules (contract §3.4). The mirrored loader tests are [`library.rs`](../rust/crates/sdk/src/library.rs) and [`tests/config.c`](tests/config.c); the Modbus e2e suite resolves half its points through a library in both builds. |
 | `operation_timeout` | ✅ cancels the call | ✅ bounds the library | See "Liveness" below. |
 | `stall_timeout` | ✅ restarts the connector | ⚠️ restarts the process | See "Liveness" below. |
 | `opcua-security` | ✅ `Basic256Sha256`, … | ❌ `None` only | open62541 supports the policies; wiring them up is config + certificate plumbing that has not been done. **No test yet** (needs a secured endpoint in the e2e stack). |
