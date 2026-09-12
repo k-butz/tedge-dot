@@ -22,6 +22,11 @@
       polling — same samples, worse latency, so it is not tagged), and the 64-byte cap on
       string/raw values (`TDOT_RAW_MAX`).
 
+* [ ] Fuzz the C parsers. The validation policy below requires a fuzz target for anything
+      parsing external input; the Rust SDK has four (`just fuzz-all`), the C build has none,
+      so its TOML loader (tomlc99) and DBC parser are only covered by the shared golden
+      vectors and the e2e suites. libFuzzer via clang would reuse the same corpora.
+
 * [ ] Cloud Fieldbus increments 3 + 4 (see `doc/rfc/0002-cloud-fieldbus-integration.md`;
       increments 1 + 2 shipped and verified live 2026-07-02): generalise the device-type
       translator per protocol, and the export path / UI-placeholder reconciliation (needs a
