@@ -155,9 +155,43 @@ _e2e proto impl args:
         export CONNECTOR_DOCKERFILE=connectors/_shared/Dockerfile.connector-c
     fi
     just venv
+    just _pull-stack-images connectors/{{proto}}/docker-compose.yaml
     ./.venv/bin/python -m robot \
         --outputdir "$outdir" --variable IMPL:{{impl}} {{args}} \
         connectors/{{proto}}/tests/
+
+# Pull the stack's registry images once, with backoff, before any suite starts.
+#
+# The stacks already pull from public.ecr.aws rather than docker.io for its more generous
+# anonymous limits, but a full CI matrix still trips its per-IP throttle: the broker pull returns
+# `toomanyrequests: Rate exceeded`. Nothing then caches the image, so every suite in the job
+# repeats the same failing pull and the whole run fails in setup, before a single test executes.
+#
+# One retried pull up front fixes that: compose's default pull policy is "missing", so once the
+# image is in the local store no suite touches the registry again. Only registry references are
+# pulled -- the connector's `image:` is a locally built tag with no host, and is skipped.
+#
+# Best effort by design: if the image still cannot be pulled, fall through and let compose fail
+# with the real error in context rather than masking it here.
+_pull-stack-images compose_file:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    images=$(grep -oE 'image: *[a-z0-9.-]+\.[a-z]+/[^ ]+' {{compose_file}} | sed -E 's/image: *//' | sort -u)
+    for image in $images; do
+        docker image inspect "$image" >/dev/null 2>&1 && continue
+        pulled=""
+        for attempt in 1 2 3 4 5; do
+            docker pull -q "$image" >/dev/null 2>&1 && { pulled=yes; break; }
+            [ "$attempt" = 5 ] && break
+            echo "pull of $image failed (attempt $attempt/5); retrying in $((attempt * 5))s" >&2
+            sleep $((attempt * 5))
+        done
+        if [ -n "$pulled" ]; then
+            echo "pulled $image"
+        else
+            echo "warning: could not pull $image; letting compose try" >&2
+        fi
+    done
 
 # Bring a stack up manually for inspection, with the host ports pinned (the test stacks use
 # ephemeral ones). Tear it down with `just e2e-down <proto> [impl]`.
