@@ -16,6 +16,17 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
+
+# Point libraries (contract §3.4) referenced by name resolve against the
+# installed search path, which does not exist in a checkout — so point it at
+# the ones in the repo. Every `points.d` here, since each stack and the demo
+# carry their own.
+library_path=""
+for dir in "$repo"/demo/points.d "$repo"/connectors/*/points.d; do
+    [ -d "$dir" ] || continue
+    library_path="${library_path:+$library_path:}$dir"
+done
+export TEDGE_DOT_POINT_LIBRARY_PATH="$library_path"
 c_bin="$repo/impl/c/build/tedge-dot"
 rust_bin=${RUST_BIN:-}
 

@@ -33,9 +33,12 @@ port = 1883
 name             = "plc1"
 protocol_address = { transport = "tcp", host = "simulator", port = 502, unit_id = 1 }
 default_mode     = "typed"
-points_from      = ["plc-sim", "/usr/share/tedge-dot/points.d/modbus/plc-sim-extra.toml"]
-# ^ one library by name, one by absolute path: both forms are legal in a config file,
-#   and the path form must not stop the management verbs from working (§3.4/§6.3).
+points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
+# ^ one library by NAME (resolved along the search path, where the image installs
+#   points.d as a package would) and one by relative PATH (resolved against this
+#   file's own directory, which is why the image also places points.d next to it).
+#   Both forms are legal in a config file, and the path form must not stop the
+#   management verbs from working (§3.4/§6.3) — the define-device test depends on it.
 
   # uint16 holding register (also used for the register write round-trip).
   [[device.point]]
