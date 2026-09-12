@@ -24,7 +24,7 @@ pub struct ConnectorSection {
     /// The configured service name; read it through [`ConnectorSection::service_name`], which
     /// applies the default.
     #[serde(rename = "service_name", default)]
-    pub configured_service_name: Option<String>,
+    pub(crate) configured_service_name: Option<String>,
     #[serde(default = "default_poll_interval")]
     pub poll_interval: String,
     #[serde(default = "default_log_level")]

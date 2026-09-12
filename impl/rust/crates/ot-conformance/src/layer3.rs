@@ -200,9 +200,11 @@ async fn check_b11_unowned_device_ignored(ctx: &Ctx<'_>, layer: &mut Layer) {
         .collect();
     // The request is retained: clear it rather than leave it for later checks.
     ctx.broker.publish(&topic, b"", true);
-    // Silence only counts from a connector that is still working: samples keep coming.
+    // Silence only counts from a connector that is still working: samples keep coming after the
+    // command was given its time (a fresh mark — one published before a crash does not count).
+    let settled = ctx.broker.mark();
     let alive = ctx
-        .wait_connector_record(mark, SAMPLE_TIMEOUT, "a sample during the ownership check", |r| {
+        .wait_connector_record(settled, SAMPLE_TIMEOUT, "a sample after the ownership check", |r| {
             r.topic.contains("/sample/")
         })
         .await;

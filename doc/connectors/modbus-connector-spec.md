@@ -203,7 +203,8 @@ For `cmd/write/<id>` with `status: "init"`:
 
 - Publish `te/device/<device>/ot/modbus/status/link` retained: `connected` once a device
   responds, `disconnected` on transport loss, `degraded` if some reads fail persistently.
-- Publish service health on `te/device/main/service/tedge-dot/status/health`.
+- Publish service health on `te/device/main/service/<service>/status/health` (`<service>` is
+  `[connector] service_name`, default `tedge-dot-modbus`).
 
 ## 8. Mapping from the legacy plugin
 
