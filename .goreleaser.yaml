@@ -26,6 +26,10 @@ builds:
     # Only the build runs there: goreleaser itself, and every nfpms `contents.src`
     # below, stay relative to the repository root where the shared trees live.
     dir: impl/rust
+    # `tedge-dot --version` reports the release version, not the workspace crate version
+    # (impl/rust/src/main.rs). The C build gets the same string via cross/build.sh.
+    env:
+      - TEDGE_DOT_VERSION={{ .Version }}
     flags:
       - --release
       - --package=tedge-dot
@@ -37,6 +41,9 @@ builds:
       # with cargo-zigbuild. Build from source on Linux with
       # `cargo build --features profibus` to use it.
       - --features=modbus,opcua,canbus,canopen
+    # The macOS targets link against Apple frameworks (IOKit, Security, CoreFoundation) that
+    # only a macOS host's SDK provides, so release.yaml runs this build on a macOS runner; zig
+    # still cross-compiles the Linux and Windows targets from there.
     targets:
       - x86_64-unknown-linux-gnu
       - x86_64-apple-darwin

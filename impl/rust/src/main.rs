@@ -30,9 +30,17 @@ const DEFAULT_CONFIG: &str = "/etc/tedge/plugins/ot/modbus.toml";
 const DEFAULT_CONFIG_DIR: &str = "/etc/tedge/plugins/ot";
 const DEFAULT_RESTART_DELAY_SECS: u64 = 5;
 
+/// The release version `--version` reports. The release build stamps it from the tag via
+/// TEDGE_DOT_VERSION (.goreleaser.yaml); other builds fall back to the crate version. This is
+/// not the contract version the connectors publish in their capability descriptors.
+const VERSION: &str = match option_env!("TEDGE_DOT_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// thin-edge.io OT protocol connector.
 #[derive(Parser)]
-#[command(name = "tedge-dot", version, about, long_about = None)]
+#[command(name = "tedge-dot", version = VERSION, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

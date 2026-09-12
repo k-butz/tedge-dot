@@ -75,7 +75,10 @@ jobs:
 
   rust:
     name: Build tedge-dot-rs (Rust)
-    runs-on: ubuntu-latest
+    # macOS, not ubuntu: the darwin targets link Apple frameworks (IOKit, Security,
+    # CoreFoundation) that zig cannot find without the macOS SDK, which failed the 0.0.1 tag
+    # run on ubuntu. zig cross-compiles the Linux and Windows targets from here just the same.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -120,6 +123,8 @@ jobs:
       - name: Package smoke (flows are shipped)
         run: |
           set -eux
+          # The macOS runner has no dpkg-deb.
+          brew install dpkg
           deb=$(ls dist/tedge-dot-rs_*_linux_amd64.deb)
           dpkg-deb -I "$deb" | grep -E 'Package:|Provides:|Conflicts:|Replaces:'
           # The package renaming is load-bearing: tedge-dot-rs and tedge-dot-c must stay
@@ -172,13 +177,16 @@ jobs:
           sudo apt-get install -y nfpm
 
       - name: Cross-build every architecture
+        env:
+          # Stamped into the binary so `tedge-dot --version` matches the package version.
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -eux
           for arch in $C_ARCHS; do
             mkdir -p "impl/c/dist/$arch"
             docker run --rm \
               -v "$PWD:/src:ro" -v "$PWD/impl/c/dist/$arch:/out" \
-              -e ARCH="$arch" -e GLIBC_MIN="$GLIBC_MIN" \
+              -e ARCH="$arch" -e GLIBC_MIN="$GLIBC_MIN" -e VERSION="$VERSION" \
               tedge-dot-cross
           done
 
