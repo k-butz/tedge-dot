@@ -90,6 +90,11 @@
     "unit": {
       "type": "string"
     },
+    "type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The device's declared type (§3.1), when it has one. Lets consumers name the point's parameter set (§5.2) without the configuration file. Per device, not per point, and short — unlike the point's name/description, which are static per point and published once in the capability descriptor instead."
+    },
     "access": {
       "enum": [
         "read",

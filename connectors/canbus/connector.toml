@@ -20,6 +20,9 @@ port = 13883
 
 [[device]]
 name             = "engine"
+# The device type (§3.1): it names this device's parameter sets (§5.2), which are
+# tenant-wide identifiers in the cloud, and its thin-edge entity type.
+type             = "canbus-sim"
 protocol_address = { interface = "vcan0", dbc_file = "/test.dbc" }
 default_mode     = "typed"
 

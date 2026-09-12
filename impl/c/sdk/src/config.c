@@ -549,14 +549,73 @@ static toml_array_t *library_points(toml_table_t *root, const char *path,
     return (dup || missing_id) ? NULL : points;
 }
 
+/* True when `key` is present in `tbl` under any TOML type. `toml_raw_in` only
+ * sees scalars, so a key whose value is a table or an array would otherwise
+ * look absent -- and `type = ["acme-meter-v2"]` would be silently dropped here
+ * while the Rust loader rejects it. */
+static bool key_present(toml_table_t *tbl, const char *key) {
+    return toml_raw_in(tbl, key) || toml_table_in(tbl, key) ||
+           toml_array_in(tbl, key);
+}
+
+/* True when `s` is empty or nothing but whitespace -- what neither a device type
+ * nor a library type may be. The Rust loader rejects exactly the same values,
+ * which is what keeps the two accepting the same files. */
+static bool blank(const char *s) {
+    for (; *s; s++)
+        if (!isspace((unsigned char)*s))
+            return false;
+    return true;
+}
+
+/* Strip surrounding whitespace from `s` in place. A device type is rendered in
+ * three places -- the parameter set names, the sample envelope and the link
+ * status -- which must agree on its exact spelling, so it is normalised once
+ * here, at load, exactly as the Rust loader does. */
+static char *trim_in_place(char *s) {
+    size_t end = strlen(s);
+    while (end && isspace((unsigned char)s[end - 1]))
+        s[--end] = '\0';
+    size_t start = 0;
+    while (s[start] && isspace((unsigned char)s[start]))
+        start++;
+    if (start)
+        memmove(s, s + start, end - start + 1);
+    return s;
+}
+
+/* The device type a library names ([library] type, §3.4), or NULL when it names
+ * none -- the file name is deliberately not used instead, because this ends up
+ * as a tenant-wide identifier in the cloud (§5.2). Caller frees. */
+static int library_type(toml_table_t *root, const char *path, char **out,
+                        char *err, size_t errlen) {
+    *out = NULL;
+    toml_table_t *library = toml_table_in(root, "library");
+    if (!library || !key_present(library, "type"))
+        return 0;
+    toml_datum_t d = toml_string_in(library, "type");
+    if (!d.ok || blank(d.u.s)) {
+        if (d.ok)
+            free(d.u.s);
+        snprintf(err, errlen,
+                 "point library '%s': [library] type must be a non-empty string", path);
+        return -1;
+    }
+    *out = trim_in_place(d.u.s);
+    return 0;
+}
+
 /* Parse a library once and keep it alive on the config: a point's `address` is
- * borrowed from the document it was declared in. Returns its point array. */
+ * borrowed from the document it was declared in. Returns its point array, and
+ * through `root_out` the document it came from (for [library] type). */
 static toml_array_t *load_library(tdot_config_t *cfg, const char *path,
-                                  const char *protocol, char *err,
-                                  size_t errlen) {
+                                  const char *protocol, toml_table_t **root_out,
+                                  char *err, size_t errlen) {
     for (size_t i = 0; i < cfg->nlibs; i++)
-        if (strcmp(cfg->lib_paths[i], path) == 0)
+        if (strcmp(cfg->lib_paths[i], path) == 0) {
+            *root_out = cfg->libs[i];
             return toml_array_in(cfg->libs[i], "point");
+        }
 
     FILE *fp = fopen(path, "r");
     if (!fp) {
@@ -578,6 +637,7 @@ static toml_array_t *load_library(tdot_config_t *cfg, const char *path,
     cfg->lib_paths[cfg->nlibs] = strdup(path);
     cfg->nlibs++;
 
+    *root_out = root;
     return library_points(root, path, protocol, err, errlen);
 }
 
@@ -651,7 +711,22 @@ static int resolve_device_points(tdot_config_t *cfg, tdot_device_t *dev,
                 search_path_free(&sp);
                 return -1;
             }
-            toml_array_t *points = load_library(cfg, path, cfg->protocol, err, errlen);
+            toml_table_t *lib_root = NULL;
+            toml_array_t *points =
+                load_library(cfg, path, cfg->protocol, &lib_root, err, errlen);
+            if (points) {
+                /* The device type comes from the *first* library that names
+                 * one: later references extend a type rather than redefine it
+                 * (["acme-meter-v2", "site-extras"]). A type on the device
+                 * itself wins over both. */
+                char *type = NULL;
+                if (library_type(lib_root, path, &type, err, errlen) != 0)
+                    points = NULL;
+                else if (type && !dev->type)
+                    dev->type = type;
+                else
+                    free(type);
+            }
             free(path);
             if (!points) {
                 search_path_free(&sp);
@@ -841,6 +916,22 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
                          dev->name);
                 goto fail;
             }
+        /* The device type (§3.1). Parsed before the libraries are resolved, so a
+         * device's own declaration wins over the one its library names. A
+         * present-but-unusable value is an error rather than an absent type:
+         * the Rust loader rejects the same files, and an empty string would
+         * otherwise behave like no type at all. */
+        if (key_present(dt, "type")) {
+            d = toml_string_in(dt, "type");
+            if (!d.ok || blank(d.u.s)) {
+                if (d.ok)
+                    free(d.u.s);
+                snprintf(err, errlen, "%s: device %s: type must be a non-empty string",
+                         path, dev->name);
+                goto fail;
+            }
+            dev->type = trim_in_place(d.u.s);
+        }
         dev->protocol_address = toml_table_in(dt, "protocol_address");
         if (!dev->protocol_address) {
             snprintf(err, errlen, "%s: device %s missing protocol_address",
@@ -935,6 +1026,7 @@ static void free_contents(tdot_config_t *cfg, bool keep_path) {
             free(dev->points_from[j]);
         free(dev->points_from);
         free(dev->name);
+        free(dev->type);
         free(dev->proto); /* connectors keep flat per-device state here and
                              release transports in disconnect_device() */
     }

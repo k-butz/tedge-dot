@@ -86,8 +86,8 @@ the script header and unit-tested offline by
 // c8y_ParameterUpdate — sent by the Cumulocity "Parameters" tab for one parameter set. The set
 // name (<set>) is the Digital Twin Manager identifier; the whole operation is passed to the
 // parameter_update command as `operation` and ot-command-forward turns it into one write-batch.
-{ "c8y_ParameterUpdate": {}, "c8y_ParameterUpdate_modbus_parameters": {},
-  "modbus_parameters": { "temp_u16": 4343, "coil_rw": true } }
+{ "c8y_ParameterUpdate": {}, "c8y_ParameterUpdate_acme_meter_v2_control_parameters": {},
+  "acme_meter_v2_control_parameters": { "temp_u16": 4343, "coil_rw": true } }
 ```
 
 Device parameters are protocol-neutral and need no operation file in this repository: the
@@ -106,11 +106,36 @@ roles anyway).
 `tedge-dot describe` prints exactly that definition from the connector config:
 
 ```sh
-tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact > modbus_parameters.json
-C8Y_SETTINGS_CI=true c8y api POST /service/dtm/definitions/properties --data @modbus_parameters.json
+# One definition per line, and the DTM service takes one per request — a configuration that
+# groups its parameters (§5.2) renders several. `</dev/null` matters: without it c8y reads the
+# loop's stdin as its own input pipeline and the remaining definitions are never registered.
+defs=$(mktemp) one=$(mktemp)
+trap 'rm -f "$defs" "$one"' EXIT
+tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact > "$defs"
+# Read from a file, not a pipe: a `while` on the right of a pipe runs in a subshell, where
+# `exit 1` would abort only the loop and leave the script reporting success.
+while read -r definition; do
+    printf '%s' "$definition" > "$one"
+    C8Y_SETTINGS_CI=true c8y api POST /service/dtm/definitions/properties --data "@$one" </dev/null ||
+        exit 1   # stop at the first rejected definition rather than reporting only the last
+done < "$defs"
 ```
 
 (or create it by hand in the DTM UI: identifier = the set name, one property per point id).
+
+A DTM identifier is **tenant-wide**, so the set name is derived from the device *type* the
+configuration declares — `<type>_<group>_parameters`, e.g. `acme_meter_v2_control_parameters`
+(contract §5.2). Give every device a `type` (on the `[[device]]`, or once in the point library
+it references): without one the sets fall back to `<protocol>_control_parameters`, which every
+other device type on that protocol also falls back to, and the definitions would overwrite each
+other in the tenant. `describe` warns when a device exposes parameters without a type.
+
+Renaming a set leaves the old twin fragment retained under its old name (and mirrored into the
+managed object), so clear it once per device after changing a name:
+
+```sh
+tedge mqtt pub -r -q 1 'te/device/plc1///twin/modbus_parameters' ''
+```
 
 > The legacy operations carried raw register/coil addresses and per-register scaling. Those now
 > live in connector config (point `address`) and flows (scaling), so the cloud-facing operation

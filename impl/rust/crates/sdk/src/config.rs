@@ -70,6 +70,17 @@ pub struct DeviceConfig {
     pub name: String,
     /// Protocol-specific device address (opaque to the contract).
     pub protocol_address: serde_json::Value,
+    /// The *device type* this instance is one of (§3.1): what its point list describes, not
+    /// where it is. Declared here, or inherited from the first point library the device
+    /// references (§3.4) — a library is the point list of one device type, so it is the
+    /// natural place to name it.
+    ///
+    /// It qualifies the names of the device's parameter sets (§5.2), which are tenant-wide
+    /// identifiers in the cloud: two device types on the same protocol have different points
+    /// and so must not share a set name. It is also echoed in samples and link status, so the
+    /// registration flow can use it as the thin-edge entity type.
+    #[serde(rename = "type", default)]
+    pub device_type: Option<String>,
     #[serde(default)]
     pub poll_interval: Option<String>,
     #[serde(default)]

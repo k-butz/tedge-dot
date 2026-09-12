@@ -39,7 +39,13 @@ export function onMessage(message, context) {
   if (status === "") return []; // ignore clearing/non-JSON messages
 
   const initPayload = context.script.get(id) ?? {};
-  const origin = initPayload.origin && typeof initPayload.origin === "object" ? initPayload.origin : null;
+  // `origin` from the cached request, else from the result itself: the connector echoes it into
+  // every transition it publishes (§6.4), which is what makes a REPLAYED terminal result
+  // routable. The cache is in-memory, so a mapper that restarts between the request and the
+  // result has lost it — and mirroring onto `ot_write_batch` instead of `parameter_update`
+  // would leave the cloud operation waiting forever on a command that never completes.
+  const originOf = (p) => (p?.origin && typeof p.origin === "object" ? p.origin : null);
+  const origin = originOf(initPayload) ?? originOf(payload);
   const commandType = origin?.command || prefix + verb.split("-").join("_");
 
   // Merge stored init metadata with the connector result; connector fields win. The request

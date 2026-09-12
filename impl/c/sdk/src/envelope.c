@@ -55,6 +55,10 @@ char *tdot_envelope_sample(const tdot_config_t *cfg, const tdot_device_t *dev,
     cJSON_AddStringToObject(obj, "ts", ts);
     cJSON_AddNumberToObject(obj, "ts_ms", tdot_now_ms());
     cJSON_AddStringToObject(obj, "device", dev->name);
+    /* The device type (§3.1), when declared: what a consumer needs to name the
+     * point's parameter set without reading the configuration file (§5.2). */
+    if (dev->type)
+        cJSON_AddStringToObject(obj, "type", dev->type);
     cJSON_AddStringToObject(obj, "protocol", cfg->protocol);
     cJSON_AddStringToObject(obj, "point", pt->id);
     bool raw_mode = pt->mode == TDOT_MODE_RAW;

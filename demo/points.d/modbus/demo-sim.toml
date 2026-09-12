@@ -21,6 +21,10 @@
 
 [library]
 protocol    = "modbus"
+# The device *type* this list describes (§3.1): it names the parameter sets of every
+# device that references this library, which is what keeps two device types on the
+# same protocol from sharing a (tenant-wide) Cumulocity identifier.
+type        = "modbus-demo-sim"
 description = "pymodbus simulator, as seeded by demo/docker-compose.yaml's modbus-sim"
 version     = "1"
 
@@ -75,8 +79,17 @@ datatype = "float32"
 address  = { table = "holding", address = 6, count = 2 }
 
 # Coil used for the boolean write round-trip.
+#
+# It is in TWO parameter groups (§5.2): operators group settings by what they are
+# for, and a pump switch belongs both on the everyday screen and on the
+# commissioning one. Cumulocity then shows it in
+# modbus_demo_sim_control_parameters *and*
+# modbus_demo_sim_commissioning_parameters, and a change through either keeps
+# both in step -- `group` takes one name or a list of them.
 [[point]]
 id       = "coil_rw"
+name     = "Pump enable"
 datatype = "bool"
 access   = "read_write"
 address  = { table = "coil", address = 48, count = 1 }
+meta     = { parameter = { group = ["control", "commissioning"] } }

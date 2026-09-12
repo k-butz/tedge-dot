@@ -19,10 +19,11 @@ against one works unchanged against the other.
 It speaks the same [OT Connector Contract](../../doc/contract/) as the Rust
 implementation: same TOML config files (the untouched configs in
 [demo/config/](../../demo/config/) work as-is), same MQTT topics, same JSON
-sample/command envelopes (including the `access` echo and the runtime-provided
-`write-batch` verb that the device-parameter flows rely on, see
-[RFC 0003](../../doc/rfc/0003-parameter-writes.md), whose parameter derivation and
-`tedge-dot describe` rendering this build shares), the SDK management verbs
+sample/command envelopes (including the `access` and device `type` echoes and the
+runtime-provided `write-batch` verb that the device-parameter flows rely on, see
+[RFC 0003](../../doc/rfc/0003-parameter-writes.md) and
+[RFC 0005](../../doc/rfc/0005-device-types-and-parameter-sets.md), whose parameter derivation,
+set naming and `tedge-dot describe` rendering this build shares), the SDK management verbs
 (`set-config`, `define-device`, `remove-device`: the runtime patches the
 config document, validates it with the loader and the module, persists it and
 live-reloads — comments are not preserved, tomlc99 being read-only), `raw`

@@ -26,7 +26,7 @@ modules that run inside a mapper and are hot-reloaded without restarts.
 | [ot-registration](ot-registration/) | OT → thin-edge | `ot/<protocol>/status/link` | `te/device/<device>//` child registration (+ optional `twin/<fragment>`) |
 | [ot-command-forward](ot-command-forward/) | thin-edge → OT | `cmd/ot_<verb>/<id>` (incl. `parameter_update`) | `ot/<protocol>/cmd/<verb>/<id>` |
 | [ot-command-result](ot-command-result/) | OT → thin-edge | `ot/<protocol>/cmd/<verb>/<id>` | `cmd/ot_<verb>/<id>` (or the `origin.command`) |
-| [ot-parameter-state](ot-parameter-state/) | OT → thin-edge | `sample/<point>`, `cmd/write*/<id>` | `twin/<set>` |
+| [ot-parameter-state](ot-parameter-state/) | OT → thin-edge | `sample/<point>`, `cmd/write*/<id>`, `status/link` | `twin/<set>` |
 
 The two `ot-command-*` flows form a bidirectional, **verb-neutral** bridge: *forward* turns a
 thin-edge command into a connector command request; *result* mirrors the connector's `executing` →
@@ -64,8 +64,14 @@ The plugin's own workflow only serves the main device (tedge-agent runs workflow
 entity only), so on OT child devices the flows are the sole handler and no second template is
 needed: the c8y mapper binds templates per fragment name, so two templates for
 `c8y_ParameterUpdate` could never coexist.
-The set a point belongs to comes from `meta.parameter.set`; `tedge-dot describe` renders the
-same sets as Cumulocity DTM definitions for a tenant admin to register.
+A set name is a tenant-wide identifier in the cloud, so it is derived from the **device type**
+(echoed in every sample and on the retained link status) rather than from the protocol:
+`<type, else protocol>_<meta.parameter.group, default "control">_parameters`, e.g.
+`acme_meter_v2_control_parameters`. Both `group` and `set` accept a list, so one point can be in
+several sets and its value is published to each of their fragments. `meta.parameter.set` still
+names a set outright, and the flow's `default_set` param forces one name for everything. `tedge-dot describe` derives the same
+names from the same configuration and renders them as Cumulocity DTM definitions for a tenant
+admin to register — see [RFC 0005](../doc/rfc/0005-device-types-and-parameter-sets.md).
 
 By default `ot-measurement` names the measurement group after the sample's `protocol`
 (`m/modbus`, `m/opcua`, ...), `ot-registration` types the child device as `<protocol>-device`,

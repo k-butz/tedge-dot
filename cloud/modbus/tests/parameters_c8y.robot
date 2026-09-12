@@ -22,7 +22,9 @@ Suite Teardown      Teardown Cloud Device
 *** Variables ***
 ${CHILD_NAME}           plc1
 # ${CHILD_EXTERNAL_ID} is built in the suite setup: it embeds the per-run device id.
-${SET}                  modbus_parameters
+# The parameter set is named after the device *type* the config declares (§5.2), not after the
+# protocol: a DTM identifier is tenant-wide, and two Modbus device types must not share one.
+${SET}                  modbus_plc_sim_control_parameters
 ${OP_TIMEOUT}           60
 ${MEAS_TIMEOUT}         90
 ${NEW_VALUE}            4343
@@ -34,7 +36,8 @@ Parameter Definitions Are Rendered From The Connector Config
     ...                set, with the writable points as properties (an admin registers it once).
     ${output}=    Execute Shell Command And Get Output
     ...    tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact    timeout=${OP_TIMEOUT}
-    ${definition}=    Evaluate    json.loads($output.strip().splitlines()[0])    modules=json
+    # The first JSON line, not the first line: a warning on stderr (§5.2) can be interleaved.
+    ${definition}=    Evaluate    json.loads([l for l in $output.splitlines() if l.startswith("{")][0])    modules=json
     Should Be Equal    ${definition}[identifier]    ${SET}
     Dictionary Should Contain Key    ${definition}[jsonSchema][properties]    temp_u16
     Dictionary Should Contain Key    ${definition}[jsonSchema][properties]    coil_rw

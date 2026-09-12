@@ -104,6 +104,11 @@
           "type": "string",
           "minLength": 1
         },
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The device type this instance is one of (§3.1): what its point list describes, not where it is. Inherited from the first point library named in points_from that declares a [library] type (§3.4) when absent here. It qualifies the device's parameter set names (§5.2), which are tenant-wide identifiers in the cloud, and is echoed in every sample and on the link status."
+        },
         "protocol_address": {
           "type": "object",
           "description": "Protocol-specific device address. Shape defined by the connector spec."
@@ -312,6 +317,7 @@
       "device": [
         {
           "name": "plc-1",
+          "type": "acme-meter-v2",
           "protocol_address": {
             "transport": "tcp",
             "host": "192.168.0.10",

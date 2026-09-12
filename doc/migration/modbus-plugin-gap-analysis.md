@@ -79,7 +79,7 @@ does more than tedge-dot.
 
 | Capability | modbus-plugin | tedge-dot | Status |
 | --- | --- | --- | --- |
-| Child registration (retained `te/device/<name>//`, `@type: child-device`, `type: modbus-device`) | on config (re)load | [`ot-registration`](../../flows/ot-registration/) on first `status/link = connected`; `device_type` param | covered |
+| Child registration (retained `te/device/<name>//`, `@type: child-device`, `type:` the device's declared type, else `modbus-device`) | on config (re)load | [`ot-registration`](../../flows/ot-registration/) on first `status/link = connected`; the device's declared `type` (§3.1), else the `device_type` param | covered |
 | External id naming `<device.id>:device:<name>` | via c8y mapper (same) | via c8y mapper (asserted in [`cloud/modbus/tests/modbus_c8y.robot`](../../cloud/modbus/tests/modbus_c8y.robot)) | covered |
 | Command capability advertisement (`cmd/modbus_SetRegister`, `cmd/modbus_SetCoil`) | reader publishes empty retained capability topics | `ot-registration` `command_capabilities = "ot_write,ot_write_coil"` | covered |
 | Service registration (`te/device/main/service/...`) | `tedge-modbus-plugin` | `tedge-dot` service health (asserted in the robot suite) | covered |

@@ -3,30 +3,170 @@
 //!
 //! A parameter is a point whose `access` permits writes, plus any point that opts in through
 //! `meta.parameter` (`meta.parameter = false` opts a writable point out). Parameters are grouped
-//! into **sets** (`meta.parameter.set`, default `<protocol>_parameters`): one set is one twin
-//! fragment on the device (published by the `ot-parameter-state` flow with the current values)
-//! and one DTM property definition in the tenant (rendered by `tedge-dot describe`). The keys of
-//! a set are the point ids, so parameter ids must be plain identifiers (`[A-Za-z0-9_]`).
+//! into **sets**: one set is one twin fragment on the device (published by the
+//! `ot-parameter-state` flow with the current values) and one DTM property definition in the
+//! tenant (rendered by `tedge-dot describe`). The keys of a set are the point ids, so parameter
+//! ids must be plain identifiers (`[A-Za-z0-9_]`).
+//!
+//! ## Naming a set
+//!
+//! A DTM identifier is **tenant-wide**, so a set name has to be as specific as the points in it.
+//! It is therefore qualified by the *device type* (§3.1) — the thing that determines which
+//! points exist — and not by the protocol, which says nothing about them:
+//!
+//! ```text
+//! <device type, else the protocol>_<group, default "control">_parameters
+//! ```
+//!
+//! `acme-meter-v2` with the default group gives `acme_meter_v2_control_parameters`; a device
+//! with no declared type falls back to `modbus_control_parameters`, which is fine for a fleet of
+//! one type and collides for a fleet of several — the reason to declare the type.
+//!
+//! `meta.parameter.group` names a second set for the same device type (`commissioning` ->
+//! `acme_meter_v2_commissioning_parameters`); `meta.parameter.set` bypasses the naming rule
+//! entirely and is used verbatim, which is how points of *different* device types can be made to
+//! share one set, or an existing tenant identifier can be matched.
 //!
 //! `meta.parameter` (all optional; either a string naming the set, `true`, or a table):
 //!
 //! ```toml
+//! [[device]]
+//! type = "acme-boiler-v2"
+//!
 //! [[device.point]]
 //! id       = "setpoint"
 //! datatype = "int16"
 //! access   = "read_write"
 //! unit     = "°C"
-//! meta.parameter = { set = "boiler", title = "Setpoint", min = 0, max = 120, order = 1 }
+//! meta.parameter = { title = "Setpoint", min = 0, max = 120, order = 1 }
+//! # -> set "acme_boiler_v2_control_parameters"
 //! ```
 
-use crate::config::{ConnectorConfig, PointConfig};
+use crate::config::{ConnectorConfig, DeviceConfig, PointConfig};
 use crate::connector::Access;
 use crate::model::DataType;
 use serde_json::{json, Map, Value};
 
-/// Default parameter set name for a protocol: `<protocol>_parameters`.
-pub fn default_set(protocol: &str) -> String {
-    format!("{}_parameters", protocol.replace(|c: char| !c.is_ascii_alphanumeric(), "_"))
+pub use crate::library::trim_c;
+
+/// The group a parameter belongs to when it names none.
+pub const DEFAULT_GROUP: &str = "control";
+
+/// Every *run* of characters outside `[A-Za-z0-9]` becomes a single `_`, so a device type or
+/// group name can be written the way it reads (`acme-meter-v2`) and still be a valid fragment
+/// key. A run rather than a character because the C implementation folds bytes and this one
+/// folds chars: collapsing runs is what makes them agree on a name with a non-ASCII character
+/// in it (one multi-byte char = one run either way).
+fn sanitize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_sep = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            last_was_sep = false;
+        } else if !last_was_sep {
+            out.push('_');
+            last_was_sep = true;
+        }
+    }
+    out
+}
+
+/// A parameter set name: `<qualifier>_<group>_parameters` (§5.2). Sanitized as a whole, so a
+/// qualifier that already ends in a separator does not produce a doubled `_`.
+pub fn set_name(qualifier: &str, group: &str) -> String {
+    sanitize(&format!("{qualifier}_{group}_parameters"))
+}
+
+/// How one device's parameter sets are named.
+///
+/// Built per device, because the qualifier is the device's own type. `forced` is
+/// `tedge-dot describe --set <name>` and the `ot-parameter-state` flow's `default_set`: a
+/// single set name for everything that does not name its own, which is the escape hatch for a
+/// tenant identifier that predates this rule.
+#[derive(Clone, Debug)]
+pub struct SetNaming {
+    forced: Option<String>,
+    qualifier: String,
+}
+
+impl SetNaming {
+    /// The naming of `device`'s sets: qualified by its declared `type`, else by the protocol.
+    pub fn of(device: &DeviceConfig, protocol: &str, forced: Option<&str>) -> Self {
+        SetNaming {
+            forced: forced.map(String::from),
+            // Used verbatim: the loader normalised and validated the declared type, so every
+            // renderer (set names, sample envelope, link status) spells it identically.
+            qualifier: device
+                .device_type
+                .clone()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| protocol.to_string()),
+        }
+    }
+
+    /// The set a point in `group` belongs to.
+    pub fn set_for(&self, group: Option<&str>) -> String {
+        match &self.forced {
+            Some(set) => set.clone(),
+            None => set_name(&self.qualifier, group.unwrap_or(DEFAULT_GROUP)),
+        }
+    }
+
+    /// Every set a point belongs to, given its `meta.parameter` options.
+    ///
+    /// `set` and `group` each accept a string or an array of them, so one point can appear in
+    /// several sets — operators group signals by what they are *for*, and the same setpoint
+    /// belongs on the commissioning screen and the daily-operation one. The point's value is
+    /// published to every set's fragment, so the groups stay consistent with each other.
+    pub fn sets_of(&self, options: &Map<String, Value>) -> Vec<String> {
+        // An absolute `set` bypasses the naming rule entirely and wins over `group`.
+        let absolute = names_of(options.get("set"));
+        if !absolute.is_empty() {
+            return absolute;
+        }
+        if let Some(forced) = &self.forced {
+            return vec![forced.clone()];
+        }
+        let groups = names_of(options.get("group"));
+        if groups.is_empty() {
+            return vec![self.set_for(None)];
+        }
+        // Two group names can fold to one set name ("a b" and "a-b"), so dedupe the result
+        // rather than the input: a point must not appear twice in one definition.
+        let mut sets: Vec<String> = Vec::with_capacity(groups.len());
+        for group in groups {
+            let set = set_name(&self.qualifier, &group);
+            if !sets.contains(&set) {
+                sets.push(set);
+            }
+        }
+        sets
+    }
+}
+
+/// The names a `set`/`group` option holds: one string, or an array of them. Empty and
+/// non-string entries are ignored, so a mistyped entry degrades to the default group rather
+/// than inventing a set name out of `null`.
+fn names_of(value: Option<&Value>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut push = |name: &str| {
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    };
+    match value {
+        Some(Value::String(s)) => push(s),
+        Some(Value::Array(items)) => {
+            for item in items {
+                if let Some(s) = item.as_str() {
+                    push(s);
+                }
+            }
+        }
+        _ => {}
+    }
+    names
 }
 
 /// True when `id` can be used verbatim as a fragment key (Cumulocity rejects `.` and `$`).
@@ -53,13 +193,16 @@ pub struct Parameter {
     pub options: Map<String, Value>,
 }
 
-/// The parameters of one point, if it is one. `default_set` names the set for points that do
-/// not pick their own.
-pub fn parameter_of(point: &PointConfig, default_set: &str) -> Option<Parameter> {
+/// The parameters of one point: one per set it belongs to, and none when it is not a
+/// parameter at all. `naming` names the sets for a point that does not give absolute ones.
+///
+/// A point in several groups yields several [`Parameter`]s — identical but for `set` — which
+/// is what puts it in each of those definitions and fragments.
+pub fn parameters_of(point: &PointConfig, naming: &SetNaming) -> Vec<Parameter> {
     let access = Access::parse(point.access.as_deref());
     let options: Option<Map<String, Value>> = match point.meta.as_ref().and_then(|m| m.get("parameter")) {
         None => None,
-        Some(Value::Bool(false)) => return None, // explicit opt-out
+        Some(Value::Bool(false)) => return Vec::new(), // explicit opt-out
         Some(Value::Bool(true)) => Some(Map::new()),
         Some(Value::String(set)) => {
             let mut m = Map::new();
@@ -70,38 +213,123 @@ pub fn parameter_of(point: &PointConfig, default_set: &str) -> Option<Parameter>
         Some(_) => Some(Map::new()),
     };
     if !access.can_write() && options.is_none() {
-        return None;
+        return Vec::new();
     }
     let options = options.unwrap_or_default();
-    let set = options
-        .get("set")
-        .and_then(|s| s.as_str())
-        .map(String::from)
-        .unwrap_or_else(|| default_set.to_string());
-    Some(Parameter {
-        point: point.id.clone(),
-        set,
-        datatype: point.datatype,
-        access,
-        unit: point.unit.clone(),
-        name: point.name.clone(),
-        description: point.description.clone(),
-        options,
-    })
-}
-
-/// Every parameter of every device in the config, in configuration order.
-pub fn parameters(config: &ConnectorConfig, default_set: &str) -> Vec<Parameter> {
-    config
-        .devices
-        .iter()
-        .flat_map(|d| d.points.iter().filter_map(|p| parameter_of(p, default_set)))
+    naming
+        .sets_of(&options)
+        .into_iter()
+        .map(|set| Parameter {
+            point: point.id.clone(),
+            set,
+            datatype: point.datatype,
+            access,
+            unit: point.unit.clone(),
+            name: point.name.clone(),
+            description: point.description.clone(),
+            options: options.clone(),
+        })
         .collect()
 }
 
+/// Every parameter of every device in the config, in configuration order. `forced` is the
+/// `--set` override: one set name for every point that does not give an absolute one.
+pub fn parameters(config: &ConnectorConfig, forced: Option<&str>) -> Vec<Parameter> {
+    config
+        .devices
+        .iter()
+        .flat_map(|device| {
+            let naming = SetNaming::of(device, &config.connector.protocol, forced);
+            device
+                .points
+                .iter()
+                .flat_map(move |p| parameters_of(p, &naming))
+        })
+        .collect()
+}
+
+/// Devices that expose parameters without declaring a `type`, so their sets fall back to the
+/// protocol — which every other device of every other type on that protocol also falls back to.
+/// `describe` warns about them; it is not an error, because a fleet of one type is fine.
+pub fn devices_without_type(config: &ConnectorConfig) -> Vec<String> {
+    config
+        .devices
+        .iter()
+        .filter(|d| d.device_type.as_deref().unwrap_or("").is_empty())
+        .filter(|d| {
+            let naming = SetNaming::of(d, &config.connector.protocol, None);
+            d.points.iter().any(|p| !parameters_of(p, &naming).is_empty())
+        })
+        .map(|d| d.name.clone())
+        .collect()
+}
+
+/// Warnings about the device types a configuration declares: types that produce the *same* set
+/// names, and types that produce no usable name at all.
+///
+/// The collision case — `"acme meter"` and
+/// `"acme-meter"` both give `acme_meter_control_parameters`, so their sets share one
+/// tenant-wide definition and the first one rendered silently wins, which is this feature's own
+/// failure mode one scope down.
+///
+/// Types are grouped and displayed by the set name [`set_name`] actually derives for them, so
+/// there is no second notion of "qualifier" to drift from the real one — the C implementation
+/// compares the same strings. One message per colliding group, in configuration order.
+///
+/// Deliberately not reported for an absolute `meta.parameter.set` shared by several device
+/// types: that is the documented way to share a set on purpose (§5.2).
+pub fn type_warnings(config: &ConnectorConfig) -> Vec<String> {
+    let mut warnings: Vec<String> = Vec::new();
+    // representative set name -> the distinct raw types that derive it
+    let mut folded: Vec<(String, Vec<String>)> = Vec::new();
+    for device in &config.devices {
+        let Some(declared) = device.device_type.as_deref().filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        // A type with nothing usable in it (`"日本語"`, `"---"`) folds away entirely and the
+        // sets are named `_control_parameters` — which every such type shares, silently.
+        if !declared.bytes().any(|b| b.is_ascii_alphanumeric()) {
+            warnings.push(format!(
+                "warning: device type '{declared}' has no [A-Za-z0-9] character, so its \
+                 parameter sets are named '{}' with nothing to tell them apart from another \
+                 such type's; name the type in ASCII",
+                set_name(declared, DEFAULT_GROUP)
+            ));
+        }
+        // A device with no parameters derives no set, so it cannot collide with anything.
+        let naming = SetNaming::of(device, &config.connector.protocol, None);
+        if !device.points.iter().any(|p| !parameters_of(p, &naming).is_empty()) {
+            continue;
+        }
+        let key = set_name(declared, DEFAULT_GROUP);
+        match folded.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, types)) => {
+                if !types.iter().any(|t| t == declared) {
+                    types.push(declared.to_string());
+                }
+            }
+            None => folded.push((key, vec![declared.to_string()])),
+        }
+    }
+    warnings.extend(folded
+        .into_iter()
+        .filter(|(_, types)| types.len() > 1)
+        .map(|(key, types)| {
+            let names: Vec<String> = types.iter().map(|t| format!("'{t}'")).collect();
+            format!(
+                "warning: device types {} derive the same parameter set names (e.g. '{}'), so \
+                 they share one tenant-wide definition and the first one rendered wins; give \
+                 them names that differ by more than punctuation",
+                names.join(", "),
+                key
+            )
+        }));
+    warnings
+}
+
 /// Parameter ids (and set names) that cannot be used as fragment keys.
-pub fn invalid_keys(config: &ConnectorConfig, default_set: &str) -> Vec<String> {
-    parameters(config, default_set)
+pub fn invalid_keys(config: &ConnectorConfig, forced: Option<&str>) -> Vec<String> {
+    parameters(config, forced)
         .into_iter()
         .flat_map(|p| {
             let mut bad = Vec::new();
@@ -121,13 +349,10 @@ pub fn invalid_keys(config: &ConnectorConfig, default_set: &str) -> Vec<String> 
 /// `POST /service/dtm/definitions/properties` (one element at a time), which a tenant admin
 /// registers once; the device never talks to the DTM service. Sets that appear on several
 /// devices are merged (the identifier is tenant-wide, so devices sharing a set must agree).
-pub fn c8y_dtm_definitions(config: &ConnectorConfig, default_set: Option<&str>) -> Vec<Value> {
-    let default_set = default_set
-        .map(String::from)
-        .unwrap_or_else(|| self::default_set(&config.connector.protocol));
+pub fn c8y_dtm_definitions(config: &ConnectorConfig, forced_set: Option<&str>) -> Vec<Value> {
     // set -> ordered (key, property schema)
     let mut sets: Vec<(String, Vec<(String, Value)>)> = Vec::new();
-    for param in parameters(config, &default_set) {
+    for param in parameters(config, forced_set) {
         let entry = match sets.iter_mut().find(|(name, _)| *name == param.set) {
             Some(e) => e,
             None => {
@@ -293,6 +518,7 @@ protocol = "modbus"
 
 [[device]]
 name = "plc1"
+type = "acme-boiler-v2"
 protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
 
   [[device.point]]
@@ -337,15 +563,46 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   access = "read_write"
   address = { table = "holding", address = 21, count = 1 }
   meta = { parameter = false }
+
+  [[device.point]]
+  id = "commission_code"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 22, count = 1 }
+  meta = { parameter = { group = "commissioning" } }
+
+  # In two groups at once: operators see it on the daily screen and the
+  # commissioning one, and both fragments carry its value.
+  [[device.point]]
+  id = "flow_limit"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 23, count = 1 }
+  meta = { parameter = { group = ["control", "commissioning"] } }
+
+# A device of an undeclared type: its sets fall back to the protocol.
+[[device]]
+name = "plc2"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id = 1 }
+
+  [[device.point]]
+  id = "spare_rw"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 30, count = 1 }
 "#;
 
     fn cfg() -> ConnectorConfig {
         toml::from_str(CONFIG).unwrap()
     }
 
+    /// A set name is qualified by the *device type*, because that is what decides which points
+    /// exist; the protocol is only the fallback for a device that does not declare one. An
+    /// absolute `meta.parameter.set` is used verbatim, a `group` names a second set of the same
+    /// device type.
     #[test]
     fn parameters_select_writable_and_opted_in_points() {
-        let params = parameters(&cfg(), "modbus_parameters");
+        let params = parameters(&cfg(), None);
         let names: Vec<(&str, &str)> = params
             .iter()
             .map(|p| (p.point.as_str(), p.set.as_str()))
@@ -353,34 +610,179 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
         assert_eq!(
             names,
             vec![
-                ("temp_u16", "modbus_parameters"),
-                ("coil_rw", "modbus_parameters"),
+                ("temp_u16", "acme_boiler_v2_control_parameters"),
+                ("coil_rw", "acme_boiler_v2_control_parameters"),
                 ("pump_speed", "pump"),
-                ("status_word", "modbus_parameters"),
+                ("status_word", "acme_boiler_v2_control_parameters"),
+                ("commission_code", "acme_boiler_v2_commissioning_parameters"),
+                // One point, two groups -> one parameter per set, in the declared order.
+                ("flow_limit", "acme_boiler_v2_control_parameters"),
+                ("flow_limit", "acme_boiler_v2_commissioning_parameters"),
+                // plc2 declares no type: back to the protocol, which is what collides across
+                // device types and is the reason `describe` warns about it.
+                ("spare_rw", "modbus_control_parameters"),
             ]
         );
         assert_eq!(params[3].access, Access::Read);
+        assert_eq!(devices_without_type(&cfg()), vec!["plc2".to_string()]);
+    }
+
+    /// `--set` forces one name for every point that does not give an absolute one — the escape
+    /// hatch for a tenant identifier that predates the naming rule.
+    #[test]
+    fn forced_set_overrides_the_derived_name() {
+        let params = parameters(&cfg(), Some("legacy_params"));
+        let names: Vec<(&str, &str)> = params
+            .iter()
+            .map(|p| (p.point.as_str(), p.set.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("temp_u16", "legacy_params"),
+                ("coil_rw", "legacy_params"),
+                ("pump_speed", "pump"),
+                ("status_word", "legacy_params"),
+                ("commission_code", "legacy_params"),
+                // --set collapses a multi-group point to the one forced name, once.
+                ("flow_limit", "legacy_params"),
+                ("spare_rw", "legacy_params"),
+            ]
+        );
+    }
+
+    /// `set` and `group` both accept a list, an absolute `set` still wins, and names that fold
+    /// to the same set are not repeated.
+    #[test]
+    fn a_point_can_belong_to_several_sets() {
+        let naming = SetNaming::of(&cfg().devices[0], "modbus", None);
+        let sets = |toml: &str| {
+            let point: PointConfig = toml::from_str(toml).unwrap();
+            parameters_of(&point, &naming)
+                .into_iter()
+                .map(|p| p.set)
+                .collect::<Vec<_>>()
+        };
+        let point = |meta: &str| {
+            format!(
+                "id = \"p\"\ndatatype = \"uint16\"\naccess = \"read_write\"\n\
+                 address = {{ table = \"holding\", address = 1, count = 1 }}\n{meta}"
+            )
+        };
+
+        assert_eq!(
+            sets(&point("meta = { parameter = { group = [\"control\", \"commissioning\"] } }")),
+            [
+                "acme_boiler_v2_control_parameters",
+                "acme_boiler_v2_commissioning_parameters"
+            ]
+        );
+        assert_eq!(
+            sets(&point("meta = { parameter = { set = [\"plant_a\", \"plant_b\"] } }")),
+            ["plant_a", "plant_b"]
+        );
+        // An absolute set still wins over the groups.
+        assert_eq!(
+            sets(&point(
+                "meta = { parameter = { set = \"pump\", group = [\"a\", \"b\"] } }"
+            )),
+            ["pump"]
+        );
+        // Group names that fold to the same set name yield one set, not two.
+        assert_eq!(
+            sets(&point("meta = { parameter = { group = [\"a b\", \"a-b\"] } }")),
+            ["acme_boiler_v2_a_b_parameters"]
+        );
+        // An empty or unusable list is an absent one: the default group, never no set at all.
+        for meta in [
+            "meta = { parameter = { group = [] } }",
+            "meta = { parameter = { group = [1, true] } }",
+            "meta = { parameter = { set = [] } }",
+        ] {
+            assert_eq!(
+                sets(&point(meta)),
+                ["acme_boiler_v2_control_parameters"],
+                "{meta}"
+            );
+        }
+        // ...and opting out still beats every list.
+        assert!(sets(&point("meta = { parameter = false }")).is_empty());
+    }
+
+    /// Two device types that differ only in punctuation fold to one qualifier, so their sets
+    /// collide exactly as two protocols' did before this feature — `describe` says so.
+    #[test]
+    fn device_type_problems_are_warned_about() {
+        let mut c = cfg();
+        assert!(type_warnings(&c).is_empty());
+        c.devices[1].device_type = Some("acme boiler v2".into()); // vs plc1's "acme-boiler-v2"
+        let warnings = type_warnings(&c);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("'acme-boiler-v2', 'acme boiler v2'"), "{}", warnings[0]);
+        // Named by the set the two actually derive, not by a separately-computed qualifier —
+        // a type ending in punctuation folds differently in the two, which is how the C and
+        // Rust messages drifted apart the first time.
+        assert!(
+            warnings[0].contains("acme_boiler_v2_control_parameters"),
+            "{}",
+            warnings[0]
+        );
+        // The same type twice is one device type, not a collision.
+        c.devices[1].device_type = Some("acme-boiler-v2".into());
+        assert!(type_warnings(&c).is_empty());
+        // A trailing separator folds into the same name: 'acme-boiler-v2-' collides too.
+        c.devices[1].device_type = Some("acme-boiler-v2-".into());
+        assert_eq!(type_warnings(&c).len(), 1);
+        // A type containing a comma is one type, not two.
+        c.devices[0].device_type = Some("Acme, Inc. Meter".into());
+        c.devices[1].device_type = None;
+        assert!(type_warnings(&c).is_empty());
+
+        // A type with nothing usable in it folds away entirely, which every such type shares.
+        c.devices[0].device_type = Some("日本語".into());
+        let warnings = type_warnings(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("no [A-Za-z0-9] character"), "{}", warnings[0]);
+
+        // A device that exposes no parameters derives no set, so it cannot collide.
+        let mut none = cfg();
+        none.devices[1].device_type = Some("acme boiler v2".into());
+        for point in &mut none.devices[1].points {
+            point.access = Some("read".into());
+            point.meta = None;
+        }
+        assert!(type_warnings(&none).is_empty());
     }
 
     #[test]
-    fn key_validation_and_default_set() {
+    fn key_validation_and_set_names() {
         assert!(is_valid_key("ok_id_1"));
         assert!(!is_valid_key("Environment.Temperature"));
         assert!(!is_valid_key(""));
-        assert_eq!(default_set("opc-ua"), "opc_ua_parameters");
+        assert_eq!(set_name("opc-ua", DEFAULT_GROUP), "opc_ua_control_parameters");
+        assert_eq!(set_name("ACME meter v2", "pump"), "ACME_meter_v2_pump_parameters");
+        // A run of separators (or one multi-byte character) folds to a single `_`, which is
+        // what keeps this identical to the C implementation's byte-wise fold.
+        assert_eq!(set_name("acme -- v2", "control"), "acme_v2_control_parameters");
+        assert_eq!(set_name("wärmezähler", "control"), "w_rmez_hler_control_parameters");
         let mut c = cfg();
         c.devices[0].points[0].id = "Boiler.Temp".into();
-        let bad = invalid_keys(&c, "modbus_parameters");
+        let bad = invalid_keys(&c, None);
         assert_eq!(bad, vec!["point id 'Boiler.Temp'"]);
-        assert!(invalid_keys(&cfg(), "plant.floor").iter().all(|b| b.contains("parameter set")));
+        assert!(invalid_keys(&cfg(), Some("plant.floor"))
+            .iter()
+            .all(|b| b.contains("parameter set")));
     }
 
     #[test]
     fn dtm_definitions_group_by_set_and_render_schema() {
         let defs = c8y_dtm_definitions(&cfg(), None);
-        assert_eq!(defs.len(), 2);
+        assert_eq!(defs.len(), 4);
+        // The two-group point is a property of BOTH its sets, so either screen can edit it.
+        assert!(defs[0]["jsonSchema"]["properties"]["flow_limit"].is_object());
+        assert!(defs[2]["jsonSchema"]["properties"]["flow_limit"].is_object());
         let main = &defs[0];
-        assert_eq!(main["identifier"], "modbus_parameters");
+        assert_eq!(main["identifier"], "acme_boiler_v2_control_parameters");
         assert_eq!(main["contexts"], json!(["asset", "event", "operation"]));
         let props = &main["jsonSchema"]["properties"];
         assert_eq!(props["temp_u16"]["type"], "integer");
@@ -411,6 +813,11 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
         let speed = &pump["jsonSchema"]["properties"]["pump_speed"];
         assert_eq!(speed["type"], "number");
         assert!(speed["description"].as_str().unwrap().contains("write-only"));
+
+        // One device type, two sets (the group), and one untyped device on the protocol name.
+        assert_eq!(defs[2]["identifier"], "acme_boiler_v2_commissioning_parameters");
+        assert_eq!(defs[3]["identifier"], "modbus_control_parameters");
+        assert!(defs[3]["jsonSchema"]["properties"]["spare_rw"].is_object());
     }
 
     /// The capability descriptor's `point_labels` (§7): the labels are static, so they are

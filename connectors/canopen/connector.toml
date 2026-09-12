@@ -23,6 +23,9 @@ interface = "vcan0"
 
 [[device]]
 name             = "plc1"
+# The device type (§3.1): it names this device's parameter sets (§5.2), which are
+# tenant-wide identifiers in the cloud, and its thin-edge entity type.
+type             = "canopen-sim"
 protocol_address = { node_id = 1 }
 default_mode     = "typed"
 

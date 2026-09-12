@@ -46,8 +46,19 @@ commands over MQTT, never through the `tedge-dot write` CLI.
 From the connector configuration, rendered on demand for a tenant admin to register once:
 
 ```sh
-tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact > modbus_parameters.json
-C8Y_SETTINGS_CI=true c8y api POST /service/dtm/definitions/properties --data @modbus_parameters.json
+# One definition per line, and the DTM service takes one per request — a configuration that
+# groups its parameters (§5.2) renders several. `</dev/null` matters: without it c8y reads the
+# loop's stdin as its own input pipeline and the remaining definitions are never registered.
+defs=$(mktemp) one=$(mktemp)
+trap 'rm -f "$defs" "$one"' EXIT
+tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact > "$defs"
+# Read from a file, not a pipe: a `while` on the right of a pipe runs in a subshell, where
+# `exit 1` would abort only the loop and leave the script reporting success.
+while read -r definition; do
+    printf '%s' "$definition" > "$one"
+    C8Y_SETTINGS_CI=true c8y api POST /service/dtm/definitions/properties --data "@$one" </dev/null ||
+        exit 1   # stop at the first rejected definition rather than reporting only the last
+done < "$defs"
 ```
 
 The device does not push the definition: device users do not hold the DTM roles, and
@@ -58,10 +69,12 @@ device's inventory but not editable — an acceptable degraded mode.
 A *parameter* is every point whose `access` permits writes, plus points that opt in with
 `meta.parameter` (read-only points then render `readOnly: true`, so the tab can *display*
 state next to the controls); `meta.parameter = false` opts a writable point out. Parameters are
-grouped into *sets* by `meta.parameter.set` (default `<protocol>_parameters`), one set = one
-DTM identifier = one twin fragment. Datatype → JSON-schema type and integer bounds are
-automatic; `meta.parameter.{title, description, min, max, enum, default, order}` enrich the
-schema. The keys of a set are the point ids themselves, so parameter ids must be plain
+grouped into *sets*, one set = one DTM identifier = one twin fragment. This RFC's default set
+name was `<protocol>_parameters`, which collides across device types;
+[RFC 0005](0005-device-types-and-parameter-sets.md) replaced it with
+`<device type, else protocol>_<group>_parameters` and is the current rule. Datatype →
+JSON-schema type and integer bounds are automatic;
+`meta.parameter.{title, description, min, max, enum, default, order}` enrich the schema. The keys of a set are the point ids themselves, so parameter ids must be plain
 identifiers (`[A-Za-z0-9_]`; Cumulocity rejects dots in keys) — `describe` refuses others.
 
 Three places could own the definition; the config wins:
@@ -97,7 +110,8 @@ is left out). Values come from:
 * **read/write parameters** — additionally updated optimistically from an acknowledged write,
   then confirmed by the next sample;
 * **write-only parameters** (`access = "write"`) — the last *acknowledged* write. They never
-  produce samples, so their set is learned from nothing: they land in the default set.
+  produce samples, so their set is learned from nothing: they land in the default set (whose
+  name the retained link status still qualifies with the device type — RFC 0005).
 
 Output-only points exist in every protocol (Modbus write-only registers behind FC06/16 on
 devices that reject reads of them, OPC UA nodes with `AccessLevel = CurrentWrite`, CANopen
@@ -215,7 +229,7 @@ Parameters tab ─ c8y_ParameterUpdate ─▶ c8y mapper (plugin's template) ─
                           ┌─────────────────────────────────┴──────────────────────────────┐
                           │ ot-command-result (origin.command)                             │ ot-parameter-state
                           ▼                                                                ▼
-   te/device/plc1///cmd/parameter_update/<id> {successful, c8y-mapper}   te/device/plc1///twin/modbus_parameters {...}
+   te/device/plc1///cmd/parameter_update/<id> {successful, c8y-mapper}   te/device/plc1///twin/<set> {...}
                           │ c8y mapper                                                     │ c8y mapper
                           ▼                                                                ▼
                  operation SUCCESSFUL                                            managed object fragment (UI refreshes)
@@ -224,9 +238,10 @@ Parameters tab ─ c8y_ParameterUpdate ─▶ c8y mapper (plugin's template) ─
 ## Open items
 
 * Persist last-commanded values of write-only parameters across mapper restarts (see Q3).
-* One DTM identifier is tenant-wide: heterogeneous fleets must name sets per device type
-  (`meta.parameter.set`), which the Cloud Fieldbus import could derive from the device type
-  name automatically.
+* ~~One DTM identifier is tenant-wide: heterogeneous fleets must name sets per device type~~ —
+  settled by [RFC 0005](0005-device-types-and-parameter-sets.md): a device declares its `type`
+  (or inherits it from its point library) and the set names are derived from it. The Cloud
+  Fieldbus import (RFC 0002) can fill that `type` in from the device type it already reads.
 * `write-batch` is sequential and non-atomic; a Modbus FC16 fast path for contiguous registers
   is a connector-local optimisation with the same result shape.
 * The twin is republished on every value change of a readable parameter (retained, one

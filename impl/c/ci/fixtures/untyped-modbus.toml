@@ -1,0 +1,16 @@
+# A configuration with parameters but NO device `type`, purely so the parity check exercises
+# the untyped-device warning (contract §5.2): every real config in this repo declares a type,
+# so without this fixture the stderr comparison in describe-parity.sh would never compare
+# anything, and the two CLIs could drift apart unnoticed.
+[connector]
+protocol = "modbus"
+
+[[device]]
+name             = "plc-untyped"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+
+  [[device.point]]
+  id       = "setpoint"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 3, count = 1 }

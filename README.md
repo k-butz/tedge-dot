@@ -117,6 +117,11 @@ Points can also carry a `name` and `description`, so a shared list documents its
 every instance that references it — they render into the Cumulocity parameter UI and into the
 connector's retained capability descriptor, rather than being echoed on every sample.
 
+A library can also name the **device type** it describes (`[library] type`), which every device
+referencing it inherits (a `type` on the `[[device]]` wins). That is what keeps two device types
+on the same protocol from colliding in the cloud: parameter set names are derived from it, and
+it becomes the thin-edge entity type of the registered child device.
+
 The packages ship a library per demo simulator (`demo-sim`, one for each protocol), so the
 quickest way to get data out of a device is to give a `[[device]]` its address and
 `points_from = ["demo-sim"]` — no point definitions to type. The demo configs in
@@ -164,7 +169,11 @@ keeps one twin fragment per parameter set current, and the command flows turn a
 [tedge-parameter-plugin](https://github.com/thin-edge/tedge-parameter-plugin), which owns that
 operation) into one `write-batch`.
 A tenant admin declares the sets once with the definition `tedge-dot describe` prints from
-the same config. See [RFC 0003](doc/rfc/0003-parameter-writes.md), [flows/](flows/) and
+the same config. A set name is a tenant-wide identifier, so it is derived from the device's
+**type** rather than from the protocol — `acme_meter_v2_control_parameters`, not
+`modbus_parameters` — which is what lets several device types on one protocol coexist in a
+tenant. See [RFC 0003](doc/rfc/0003-parameter-writes.md),
+[RFC 0005](doc/rfc/0005-device-types-and-parameter-sets.md), [flows/](flows/) and
 [operations/](operations/).
 
 ## Repository layout

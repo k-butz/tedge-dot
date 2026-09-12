@@ -7,6 +7,7 @@
  *   tedge-dot describe [-c <config>] [-d <device-glob>] [--set <name>]
  *                      [--format c8y-dtm] [--compact]
  */
+#include <ctype.h>
 #include <dirent.h>
 #include <fnmatch.h>
 #include <signal.h>
@@ -418,6 +419,7 @@ static int cmd_describe(const args_t *a) {
     }
     cfg->ndevices = keep;
     int rc = 1;
+    char *forced_owned = NULL;
     if (keep == 0 && a->device) {
         fprintf(stderr, "error: no device matches '%s'\n", a->device);
         goto out;
@@ -425,10 +427,28 @@ static int cmd_describe(const args_t *a) {
 
     /* Parameter ids become fragment keys on the device twin, so they must be
      * plain identifiers. */
-    char *default_set = a->set ? strdup(a->set)
-                               : tdot_param_default_set(cfg->protocol);
-    char *bad = tdot_param_invalid_keys(cfg, default_set);
-    free(default_set);
+    /* A blank --set means "none given", as an empty `default_set` does in the
+     * flow: an unset variable in a provisioning script (--set "$PARAM_SET")
+     * must not force every point into a nameless set. The Rust build applies
+     * the same rule. */
+    const char *forced = NULL;
+    if (a->set) {
+        /* Trimmed, not just tested for blankness: `--set "$(cat name.txt)"`
+         * carries a trailing newline, and the Rust CLI trims the same way, so
+         * the two must not disagree on a padded value either. */
+        forced_owned = strdup(a->set);
+        const char *start = forced_owned;
+        while (*start && isspace((unsigned char)*start))
+            start++;
+        size_t end = strlen(start);
+        while (end && isspace((unsigned char)start[end - 1]))
+            end--;
+        memmove(forced_owned, start, end);
+        forced_owned[end] = '\0';
+        forced = *forced_owned ? forced_owned : NULL;
+    }
+
+    char *bad = tdot_param_invalid_keys(cfg, forced);
     if (bad) {
         fprintf(stderr, "error: parameter keys must match [A-Za-z0-9_]: %s\n",
                 bad);
@@ -436,7 +456,28 @@ static int cmd_describe(const args_t *a) {
         goto out;
     }
 
-    cJSON *docs = tdot_c8y_dtm_definitions(cfg, a->set);
+    /* A DTM identifier is tenant-wide, so a set named after the protocol is
+     * shared with every other device type that speaks it. Declaring the device
+     * type is what keeps them apart. */
+    if (!forced) {
+        char *collisions = tdot_param_type_warnings(cfg);
+        if (collisions) {
+            fprintf(stderr, "%s\n", collisions);
+            free(collisions);
+        }
+        char *untyped = tdot_param_untyped_devices(cfg);
+        if (untyped) {
+            fprintf(stderr,
+                    "warning: device(s) %s declare no `type`, so their parameter "
+                    "sets are named after the protocol ('%s_...') and collide "
+                    "with every other %s device type in the tenant; set `type` "
+                    "on the device or in its point library\n",
+                    untyped, cfg->protocol, cfg->protocol);
+            free(untyped);
+        }
+    }
+
+    cJSON *docs = tdot_c8y_dtm_definitions(cfg, forced);
     if (a->compact) {
         cJSON *doc;
         cJSON_ArrayForEach(doc, docs) {
@@ -453,6 +494,7 @@ static int cmd_describe(const args_t *a) {
     rc = 0;
 
 out:
+    free(forced_owned);
     cfg->ndevices = all;
     tdot_config_free(cfg);
     return rc;

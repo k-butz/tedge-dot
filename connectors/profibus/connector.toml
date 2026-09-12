@@ -29,6 +29,9 @@ slot_bits      = 300
 
 [[device]]
 name             = "remote_io"
+# The device type (§3.1): it names this device's parameter sets (§5.2), which are
+# tenant-wide identifiers in the cloud, and its thin-edge entity type.
+type             = "profibus-sim"
 protocol_address = { station_address = 7, ident_number = 0, input_bytes = 8, output_bytes = 4 }
 
   # First digital input byte (bits 0–7 as a uint8 for easy range checks).

@@ -55,6 +55,7 @@ databits = 8
 #
 # [[device]]
 # name             = "plc-2"
+# type             = "acme-meter-v2"   # optional here: the library below declares it
 # protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 2 }
 # points_from      = ["acme-meter-v2"]   # points.d/modbus/acme-meter-v2.toml
 #

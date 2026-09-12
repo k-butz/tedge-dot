@@ -79,6 +79,16 @@ typedef enum {
 
 typedef struct tdot_device {
     char *name;
+    /* The device *type* this instance is one of (contract §3.1): what its point
+     * list describes, not where it is. Declared on the device, or inherited
+     * from the first point library it references (§3.4) -- a library is the
+     * point list of one device type, so it is the natural place to name it.
+     *
+     * It qualifies the device's parameter set names (§5.2), which are
+     * tenant-wide identifiers in the cloud, and is echoed in samples and link
+     * status so the registration flow can use it as the entity type. NULL when
+     * nothing declares one. */
+    char *type;
     toml_table_t *protocol_address; /* protocol-specific, borrowed */
     double poll_interval_s;
     tdot_point_t *points;

@@ -14,6 +14,10 @@
 
 [library]
 protocol    = "canopen"
+# The device *type* this list describes (§3.1): it names the parameter sets of every
+# device that references this library, which is what keeps two device types on the
+# same protocol from sharing a (tenant-wide) Cumulocity identifier.
+type        = "canopen-demo-sim"
 description = "Demo CANopen node (canopen-sim in demo/docker-compose.yaml)"
 version     = "1"
 

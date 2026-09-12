@@ -2,7 +2,9 @@
 input.mqtt.topics = ["te/+/+/ot/+/status/link"]
 
 [config]
-# thin-edge entity type assigned to registered OT devices.
+# thin-edge entity type assigned to registered OT devices that do not declare one. A connector
+# whose device config names a `type` (contract §3.1) reports it on the link status, and that
+# wins over this — it says what the device *is* rather than which protocol reaches it.
 device_type = "${params.device_type}"
 # Comma-separated generic OT command capabilities to advertise on each device (so the cloud mapper
 # routes the matching operations). `ot_write` backs c8y_SetRegister; `ot_write_coil` backs c8y_SetCoil;

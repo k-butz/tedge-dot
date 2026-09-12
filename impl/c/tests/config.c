@@ -366,6 +366,197 @@ static void check_named_library_is_inherited(void) {
     scratch_free(&s);
 }
 
+/* A library is the point list of one device *type*, so it is where the type is
+ * named (§3.1): every instance that references it inherits it. A device's own
+ * `type` wins, and a second library extends the type rather than redefining it.
+ * Mirrors library.rs::device_inherits_the_type_of_the_first_library_that_names_one. */
+static void check_device_type_is_inherited_from_the_first_library(void) {
+    scratch_t s;
+    scratch_init(&s);
+    char typed[2048];
+    snprintf(typed, sizeof typed, "[library]\ntype = \"acme-meter-v2\"\n%s",
+             LIBRARY + strlen("[library]\n"));
+    write_file(&s, "modbus/acme-meter.toml", typed);
+    write_file(&s, "modbus/site-extras.toml",
+               "[library]\nprotocol = \"modbus\"\ntype = \"site-extras\"\n\n"
+               "[[point]]\nid = \"spare\"\ndatatype = \"bool\"\n"
+               "address = { table = \"coil\", address = 9, count = 1 }\n");
+    write_file(&s, "modbus/untyped.toml", LIBRARY);
+
+    char err[256] = "";
+    tdot_config_t *cfg = load_with_libs(&s, "\"acme-meter\", \"site-extras\"", "",
+                                        err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].type &&
+                  strcmp(cfg->devices[0].type, "acme-meter-v2") == 0,
+              "the first library that names a type must give it, got %s",
+              cfg->devices[0].type ? cfg->devices[0].type : "<none>");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL typed library did not load: %s\n", err);
+        failures++;
+    }
+
+    /* A library that names no type leaves the device without one: the file name
+     * is not guessed at, because the type becomes a tenant-wide identifier. */
+    cfg = load_with_libs(&s, "\"untyped\"", "", err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].type == NULL,
+              "an untyped library must not invent a type, got %s",
+              cfg->devices[0].type);
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL untyped library did not load: %s\n", err);
+        failures++;
+    }
+
+    /* The device's own declaration wins over the library's. */
+    char body[1024];
+    snprintf(body, sizeof body,
+             "[connector]\n"
+             "protocol = \"modbus\"\n"
+             "point_library_path = [\"%s\"]\n"
+             "\n"
+             "[[device]]\n"
+             "name = \"plc1\"\n"
+             "type = \"site-special\"\n"
+             "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+             "port = 502, unit_id = 1 }\n"
+             "points_from = [\"acme-meter\"]\n",
+             s.dir);
+    write_file(&s, "etc/own-type.toml", body);
+    cfg = tdot_config_load(scratch_path(&s, "etc/own-type.toml"), err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].type &&
+                  strcmp(cfg->devices[0].type, "site-special") == 0,
+              "the device's own type must win, got %s",
+              cfg->devices[0].type ? cfg->devices[0].type : "<none>");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL own-type config did not load: %s\n", err);
+        failures++;
+    }
+
+    /* A padded type is normalised at load, exactly as the Rust loader does: the set
+     * names, the sample envelope and the link status all read the stored value,
+     * so they cannot spell it differently.
+     * Mirrors library.rs::a_declared_type_is_trimmed_once_at_load. */
+    char padded[2048];
+    snprintf(padded, sizeof padded, "[library]\ntype = \"  acme-meter-v2 \"\n%s",
+             LIBRARY + strlen("[library]\n"));
+    write_file(&s, "modbus/padded.toml", padded);
+    cfg = load_with_libs(&s, "\"padded\"", "", err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].type &&
+                  strcmp(cfg->devices[0].type, "acme-meter-v2") == 0,
+              "an inherited type must be trimmed, got '%s'",
+              cfg->devices[0].type ? cfg->devices[0].type : "<none>");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL padded library did not load: %s\n", err);
+        failures++;
+    }
+    char padded_dev[1024];
+    snprintf(padded_dev, sizeof padded_dev,
+             "[connector]\n"
+             "protocol = \"modbus\"\n"
+             "point_library_path = [\"%s\"]\n"
+             "\n"
+             "[[device]]\n"
+             "name = \"plc1\"\n"
+             "type = \" site-special \"\n"
+             "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+             "port = 502, unit_id = 1 }\n"
+             "points_from = [\"acme-meter\"]\n",
+             s.dir);
+    write_file(&s, "etc/padded-type.toml", padded_dev);
+    /* A non-breaking space is NOT isspace(), so it stays part of the type -- and
+     * the Rust loader must keep it too, or one config names two different
+     * tenant-wide sets depending on the package installed.
+     * Mirrors library.rs::a_declared_type_is_trimmed_once_at_load. */
+    char nbsp_dev[1024];
+    snprintf(nbsp_dev, sizeof nbsp_dev,
+             "[connector]\n"
+             "protocol = \"modbus\"\n"
+             "point_library_path = [\"%s\"]\n"
+             "\n"
+             "[[device]]\n"
+             "name = \"plc1\"\n"
+             "type = \"\xc2\xa0" "acme" "\xc2\xa0\"\n"
+             "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+             "port = 502, unit_id = 1 }\n"
+             "points_from = [\"acme-meter\"]\n",
+             s.dir);
+    write_file(&s, "etc/nbsp-type.toml", nbsp_dev);
+    cfg = tdot_config_load(scratch_path(&s, "etc/nbsp-type.toml"), err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].type &&
+                  strcmp(cfg->devices[0].type, "\xc2\xa0" "acme" "\xc2\xa0") == 0,
+              "a non-breaking space must survive trimming, got '%s'",
+              cfg->devices[0].type ? cfg->devices[0].type : "<none>");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL nbsp device type did not load: %s\n", err);
+        failures++;
+    }
+    cfg = tdot_config_load(scratch_path(&s, "etc/padded-type.toml"), err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].type &&
+                  strcmp(cfg->devices[0].type, "site-special") == 0,
+              "a declared type must be trimmed, got '%s'",
+              cfg->devices[0].type ? cfg->devices[0].type : "<none>");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL padded device type did not load: %s\n", err);
+        failures++;
+    }
+
+    /* A device `type` that is present but unusable is an error, not an absent
+     * type -- and the Rust loader must reject the same files. */
+    /* An array or a table is present but unusable, not absent: tomlc99's
+     * scalar-only lookup would drop it silently while Rust rejects the file. */
+    /* "\\u000B" is a vertical tab: whitespace to C's isspace(), and the Rust
+     * loader is held to the same definition so both reject it. (Upper-case hex
+     * deliberately: tomlc99 only accepts A-F in a \\u escape.) */
+    static const char *bad_types[] = {"\"\"",   "\"  \"",     "\"\\u000B\"",
+                                      "7",    "true",     "[\"acme\"]",
+                                      "{ a = 1 }"};
+    for (size_t i = 0; i < sizeof bad_types / sizeof *bad_types; i++) {
+        char bad_body[1024];
+        snprintf(bad_body, sizeof bad_body,
+                 "[connector]\n"
+                 "protocol = \"modbus\"\n"
+                 "point_library_path = [\"%s\"]\n"
+                 "\n"
+                 "[[device]]\n"
+                 "name = \"plc1\"\n"
+                 "type = %s\n"
+                 "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+                 "port = 502, unit_id = 1 }\n"
+                 "points_from = [\"acme-meter\"]\n",
+                 s.dir, bad_types[i]);
+        write_file(&s, "etc/bad-type.toml", bad_body);
+        tdot_config_t *bad_cfg =
+            tdot_config_load(scratch_path(&s, "etc/bad-type.toml"), err, sizeof err);
+        CHECK(bad_cfg == NULL && strstr(err, "type must be a non-empty string") != NULL,
+              "device type %s must be rejected, got '%s'", bad_types[i], err);
+        tdot_config_free(bad_cfg);
+    }
+
+    /* Same for a library type: present but unusable is an error, not absent. */
+    for (size_t i = 0; i < sizeof bad_types / sizeof *bad_types; i++) {
+        char bad[2048];
+        snprintf(bad, sizeof bad, "[library]\ntype = %s\n%s", bad_types[i],
+                 LIBRARY + strlen("[library]\n"));
+        write_file(&s, "modbus/bad-type.toml", bad);
+        cfg = load_with_libs(&s, "\"bad-type\"", "", err, sizeof err);
+        CHECK(cfg == NULL && strstr(err, "[library] type") != NULL,
+              "[library] type %s must be rejected, got '%s'", bad_types[i], err);
+        tdot_config_free(cfg);
+    }
+    scratch_free(&s);
+}
+
 static void check_library_is_protocol_scoped(void) {
     /* The same library name for two protocols; only the connector's own must
      * be picked up. */
@@ -990,6 +1181,7 @@ int main(void) {
     check_subscribe_defaults_on();
     check_config_without_references_is_unchanged();
     check_named_library_is_inherited();
+    check_device_type_is_inherited_from_the_first_library();
     check_library_is_protocol_scoped();
     check_search_path_order();
     check_relative_path_reference();

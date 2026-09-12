@@ -43,6 +43,7 @@ what is genuinely per-instance.
 # /usr/share/tedge-dot/points.d/modbus/acme-meter-v2.toml
 [library]
 protocol = "modbus"
+type     = "acme-meter-v2"   # added by RFC 0005: the device type these points describe
 
 [[point]]
 id       = "boiler_temp"
@@ -56,6 +57,10 @@ name             = "plc-1"
 protocol_address = { transport = "tcp", host = "192.168.0.10", port = 502, unit_id = 1 }
 points_from      = ["acme-meter-v2"]
 ```
+
+Naming the device type is [RFC 0005](0005-device-types-and-parameter-sets.md)'s addition to this
+design: this RFC established that a library *is* one device type's point list, and that RFC
+gives the type a name so the cloud-facing identifiers derived from it stop colliding.
 
 The full rules are normative in [contract §3.4](../contract/ot-connector-contract.md#34-point-libraries)
 and machine-readable in [point-library.schema.json](../contract/schemas/point-library.schema.json).

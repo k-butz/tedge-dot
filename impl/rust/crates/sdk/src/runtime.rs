@@ -121,10 +121,17 @@ impl LinkTracker {
     }
 
     /// Publish connector-produced link reports (from `connect`) and record their status.
+    ///
+    /// `config` is the *live* configuration: the device `type` echoed on the status is read
+    /// from it at publish time rather than cached, because a management command (§6.3)
+    /// republishes the link status as part of applying a reload — a cached map would still
+    /// hold the pre-reload types there, and the retained status of a device that a
+    /// `define-device` just added would carry no type at all.
     async fn publish_reports(
         &mut self,
         client: &AsyncClient,
         reports: &[LinkReport],
+        config: &ConnectorConfig,
     ) -> Result<(), BoxError> {
         for report in reports {
             self.states.insert(report.device.clone(), report.status);
@@ -132,7 +139,7 @@ impl LinkTracker {
                 self.infos.insert(report.device.clone(), info.clone());
             }
         }
-        publish_links(client, &self.protocol, reports).await
+        publish_links(client, &self.protocol, reports, config).await
     }
 
     /// Record a device descriptor without publishing, so a later transition publish carries
@@ -145,12 +152,17 @@ impl LinkTracker {
 
     /// Publish a link report only when it changes the recorded status — reconnect attempts
     /// repeat on a backoff schedule and must not re-publish the same retained status.
-    async fn publish_if_changed(&mut self, client: &AsyncClient, report: &LinkReport) {
+    async fn publish_if_changed(
+        &mut self,
+        client: &AsyncClient,
+        report: &LinkReport,
+        config: &ConnectorConfig,
+    ) {
         if self.states.get(&report.device) == Some(&report.status) {
             return;
         }
         if let Err(e) = self
-            .publish_reports(client, std::slice::from_ref(report))
+            .publish_reports(client, std::slice::from_ref(report), config)
             .await
         {
             warn!(device = %report.device, "failed to publish link transition: {e}");
@@ -165,6 +177,7 @@ impl LinkTracker {
         device: &str,
         healthy: bool,
         reason: Option<String>,
+        config: &ConnectorConfig,
     ) {
         let current = self.states.get(device).copied();
         let Some(new) = next_link_state(current, healthy) else {
@@ -177,7 +190,10 @@ impl LinkTracker {
             reason,
             info: self.infos.get(device).cloned(),
         };
-        if let Err(e) = self.publish_reports(client, std::slice::from_ref(&report)).await {
+        if let Err(e) = self
+            .publish_reports(client, std::slice::from_ref(&report), config)
+            .await
+        {
             warn!(%device, "failed to publish link transition: {e}");
         }
     }
@@ -230,6 +246,7 @@ async fn attempt_reconnect(
     links: &mut LinkTracker,
     device: &str,
     limits: Limits,
+    config: &ConnectorConfig,
 ) -> bool {
     debug!(%device, "attempting reconnect");
     let reports: Vec<LinkReport> = match bounded(
@@ -260,7 +277,7 @@ async fn attempt_reconnect(
             }
             links.stash_info(&report.device, report.info.clone());
         } else {
-            links.publish_if_changed(client, &report).await;
+            links.publish_if_changed(client, &report, config).await;
         }
     }
     restored
@@ -429,7 +446,7 @@ pub async fn run_until_watched(
     // 4. Connect to devices and publish link status.
     let mut links = LinkTracker::new(&protocol);
     match bounded(limits, "connect", connector.connect()).await {
-        Ok(reports) => links.publish_reports(&client, &reports).await?,
+        Ok(reports) => links.publish_reports(&client, &reports, &config).await?,
         Err(e) => warn!("initial connect failed: {e}"),
     }
     // 5. Set up push delivery for subscribe-capable connectors, then build the polling
@@ -485,7 +502,7 @@ pub async fn run_until_watched(
                                 let reason = (!healthy)
                                     .then(|| samples.iter().find_map(|s| s.error.clone()))
                                     .flatten();
-                                links.note_poll(&client, &device, healthy, reason).await;
+                                links.note_poll(&client, &device, healthy, reason, &config).await;
                                 if healthy {
                                     reconnects.remove(&device);
                                 } else {
@@ -495,7 +512,9 @@ pub async fn run_until_watched(
                         }
                         Err(e) => {
                             warn!(%device, "read_points failed: {e}");
-                            links.note_poll(&client, &device, false, Some(e.to_string())).await;
+                            links
+                                .note_poll(&client, &device, false, Some(e.to_string()), &config)
+                                .await;
                             reconnects.entry(device.clone()).or_insert_with(ReconnectEntry::new);
                         }
                     }
@@ -514,7 +533,9 @@ pub async fn run_until_watched(
                     .collect();
                 for device in due {
                     let restored =
-                        attempt_reconnect(&mut connector, &client, &mut links, &device, limits)
+                        attempt_reconnect(
+                            &mut connector, &client, &mut links, &device, limits, &config,
+                        )
                             .await;
                     if let Some(entry) = reconnects.get_mut(&device) {
                         entry.re_arm();
@@ -852,6 +873,9 @@ async fn subscribe_device(
 struct PointExtras {
     meta: Option<serde_json::Value>,
     access: Access,
+    /// The device's declared `type` (§3.1). Per device rather than per point, but carried here
+    /// so one lookup answers everything the envelope needs.
+    device_type: Option<String>,
 }
 
 type MetaIndex = HashMap<(String, String), PointExtras>;
@@ -865,11 +889,24 @@ fn build_meta_index(config: &ConnectorConfig) -> MetaIndex {
                 PointExtras {
                     meta: point.meta.clone(),
                     access: Access::parse(point.access.as_deref()),
+                    device_type: device.device_type.clone().filter(|t| !t.is_empty()),
                 },
             );
         }
     }
     index
+}
+
+/// The declared `type` of one configured device (§3.1), if it has one. Used verbatim: the
+/// loader normalised and validated it (`library::expand`), so trimming here — and only here —
+/// would make the link status spell the type differently from the samples and the set names.
+fn device_type_of<'a>(config: &'a ConnectorConfig, device: &str) -> Option<&'a str> {
+    config
+        .devices
+        .iter()
+        .find(|d| d.name == device)
+        .and_then(|d| d.device_type.as_deref())
+        .filter(|t| !t.is_empty())
 }
 
 fn access_str(access: Access) -> &'static str {
@@ -889,6 +926,9 @@ fn envelope_with_meta(sample: &Sample, meta_index: &MetaIndex) -> serde_json::Va
             envelope["meta"] = meta.clone();
         }
         envelope["access"] = serde_json::Value::String(access_str(extras.access).into());
+        if let Some(device_type) = &extras.device_type {
+            envelope["type"] = serde_json::Value::String(device_type.clone());
+        }
     }
     envelope
 }
@@ -1001,11 +1041,17 @@ async fn handle_command(
         raw: json.get("raw").and_then(|v| v.as_str()).map(|s| s.to_string()),
     };
 
+    let origin = json.get("origin");
+
     // executing
     publish_retained(
         client,
         topic,
-        serde_json::json!({ "status": "executing", "point": point }).to_string(),
+        with_origin(
+            serde_json::json!({ "status": "executing", "point": point }),
+            origin,
+        )
+        .to_string(),
     )
     .await?;
 
@@ -1020,17 +1066,21 @@ async fn handle_command(
             if let Some(r) = result.raw {
                 obj.insert("raw".into(), serde_json::Value::String(r));
             }
-            publish_retained(client, topic, serde_json::Value::Object(obj).to_string()).await?;
+            let payload = with_origin(serde_json::Value::Object(obj), origin);
+            publish_retained(client, topic, payload.to_string()).await?;
         }
         Err(e) => {
             publish_retained(
                 client,
                 topic,
-                serde_json::json!({
-                    "status": "failed",
-                    "point": point,
-                    "reason": e.to_string()
-                })
+                with_origin(
+                    serde_json::json!({
+                        "status": "failed",
+                        "point": point,
+                        "reason": e.to_string()
+                    }),
+                    origin,
+                )
                 .to_string(),
             )
             .await?;
@@ -1099,14 +1149,18 @@ async fn handle_write_batch(
     json: &serde_json::Value,
     limits: Limits,
 ) -> Result<(), BoxError> {
+    let origin = json.get("origin");
     let writes = match parse_batch_writes(json) {
         Ok(w) => w,
         Err(reason) => {
             publish_retained(
                 client,
                 topic,
-                serde_json::json!({ "status": "failed", "reason": reason, "results": [] })
-                    .to_string(),
+                with_origin(
+                    serde_json::json!({ "status": "failed", "reason": reason, "results": [] }),
+                    origin,
+                )
+                .to_string(),
             )
             .await?;
             return Ok(());
@@ -1116,7 +1170,11 @@ async fn handle_write_batch(
     publish_retained(
         client,
         topic,
-        serde_json::json!({ "status": "executing", "points": points }).to_string(),
+        with_origin(
+            serde_json::json!({ "status": "executing", "points": points }),
+            origin,
+        )
+        .to_string(),
     )
     .await?;
 
@@ -1160,9 +1218,27 @@ async fn handle_write_batch(
             }
         }
     }
-    let payload = batch_result(failure, results);
+    let payload = with_origin(batch_result(failure, results), origin);
     publish_retained(client, topic, payload.to_string()).await?;
     Ok(())
+}
+
+/// Echo the request's `origin` (§6.4) into a transition the connector publishes for that
+/// command.
+///
+/// The command topic is retained and holds exactly ONE message, so `executing` and then the
+/// result overwrite the request that carried `origin` — a consumer that starts (or restarts)
+/// afterwards replays the terminal state alone. Carrying the correlation data forward is what
+/// lets it still tell which parameter set an acknowledged write belongs to, rather than
+/// guessing the default one and retaining a fragment under a name no definition matches.
+fn with_origin(
+    mut payload: serde_json::Value,
+    origin: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    if let (Some(origin), Some(obj)) = (origin, payload.as_object_mut()) {
+        obj.insert("origin".into(), origin.clone());
+    }
+    payload
 }
 
 /// Shape the terminal `write-batch` envelope: `successful` with every result, or `failed`
@@ -1296,7 +1372,7 @@ async fn handle_management(
     // Reconnect with the new configuration and republish link status.
     let _ = bounded(limits, "disconnect", connector.disconnect()).await;
     match bounded(limits, "connect", connector.connect()).await {
-        Ok(reports) => links.publish_reports(client, &reports).await?,
+        Ok(reports) => links.publish_reports(client, &reports, config).await?,
         Err(e) => warn!("reconnect after reconfigure failed: {e}"),
     }
 
@@ -1537,29 +1613,47 @@ async fn publish_links(
     client: &AsyncClient,
     protocol: &str,
     reports: &[LinkReport],
+    config: &ConnectorConfig,
 ) -> Result<(), BoxError> {
     for report in reports {
         let topic = format!("te/device/{}/ot/{}/status/link", report.device, protocol);
-        let mut obj = serde_json::Map::new();
-        obj.insert(
-            "status".into(),
-            serde_json::Value::String(report.status.as_str().into()),
-        );
-        if report.status == LinkStatus::Connected {
-            obj.insert(
-                "since".into(),
-                serde_json::Value::String(format_rfc3339_ms(OffsetDateTime::now_utc())),
-            );
-        }
-        if let Some(reason) = &report.reason {
-            obj.insert("reason".into(), serde_json::Value::String(reason.clone()));
-        }
-        if let Some(info) = &report.info {
-            obj.insert("info".into(), info.clone());
-        }
-        publish_retained(client, &topic, serde_json::Value::Object(obj).to_string()).await?;
+        let payload = link_payload(report, config, OffsetDateTime::now_utc());
+        publish_retained(client, &topic, payload.to_string()).await?;
     }
     Ok(())
+}
+
+/// The retained link-status payload (§8). Pure, and the device `type` is looked up in the
+/// configuration it is given, so it always describes the configuration the connector is
+/// running right now — including one a management command (§6.3) has just installed.
+fn link_payload(
+    report: &LinkReport,
+    config: &ConnectorConfig,
+    now: OffsetDateTime,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "status".into(),
+        serde_json::Value::String(report.status.as_str().into()),
+    );
+    // The device's declared type (§3.1), so the registration flow can use it as the thin-edge
+    // entity type and a consumer can name the device's parameter sets (§5.2) before any sample.
+    if let Some(device_type) = device_type_of(config, &report.device) {
+        obj.insert(
+            "type".into(),
+            serde_json::Value::String(device_type.to_string()),
+        );
+    }
+    if report.status == LinkStatus::Connected {
+        obj.insert("since".into(), serde_json::Value::String(format_rfc3339_ms(now)));
+    }
+    if let Some(reason) = &report.reason {
+        obj.insert("reason".into(), serde_json::Value::String(reason.clone()));
+    }
+    if let Some(info) = &report.info {
+        obj.insert("info".into(), info.clone());
+    }
+    serde_json::Value::Object(obj)
 }
 
 async fn publish_health(client: &AsyncClient, topic: &str, status: &str) -> Result<(), BoxError> {
@@ -1824,6 +1918,7 @@ protocol = "modbus"
 
 [[device]]
 name = "plc-1"
+type = "acme-meter-v2"
 protocol_address = { host = "127.0.0.1" }
 
   [[device.point]]
@@ -1838,9 +1933,74 @@ protocol_address = { host = "127.0.0.1" }
         let extras = index.get(&("plc-1".to_string(), "temp".to_string())).unwrap();
         let meta = extras.meta.as_ref().unwrap();
         assert_eq!(extras.access, Access::Read);
+        assert_eq!(extras.device_type.as_deref(), Some("acme-meter-v2"));
+        assert_eq!(device_type_of(&cfg, "plc-1"), Some("acme-meter-v2"));
+        assert_eq!(device_type_of(&cfg, "nope"), None);
         assert_eq!(meta["on_change"], serde_json::json!(true));
         assert_eq!(meta["min_interval"], serde_json::json!("5s"));
         assert_eq!(meta["room"], serde_json::json!("boiler"));
+    }
+
+    /// The retained link status carries the device type from the configuration the connector
+    /// is running *now*. The regression this pins: the type used to be cached when the runtime
+    /// started, so a `define-device` that added a typed device published its link status with
+    /// no type at all — and that registration is retained, so the child device stayed a
+    /// generic `<protocol>-device` for the mapper's lifetime.
+    #[test]
+    fn link_payload_carries_the_device_type_of_the_live_config() {
+        const BASE: &str = r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc-1"
+type = "acme-meter-v2"
+protocol_address = { host = "127.0.0.1" }
+
+  [[device.point]]
+  id = "temp"
+  datatype = "float32"
+  address = { table = "holding", address = 7, count = 2 }
+"#;
+        let mut config: ConnectorConfig = toml::from_str(BASE).unwrap();
+        let report = LinkReport::new("plc-1".to_string(), LinkStatus::Connected, None);
+        let now = OffsetDateTime::UNIX_EPOCH;
+
+        let payload = link_payload(&report, &config, now);
+        assert_eq!(payload["status"], serde_json::json!("connected"));
+        assert_eq!(payload["type"], serde_json::json!("acme-meter-v2"));
+        assert!(payload["since"].is_string());
+
+        // A device the configuration does not (yet) know, and one that declares no type.
+        let unknown = LinkReport::new("plc-9".to_string(), LinkStatus::Connected, None);
+        assert!(link_payload(&unknown, &config, now).get("type").is_none());
+        config.devices[0].device_type = None;
+        assert!(link_payload(&report, &config, now).get("type").is_none());
+
+        // What `define-device` does: the type of the newly configured device is published the
+        // moment the reload republishes the link status, not on the next restart.
+        let added: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+
+[[device]]
+name = "plc-7"
+type = "acme-boiler-v2"
+protocol_address = { host = "127.0.0.1" }
+
+  [[device.point]]
+  id = "temp"
+  datatype = "float32"
+  address = { table = "holding", address = 7, count = 2 }
+"#,
+        )
+        .unwrap();
+        let new_device = LinkReport::new("plc-7".to_string(), LinkStatus::Connected, None);
+        assert_eq!(
+            link_payload(&new_device, &added, now)["type"],
+            serde_json::json!("acme-boiler-v2")
+        );
     }
 
     #[test]
@@ -1867,15 +2027,20 @@ protocol_address = { host = "127.0.0.1" }
             PointExtras {
                 meta: Some(serde_json::json!({ "on_change": true })),
                 access: Access::ReadWrite,
+                device_type: Some("acme-meter-v2".into()),
             },
         );
         let env = envelope_with_meta(&sample, &index);
         assert_eq!(env["meta"]["on_change"], serde_json::json!(true));
         assert_eq!(env["access"], serde_json::json!("read_write"));
-        // a sample of an unindexed point has neither meta nor access
+        // The device type (§3.1): what a consumer needs to name the point's parameter set
+        // without the configuration file (§5.2).
+        assert_eq!(env["type"], serde_json::json!("acme-meter-v2"));
+        // a sample of an unindexed point has neither meta, access nor type
         let env2 = envelope_with_meta(&sample, &HashMap::new());
         assert!(env2.get("meta").is_none());
         assert!(env2.get("access").is_none());
+        assert!(env2.get("type").is_none());
     }
 
     #[test]

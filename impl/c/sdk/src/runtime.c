@@ -124,6 +124,10 @@ static void publish_link(rt_t *rt, tdot_device_t *dev, tdot_link_t status) {
 
     cJSON *obj = cJSON_CreateObject();
     cJSON_AddStringToObject(obj, "status", name);
+    /* The device type (§3.1), so the registration flow can use it as the
+     * thin-edge entity type without reading the connector config. */
+    if (dev->type)
+        cJSON_AddStringToObject(obj, "type", dev->type);
     cJSON_AddStringToObject(obj, "since", ts);
     /* Optional device descriptor from the module (contract status schema
      * `info`); the registration flow forwards it into a twin fragment. */
@@ -277,6 +281,23 @@ static int do_write(rt_t *rt, tdot_device_t *dev, const char *dev_name,
     return -1;
 }
 
+/* Echo the request's `origin` (contract §6.4) into a transition published for
+ * that command.
+ *
+ * The command topic is retained and holds exactly ONE message, so `executing`
+ * and then the result overwrite the request that carried `origin`. A consumer
+ * that starts (or restarts) afterwards replays only the terminal state --
+ * carrying the correlation data forward is what lets it still tell which
+ * parameter set an acknowledged write belongs to (§5.2), instead of guessing
+ * the default one and retaining a fragment no definition matches. */
+static void add_origin(cJSON *out, const cJSON *req) {
+    /* Case-sensitive, like the Rust runtime's `json.get("origin")`: a request
+     * carrying "Origin" must be ignored by both, not echoed by one. */
+    const cJSON *origin = cJSON_GetObjectItemCaseSensitive(req, "origin");
+    if (origin)
+        cJSON_AddItemToObject(out, "origin", cJSON_Duplicate(origin, 1));
+}
+
 /* `write`: {"status":"init","point":...,"value":...} -> executing -> successful|failed */
 static void handle_write(rt_t *rt, const char *topic, const char *dev_name,
                          tdot_device_t *dev, const cJSON *req) {
@@ -288,6 +309,7 @@ static void handle_write(rt_t *rt, const char *topic, const char *dev_name,
     cJSON_AddStringToObject(exec, "status", "executing");
     if (point_id)
         cJSON_AddStringToObject(exec, "point", point_id);
+    add_origin(exec, req);
     publish_retained(rt, topic, exec);
     cJSON_Delete(exec);
 
@@ -308,6 +330,7 @@ static void handle_write(rt_t *rt, const char *topic, const char *dev_name,
         logmsg("warn", "cmd write %s/%s: %s", dev_name,
                point_id ? point_id : "?", reason);
     }
+    add_origin(res, req);
     publish_retained(rt, topic, res);
     cJSON_Delete(res);
 }
@@ -336,6 +359,7 @@ static void handle_write_batch(rt_t *rt, const char *topic,
     if (!failed) {
         cJSON *exec = cJSON_CreateObject();
         cJSON_AddStringToObject(exec, "status", "executing");
+        add_origin(exec, req);
         cJSON *points = cJSON_AddArrayToObject(exec, "points");
         const cJSON *w;
         cJSON_ArrayForEach(w, writes) {
@@ -376,6 +400,7 @@ static void handle_write_batch(rt_t *rt, const char *topic,
     if (failed)
         cJSON_AddStringToObject(res, "reason", reason);
     cJSON_AddItemToObject(res, "results", results);
+    add_origin(res, req);
     logmsg(failed ? "warn" : "info", "cmd write-batch %s: %s", dev_name,
            failed ? reason : "ok");
     publish_retained(rt, topic, res);
@@ -424,6 +449,10 @@ static void on_message(struct mosquitto *mosq, void *ud,
         char reason[TDOT_ERR_MAX];
         snprintf(reason, sizeof reason, "unsupported verb: %s", verb);
         cJSON_AddStringToObject(res, "reason", reason);
+        /* The origin echo applies to this refusal too: the requester's
+         * correlation data must come back even when the verb was not
+         * recognised, so a consumer can still tell which request failed. */
+        add_origin(res, req);
         logmsg("warn", "cmd %s %s: unsupported verb", verb, dev_name);
         publish_retained(rt, msg->topic, res);
         cJSON_Delete(res);

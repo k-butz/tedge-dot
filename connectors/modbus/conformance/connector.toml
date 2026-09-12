@@ -20,6 +20,9 @@ port = 1883
 
 [[device]]
 name             = "plc1"
+# The device type (§3.1): echoed in every sample and on the link status, so the captured
+# traffic validates against the schemas with the field present.
+type             = "modbus-conformance-sim"
 protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
 default_mode     = "typed"
 
