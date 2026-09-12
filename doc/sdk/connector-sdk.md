@@ -221,11 +221,37 @@ tiny:
 | **Health & link status** | Publish retained service health; turn `LinkReport`s into retained `status/link` messages. |
 | **Config & hot-reload** | Load + schema-validate config (contract schema + the module's own schema), watch files with `notify`, call `configure`/`connect` on change without a process restart. |
 | **Backpressure / throttling** | Optional per-point minimum publish interval and `bad`-sample rate limiting. |
+| **Liveness** | Bound every module call with `connector.operation_timeout` and stamp a `Progress` marker each loop iteration, so the supervisor can restart a wedged connector (`connector.stall_timeout`). See §4.2. |
 | **Observability** | Structured logging (`tracing`), and a `--once`/dry-run mode used by the conformance harness. |
 
 A module author therefore writes: a config-parsing step, a capability declaration, connect,
 read (and/or subscribe), execute, disconnect. Nothing about MQTT topics, retained flags,
 JSON shaping, or the command state machine.
+
+### 4.2 Liveness: bounded calls and the stall watchdog
+
+A module that *hangs* hurts more than one that errors. Every sample, link status and health
+message is published from the runtime's single loop, so one protocol call that never returns
+takes the whole connector silent — with nothing logged, the retained health still `up`, and only
+a service restart to recover. Half-open sockets do exactly this: the peer is gone, nothing is
+answered, and no RST ever arrives.
+
+The runtime therefore:
+
+- runs every module call (`connect`, `reconnect`, `read_points`, `subscribe`, `execute`,
+  `disconnect`) under `connector.operation_timeout` (default 30s), reporting a breach as a
+  transport error so the normal `degraded` + reconnect-with-backoff path handles it;
+- stamps a [`Progress`] marker on each loop iteration. The binary races the connector against
+  that marker and, if it stops advancing for `connector.stall_timeout` (default 120s), cancels
+  and restarts the connector — the loop cannot rescue itself, since the hang is inside it.
+  Cancelling drops the MQTT client, so the broker publishes the retained last-will health
+  `down` and the outage reaches the cloud. `stall_timeout` must exceed `operation_timeout`; a
+  smaller value is raised rather than honoured, and `0` disables the watchdog.
+
+A module **should still bound its own requests** (see the Modbus module's
+`connection.request_timeout_s`): failing one request in a second keeps the poll cycle on
+schedule, whereas the runtime's bound is a backstop that fails the whole batch. Conformance
+check B5 (silent peer) exercises this with a peer that accepts and answers nothing.
 
 ### 4.1 CLI: direct read/write (no broker)
 

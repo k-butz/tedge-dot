@@ -11,13 +11,93 @@ use crate::decode::{Endianness, WordOrder};
 use crate::model::{format_rfc3339_ms, Mode, Sample};
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value as EditValue};
 use tracing::{debug, error, info, warn};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Liveness marker for a connector's loop, shared with whoever supervises it.
+///
+/// The loop stamps it on every iteration; a supervisor that sees it go stale knows the loop is
+/// wedged (a protocol call that never returns) and can cancel and restart the connector — the
+/// loop itself cannot do that, since the hang is *inside* it. Monotonic: it measures elapsed
+/// time from a shared start instant, so a wall-clock change cannot make a live loop look stuck.
+#[derive(Clone, Debug)]
+pub struct Progress(Arc<(Instant, AtomicU64)>);
+
+impl Progress {
+    pub fn new() -> Self {
+        let progress = Progress(Arc::new((Instant::now(), AtomicU64::new(0))));
+        progress.mark();
+        progress
+    }
+
+    /// Record that the loop just made progress.
+    pub fn mark(&self) {
+        let elapsed = self.0 .0.elapsed().as_millis() as u64;
+        self.0 .1.store(elapsed, Ordering::Relaxed);
+    }
+
+    /// How long since the last `mark()`.
+    pub fn idle(&self) -> Duration {
+        let now = self.0 .0.elapsed().as_millis() as u64;
+        Duration::from_millis(now.saturating_sub(self.0 .1.load(Ordering::Relaxed)))
+    }
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Progress::new()
+    }
+}
+
+/// Bounds the runtime puts on the protocol module. Carried to the few helpers that call it.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    /// Upper bound on one protocol-module call (`ConnectorSection::operation_timeout`).
+    operation: Duration,
+}
+
+impl Limits {
+    fn from_config(config: &ConnectorConfig) -> Self {
+        let operation = parse_duration(&config.connector.operation_timeout)
+            .filter(|d| !d.is_zero())
+            .unwrap_or_else(|| {
+                warn!(
+                    "invalid connector.operation_timeout '{}'; using 30s",
+                    config.connector.operation_timeout
+                );
+                Duration::from_secs(30)
+            });
+        Limits { operation }
+    }
+}
+
+/// Run one protocol-module call under the runtime's operation bound.
+///
+/// A module that hangs instead of failing (a half-open socket answers nothing and never resets)
+/// would otherwise block the connector's whole loop: no samples, no health, no link status, and
+/// nothing logged, because every one of those is published from that loop. Turning the hang into
+/// a transport error lets the existing degraded-link and reconnect-with-backoff handling run.
+async fn bounded<T>(
+    limits: Limits,
+    what: &str,
+    call: impl Future<Output = Result<T, ConnectorError>>,
+) -> Result<T, ConnectorError> {
+    match tokio::time::timeout(limits.operation, call).await {
+        Ok(result) => result,
+        Err(_) => Err(ConnectorError::Transport(format!(
+            "{what} did not return within {}s (operation_timeout)",
+            limits.operation.as_secs()
+        ))),
+    }
+}
 
 /// Tracks the last published link status per device so the runtime can publish the
 /// contract-required transitions: `degraded` when a whole poll batch fails (e.g. the device
@@ -147,11 +227,18 @@ async fn attempt_reconnect(
     client: &AsyncClient,
     links: &mut LinkTracker,
     device: &str,
+    limits: Limits,
 ) {
     debug!(%device, "attempting reconnect");
-    let reports: Vec<LinkReport> = match connector.reconnect(&device.to_string()).await {
+    let reports: Vec<LinkReport> = match bounded(
+        limits,
+        "reconnect",
+        connector.reconnect(&device.to_string()),
+    )
+    .await
+    {
         Ok(report) => vec![report],
-        Err(ConnectorError::Unsupported(_)) => match connector.connect().await {
+        Err(ConnectorError::Unsupported(_)) => match bounded(limits, "connect", connector.connect()).await {
             Ok(reports) => reports,
             Err(e) => {
                 warn!(%device, "reconnect (full connect) failed: {e}");
@@ -236,11 +323,24 @@ pub async fn shutdown_signal() {
 /// This is the composable variant of [`run`]: a host binary that runs several connectors in
 /// one process passes each instance the same shutdown trigger and supervises them itself.
 pub async fn run_until(
+    connector: Box<dyn Connector>,
+    config: ConnectorConfig,
+    config_path: PathBuf,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> Result<(), BoxError> {
+    run_until_watched(connector, config, config_path, shutdown, Progress::new()).await
+}
+
+/// Same as [`run_until`], but stamping `progress` on every loop iteration so a supervisor can
+/// tell a wedged connector from a quiet one and restart it (see [`Progress`]).
+pub async fn run_until_watched(
     mut connector: Box<dyn Connector>,
     mut config: ConnectorConfig,
     config_path: PathBuf,
     shutdown: impl std::future::Future<Output = ()> + Send,
+    progress: Progress,
 ) -> Result<(), BoxError> {
+    let limits = Limits::from_config(&config);
     let protocol = config.connector.protocol.clone();
     let service = config.connector.service_name.clone();
 
@@ -321,7 +421,7 @@ pub async fn run_until(
 
     // 4. Connect to devices and publish link status.
     let mut links = LinkTracker::new(&protocol);
-    match connector.connect().await {
+    match bounded(limits, "connect", connector.connect()).await {
         Ok(reports) => links.publish_reports(&client, &reports).await?,
         Err(e) => warn!("initial connect failed: {e}"),
     }
@@ -330,7 +430,7 @@ pub async fn run_until(
     // the whole run so re-subscribing after a config reload reuses the same channel.
     let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel::<Sample>(256);
     let mut subscribed =
-        setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx).await;
+        setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx, limits).await;
     let mut schedule = build_schedule(&config, &subscribed);
     let mut meta_index = build_meta_index(&config);
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
@@ -360,7 +460,7 @@ pub async fn run_until(
                 }
                 for (device_index, points) in due {
                     let device = config.devices[device_index].name.clone();
-                    match connector.read_points(&device, &points).await {
+                    match bounded(limits, "read", connector.read_points(&device, &points)).await {
                         Ok(mut samples) => {
                             for s in samples.iter_mut() {
                                 // The runtime owns the device identity for polled reads:
@@ -393,6 +493,9 @@ pub async fn run_until(
                         }
                     }
                 }
+                // The loop completed an iteration: samples published, reconnects attempted.
+                // A supervisor watching this marker restarts the connector if it stops moving.
+                progress.mark();
                 // Re-establish unhealthy devices on their backoff schedule. Entries stay
                 // until reads succeed: a transport that reconnects while the device still
                 // fails (application-level outage) keeps backing off instead of storming.
@@ -403,7 +506,7 @@ pub async fn run_until(
                     .map(|(device, _)| device.clone())
                     .collect();
                 for device in due {
-                    attempt_reconnect(&mut connector, &client, &mut links, &device).await;
+                    attempt_reconnect(&mut connector, &client, &mut links, &device, limits).await;
                     if let Some(entry) = reconnects.get_mut(&device) {
                         entry.re_arm();
                     }
@@ -412,19 +515,20 @@ pub async fn run_until(
             Some(mut sample) = sample_rx.recv() => {
                 publish_sample(&client, &protocol, &mut sample, &mut seq_counters, &meta_index)
                     .await;
+                progress.mark();
             }
             Some(p) = incoming_rx.recv() => {
                 match handle_command(
                     &mut connector, &client, &protocol, &mut links,
                     &mut config, &mut config_doc, &config_path,
-                    &p.topic, &p.payload,
+                    &p.topic, &p.payload, limits,
                 ).await {
                     // A management command changed the config: re-establish push
                     // delivery (the reload disconnected the old subscriptions) and
                     // rebuild the polling schedule.
                     Ok(true) => {
                         subscribed = setup_subscriptions(
-                            &mut connector, &config, caps.subscribe, &sample_tx,
+                            &mut connector, &config, caps.subscribe, &sample_tx, limits,
                         ).await;
                         schedule = build_schedule(&config, &subscribed);
                         meta_index = build_meta_index(&config);
@@ -435,12 +539,13 @@ pub async fn run_until(
                     Ok(false) => {}
                     Err(e) => warn!("command handling error: {e}"),
                 }
+                progress.mark();
             }
         }
     }
 
     // 7. Clean shutdown.
-    let _ = connector.disconnect().await;
+    let _ = bounded(limits, "disconnect", connector.disconnect()).await;
     publish_health(&client, &health_topic, "down").await.ok();
     Ok(())
 }
@@ -459,12 +564,13 @@ pub async fn run_stdout_until(
     config: ConnectorConfig,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<(), BoxError> {
+    let limits = Limits::from_config(&config);
     connector
         .configure(&config)
         .map_err(|e| format!("configure failed: {e}"))?;
     let caps = connector.capabilities();
 
-    match connector.connect().await {
+    match bounded(limits, "connect", connector.connect()).await {
         Ok(reports) => {
             for report in &reports {
                 info!(device = %report.device, status = report.status.as_str(),
@@ -475,7 +581,8 @@ pub async fn run_stdout_until(
     }
 
     let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel::<Sample>(256);
-    let subscribed = setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx).await;
+    let subscribed =
+        setup_subscriptions(&mut connector, &config, caps.subscribe, &sample_tx, limits).await;
     let mut schedule = build_schedule(&config, &subscribed);
     let meta_index = build_meta_index(&config);
     let mut seq_counters: HashMap<(String, String), u64> = HashMap::new();
@@ -499,7 +606,7 @@ pub async fn run_stdout_until(
                 }
                 for (device_index, points) in due {
                     let device = config.devices[device_index].name.clone();
-                    match connector.read_points(&device, &points).await {
+                    match bounded(limits, "read", connector.read_points(&device, &points)).await {
                         Ok(mut samples) => {
                             for s in samples.iter_mut() {
                                 s.device = device.clone();
@@ -547,7 +654,7 @@ pub async fn run_stdout_until(
         }
     }
 
-    let _ = connector.disconnect().await;
+    let _ = bounded(limits, "disconnect", connector.disconnect()).await;
     Ok(())
 }
 
@@ -612,6 +719,7 @@ async fn setup_subscriptions(
     config: &ConnectorConfig,
     subscribe_capable: bool,
     sink: &SampleSink,
+    limits: Limits,
 ) -> HashSet<(usize, String)> {
     let mut subscribed = HashSet::new();
     if !subscribe_capable {
@@ -643,7 +751,13 @@ async fn setup_subscriptions(
         if points.is_empty() {
             continue;
         }
-        match connector.subscribe(&device.name, &points, sink.clone()).await {
+        match bounded(
+            limits,
+            "subscribe",
+            connector.subscribe(&device.name, &points, sink.clone()),
+        )
+        .await
+        {
             Ok(()) => {
                 info!(device = %device.name, points = points.len(), "subscribed (push delivery)");
                 for p in &points {
@@ -762,6 +876,7 @@ async fn handle_command(
     config_path: &Path,
     topic: &str,
     payload: &[u8],
+    limits: Limits,
 ) -> Result<bool, BoxError> {    // Expect te/device/<device>/ot/<protocol>/cmd/<verb>/<id>
     let parts: Vec<&str> = topic.split('/').collect();
     if parts.len() != 8
@@ -789,14 +904,14 @@ async fn handle_command(
     // the connector configuration, then live-reload the protocol module.
     if is_management_verb(verb) {
         return handle_management(
-            connector, client, links, config, config_doc, config_path, topic, verb, &json,
+            connector, client, links, config, config_doc, config_path, topic, verb, &json, limits,
         )
         .await;
     }
 
     // `write-batch` (§6.4) is implemented once here on top of the module's `write`.
     if verb == "write-batch" {
-        handle_write_batch(connector, client, topic, &device, &json).await?;
+        handle_write_batch(connector, client, topic, &device, &json, limits).await?;
         debug!(%device, %verb, "command handled");
         return Ok(false);
     }
@@ -824,7 +939,7 @@ async fn handle_command(
     )
     .await?;
 
-    match connector.execute(&device, verb, &request).await {
+    match bounded(limits, "write", connector.execute(&device, verb, &request)).await {
         Ok(result) => {
             let mut obj = serde_json::Map::new();
             obj.insert("status".into(), serde_json::Value::String("successful".into()));
@@ -912,6 +1027,7 @@ async fn handle_write_batch(
     topic: &str,
     device: &str,
     json: &serde_json::Value,
+    limits: Limits,
 ) -> Result<(), BoxError> {
     let writes = match parse_batch_writes(json) {
         Ok(w) => w,
@@ -943,7 +1059,13 @@ async fn handle_write_batch(
             value_repr: None,
             raw: w.raw.clone(),
         };
-        match connector.execute(&device.to_string(), "write", &request).await {
+        match bounded(
+            limits,
+            "write",
+            connector.execute(&device.to_string(), "write", &request),
+        )
+        .await
+        {
             Ok(result) => {
                 let mut obj = serde_json::Map::new();
                 obj.insert("point".into(), serde_json::Value::String(result.point));
@@ -1016,6 +1138,7 @@ async fn handle_management(
     topic: &str,
     verb: &str,
     json: &serde_json::Value,
+    limits: Limits,
 ) -> Result<bool, BoxError> {
     publish_retained(
         client,
@@ -1058,8 +1181,8 @@ async fn handle_management(
     *config = new_config;
 
     // Reconnect with the new configuration and republish link status.
-    let _ = connector.disconnect().await;
-    match connector.connect().await {
+    let _ = bounded(limits, "disconnect", connector.disconnect()).await;
+    match bounded(limits, "connect", connector.connect()).await {
         Ok(reports) => links.publish_reports(client, &reports).await?,
         Err(e) => warn!("reconnect after reconfigure failed: {e}"),
     }

@@ -27,6 +27,18 @@ pub struct ConnectorSection {
     pub poll_interval: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Upper bound on a single protocol-module call (read batch, write, connect, subscribe).
+    /// A module that never returns — what a half-open TCP socket produces: no answer, no
+    /// error, no RST — would otherwise block the connector's loop forever, stopping samples,
+    /// health and link status with nothing logged. The runtime turns the bound into an
+    /// ordinary transport error, so the usual degraded-link and reconnect handling applies.
+    #[serde(default = "default_operation_timeout")]
+    pub operation_timeout: String,
+    /// How long the connector's loop may make no progress before it is considered wedged and
+    /// restarted (the supervisor cancels and re-runs it; the MQTT last will marks the service
+    /// down so the cloud sees the outage). `"0"` disables the watchdog.
+    #[serde(default = "default_stall_timeout")]
+    pub stall_timeout: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -108,6 +120,12 @@ fn default_poll_interval() -> String {
 fn default_log_level() -> String {
     "info".to_string()
 }
+fn default_operation_timeout() -> String {
+    "30s".to_string()
+}
+fn default_stall_timeout() -> String {
+    "120s".to_string()
+}
 fn default_mqtt_host() -> String {
     "127.0.0.1".to_string()
 }
@@ -139,6 +157,32 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeout_defaults_are_sane_and_overridable() {
+        let cfg: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+"#,
+        )
+        .unwrap();
+        assert_eq!(parse_duration(&cfg.connector.operation_timeout), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration(&cfg.connector.stall_timeout), Some(Duration::from_secs(120)));
+
+        let cfg: ConnectorConfig = toml::from_str(
+            r#"
+[connector]
+protocol = "modbus"
+operation_timeout = "3s"
+stall_timeout = "0"
+"#,
+        )
+        .unwrap();
+        assert_eq!(parse_duration(&cfg.connector.operation_timeout), Some(Duration::from_secs(3)));
+        // "0" disables the watchdog
+        assert_eq!(parse_duration(&cfg.connector.stall_timeout), Some(Duration::ZERO));
+    }
 
     #[test]
     fn durations() {

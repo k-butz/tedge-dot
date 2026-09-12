@@ -367,6 +367,11 @@ impl Simulator for ModbusSim {
         self.proxy.set_up(up).await
     }
 
+    async fn set_stalled(&self, stalled: bool) -> Result<(), String> {
+        self.proxy.set_stalled(stalled);
+        Ok(())
+    }
+
     fn rewrite_protocol_address(&self, address: &mut toml::Value) -> Result<(), String> {
         let table = address
             .as_table_mut()

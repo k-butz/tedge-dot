@@ -87,6 +87,8 @@ protocol      = "<protocol>"    # protocol module id (MUST match a compiled-in m
 service_name  = "tedge-dot"
 poll_interval = "2s"            # default poll interval (duration string); per-point override allowed
 log_level     = "info"
+operation_timeout = "30s"       # optional: upper bound on one protocol-module call (§8.1)
+stall_timeout     = "120s"      # optional: restart the connector if its loop stops moving (§8.1)
 
 [mqtt]
 host = "127.0.0.1"
@@ -556,6 +558,24 @@ Tooling and the conformance suite use the descriptor to decide which tests apply
   ```
 
   with `status` ∈ `{"connected","disconnected","degraded"}` and an optional `reason`.
+
+### 8.1 Liveness
+
+A connector that *hangs* is worse than one that fails: a protocol call which never returns
+blocks the loop that publishes samples, health and link status, so the device goes silent with
+nothing logged and nothing in the cloud marking it unhealthy. An SDK-based connector is
+therefore bounded on two levels, both configured in `[connector]`:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `operation_timeout` | `30s` | Upper bound on one protocol-module call (read batch, write, connect, subscribe). Exceeding it is reported as an ordinary transport error, so the existing `degraded` link and reconnect-with-backoff handling applies. |
+| `stall_timeout` | `120s` | How long the loop may make no progress before the connector is considered wedged, cancelled and restarted. The MQTT last will then marks the service `down`, so the outage is visible. Must exceed `operation_timeout`; `0` disables it. |
+
+A connector SHOULD additionally bound its own protocol requests (the Modbus module's
+`connection.request_timeout_s`, the OPC UA module's `connection.request_timeout_s`): failing one
+request fast keeps the poll cycle on schedule, where the runtime's bound is a backstop that
+treats the whole batch as failed. The conformance suite checks this behaviour with a peer that
+accepts the connection and answers nothing (check B5, silent peer).
 
 ## 9. Timestamps, encoding and ordering
 

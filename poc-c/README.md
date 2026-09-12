@@ -40,6 +40,11 @@ The C build is held to the same coverage as the Rust one:
   same claims as the Rust ones except `subscribe`); CI runs it in the `c-poc` job. Both
   connectors are fully conformant, hot reload through the management verbs included.
 
+Liveness: the C runtime has no equivalent of the Rust SDK's `operation_timeout` /
+`stall_timeout`. It relies on the response timeouts of libmodbus and open62541, which is enough
+for conformance check B5's silent peer (verified for both protocols), but a call that hangs
+*inside* a library would still wedge the C loop. Those two config keys are accepted and ignored.
+
 Debugging: `TDOT_OPCUA_DEBUG=1` keeps open62541's client handshake log on stdout.
 
 ## Packaging & releases

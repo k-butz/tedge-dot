@@ -22,6 +22,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(15);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const LINK_TIMEOUT: Duration = Duration::from_secs(20);
+/// Generous: the connector must first hit its own request bound (a conformance config leaves the
+/// default, e.g. 5s for Modbus) before it can report anything.
+const SILENT_PEER_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// A point of the connector configuration, resolved for assertions.
 #[derive(Debug, Clone)]
@@ -241,6 +244,7 @@ pub async fn run(manifest: &Manifest, schemas: &Schemas) -> Result<Vec<Layer>, S
     check_b7_access_control(&ctx, &mut layer).await;
     check_b8_hot_reload(&ctx, &mut layer, &config_path).await;
     check_b5_link_drop_and_recovery(&ctx, &mut layer).await;
+    check_b5_silent_peer(&ctx, &mut layer).await;
 
     // Shut down and verify the final health transition.
     let stop_mark = broker.mark();
@@ -1174,6 +1178,87 @@ fn check_b10_topic_discipline(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
             format!("off-contract topics: {}", violations.join(", ")),
         );
     }
+}
+
+/// B5 (third flavour) — the peer accepts but answers nothing.
+///
+/// This is the failure a request timeout exists for: a half-open socket after the device (or its
+/// container) vanished without a RST. A connector whose protocol calls are unbounded blocks in
+/// its poll loop here and goes completely silent — no samples, no link status, no health — and
+/// only a restart recovers it. The requirement is therefore not just "the link degrades" but
+/// "the connector keeps running and keeps reporting".
+async fn check_b5_silent_peer(ctx: &Ctx<'_>, layer: &mut Layer) {
+    if ctx.points.is_empty() {
+        return;
+    }
+
+    let mark = ctx.broker.mark();
+    if let Err(reason) = ctx.sim.set_stalled(true).await {
+        layer.skip(
+            "B5-silent-peer",
+            "an unanswered request is reported instead of hanging the connector",
+            reason,
+        );
+        return;
+    }
+
+    // Whatever it reports — a bad sample or a degraded link — it must report *something*.
+    let reported = ctx
+        .wait_connector_record(mark, SILENT_PEER_TIMEOUT, "a report while the peer is silent", |r| {
+            let Ok(json) = r.json() else { return false };
+            let bad_sample = r.topic.contains("/sample/")
+                && json.get("quality").and_then(|q| q.as_str()) == Some("bad");
+            let link_down = r.topic.ends_with("/status/link")
+                && matches!(
+                    json.get("status").and_then(|s| s.as_str()),
+                    Some("degraded") | Some("disconnected")
+                );
+            bad_sample || link_down
+        })
+        .await;
+    if let Err(reason) = reported {
+        let _ = ctx.sim.set_stalled(false).await;
+        layer.fail(
+            "B5-silent-peer",
+            "an unanswered request is reported instead of hanging the connector",
+            format!("{reason} — the connector went silent, which is what an unbounded protocol call does"),
+        );
+        return;
+    }
+
+    // Still alive: more reports keep coming rather than the loop being stuck on the first one.
+    let alive_mark = ctx.broker.mark();
+    let still_running = ctx
+        .wait_connector_record(alive_mark, SILENT_PEER_TIMEOUT, "a further report", |r| {
+            r.topic.contains("/sample/") || r.topic.ends_with("/status/link")
+        })
+        .await;
+    layer.check(
+        "B5-silent-peer",
+        "an unanswered request is reported instead of hanging the connector",
+        still_running.map(|_| Some("reported and kept polling".to_string())),
+    );
+
+    // Resuming must get data flowing again on its own.
+    let mark = ctx.broker.mark();
+    if let Err(e) = ctx.sim.set_stalled(false).await {
+        layer.fail("B5-silent-peer-recovery", "the transport can be resumed", e);
+        return;
+    }
+    let recovered = ctx
+        .wait_connector_record(mark, LINK_TIMEOUT, "good sample after the peer answers again", |r| {
+            r.topic.contains("/sample/")
+                && r.json()
+                    .ok()
+                    .and_then(|j| j.get("quality").and_then(|q| q.as_str()).map(|q| q == "good"))
+                    .unwrap_or(false)
+        })
+        .await;
+    layer.check(
+        "B5-silent-peer-recovery",
+        "samples flow again once the peer answers",
+        recovered.map(|_| None),
+    );
 }
 
 /// The dynamic half of Layer 1: every payload the connector published validates against the

@@ -15,4 +15,7 @@
         "**/output-c/**"
     ],
     "cmake.sourceDirectory": "/Users/reubenmiller/dev/projects/thin-edge.io/code/tedge-dot/poc-c",
+    "robotcode.profiles": [
+        "c"
+    ],
 }

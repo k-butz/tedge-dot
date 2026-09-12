@@ -63,12 +63,23 @@ These objects fill the contract's opaque slots. They MUST be schema-validated by
 ### 3.1 `connection` (shared defaults)
 
 ```toml
+[connection]
+request_timeout_s = 5.0 # per-request bound (see below); default 5s
+
 [connection.serial]     # RTU defaults, used when a device omits them
 baudrate = 9600
 parity   = "N"          # "N" | "E" | "O"
 stopbits = 2            # 1 | 2
 databits = 8            # 7 | 8
 ```
+
+`request_timeout_s` bounds a single Modbus request. `tokio-modbus` has none of its own, so
+without it a request to a peer that accepts bytes and never answers — a half-open socket after
+the device or its container vanished, with no RST to end it — waits forever and wedges the
+connector's poll loop (see the SDK's liveness section). On a timeout the point is reported
+`bad` with the reason, the rest of the batch is reported as `skipped` rather than waiting again,
+and the runtime's degraded-link handling re-establishes the transport: a cancelled request
+leaves the connection mid-frame, so it must not be reused.
 
 ### 3.2 `device.protocol_address`
 
