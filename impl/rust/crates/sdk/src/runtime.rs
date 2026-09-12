@@ -222,13 +222,15 @@ impl ReconnectEntry {
 /// publishing `connected` here would make the retained link status flap. The next healthy
 /// poll batch publishes the `connected` transition (with the stashed device descriptor);
 /// failed attempts publish `disconnected` once via `publish_if_changed`.
+/// Returns true when the transport is back, so the caller can re-arm anything that died with
+/// the old one (push subscriptions).
 async fn attempt_reconnect(
     connector: &mut Box<dyn Connector>,
     client: &AsyncClient,
     links: &mut LinkTracker,
     device: &str,
     limits: Limits,
-) {
+) -> bool {
     debug!(%device, "attempting reconnect");
     let reports: Vec<LinkReport> = match bounded(
         limits,
@@ -242,21 +244,26 @@ async fn attempt_reconnect(
             Ok(reports) => reports,
             Err(e) => {
                 warn!(%device, "reconnect (full connect) failed: {e}");
-                return;
+                return false;
             }
         },
         Err(e) => {
             warn!(%device, "reconnect failed: {e}");
-            return;
+            return false;
         }
     };
+    let mut restored = false;
     for report in reports {
         if report.status == LinkStatus::Connected {
+            if report.device == device {
+                restored = true;
+            }
             links.stash_info(&report.device, report.info.clone());
         } else {
             links.publish_if_changed(client, &report).await;
         }
     }
+    restored
 }
 
 /// The link state to publish after a poll batch, or `None` when nothing changed. Pure so the
@@ -506,9 +513,35 @@ pub async fn run_until_watched(
                     .map(|(device, _)| device.clone())
                     .collect();
                 for device in due {
-                    attempt_reconnect(&mut connector, &client, &mut links, &device, limits).await;
+                    let restored =
+                        attempt_reconnect(&mut connector, &client, &mut links, &device, limits)
+                            .await;
                     if let Some(entry) = reconnects.get_mut(&device) {
                         entry.re_arm();
+                    }
+                    // A push subscription dies with the transport it was created on. Without
+                    // re-arming it here the device's subscribed points stay OFF the polling
+                    // schedule with nothing delivering them -- silent for good, behind a link
+                    // that recovers to `connected` on the next healthy poll.
+                    if restored && caps.subscribe {
+                        if let Some((device_index, device_config)) = config
+                            .devices
+                            .iter()
+                            .enumerate()
+                            .find(|(_, d)| d.name == device)
+                        {
+                            subscribe_device(
+                                &mut connector,
+                                &config,
+                                device_index,
+                                device_config,
+                                &sample_tx,
+                                limits,
+                                &mut subscribed,
+                            )
+                            .await;
+                            schedule = build_schedule(&config, &subscribed);
+                        }
                     }
                 }
             }
@@ -725,9 +758,39 @@ async fn setup_subscriptions(
     if !subscribe_capable {
         return subscribed;
     }
+    for (device_index, device) in config.devices.iter().enumerate() {
+        subscribe_device(
+            connector,
+            config,
+            device_index,
+            device,
+            sink,
+            limits,
+            &mut subscribed,
+        )
+        .await;
+    }
+    subscribed
+}
+
+/// Arm push delivery for ONE device, recording its points in `subscribed` on success and
+/// removing them on failure (so they fall back to the polling schedule).
+///
+/// Separate from [`setup_subscriptions`] because a device that reconnects has to be
+/// re-subscribed on its own: its monitored items died with the old session, while its
+/// siblings' are still live and must not be created twice.
+async fn subscribe_device(
+    connector: &mut Box<dyn Connector>,
+    config: &ConnectorConfig,
+    device_index: usize,
+    device: &crate::config::DeviceConfig,
+    sink: &SampleSink,
+    limits: Limits,
+    subscribed: &mut HashSet<(usize, String)>,
+) {
     let connector_default = parse_duration(&config.connector.poll_interval)
         .unwrap_or_else(|| Duration::from_secs(2));
-    for (device_index, device) in config.devices.iter().enumerate() {
+    {
         let device_default = device
             .poll_interval
             .as_deref()
@@ -749,7 +812,13 @@ async fn setup_subscriptions(
             })
             .collect();
         if points.is_empty() {
-            continue;
+            return;
+        }
+        // Drop any stale entries first: on a re-subscribe these points are currently marked
+        // as pushed, and if the call below fails they must go back to being polled rather
+        // than stay off the schedule with no subscription behind them.
+        for p in &points {
+            subscribed.remove(&(device_index, p.id.clone()));
         }
         match bounded(
             limits,
@@ -772,7 +841,6 @@ async fn setup_subscriptions(
             }
         }
     }
-    subscribed
 }
 
 /// Per-point `meta` lookup, keyed by `(device name, point id)`; injected into every published
@@ -1614,6 +1682,37 @@ default_mode = "typed"
             apply_management("remove-device", &serde_json::json!({ "device": "nope" }), &mut d)
                 .unwrap_err();
         assert!(err.contains("not found"), "{err}");
+    }
+
+    /// A subscribed point is deliberately OFF the polling schedule -- that is what makes push
+    /// delivery push. The corollary is that anything which drops a point from `subscribed`
+    /// MUST rebuild the schedule, or the point is delivered by nobody: not polled, and not
+    /// pushed either. `subscribe_device` relies on this when it clears a device's entries
+    /// before re-arming, so that a failed re-subscribe degrades to polling rather than to
+    /// silence.
+    #[test]
+    fn a_point_is_scheduled_unless_it_is_subscribed() {
+        let config: ConnectorConfig = toml::from_str(BASE).unwrap();
+
+        let none = HashSet::new();
+        let polled = build_schedule(&config, &none);
+        assert_eq!(polled.len(), 1, "an unsubscribed point must be polled");
+        assert_eq!(polled[0].point.id, "temp");
+
+        let mut subscribed = HashSet::new();
+        subscribed.insert((0usize, "temp".to_string()));
+        assert!(
+            build_schedule(&config, &subscribed).is_empty(),
+            "a subscribed point must not also be polled (it would double-publish)"
+        );
+
+        // ...and dropping it from the set puts it straight back on the schedule.
+        subscribed.remove(&(0usize, "temp".to_string()));
+        assert_eq!(
+            build_schedule(&config, &subscribed).len(),
+            1,
+            "a point that lost its subscription must fall back to polling"
+        );
     }
 
     #[test]

@@ -142,6 +142,9 @@ sim proto:
     #!/usr/bin/env bash
     set -euo pipefail
     export $(just _sim-port {{proto}})
+    # Same retried pre-pull the e2e suites use: a bare `compose up` here fails the whole CI job
+    # on `toomanyrequests: Rate exceeded`, which the shared runner egress makes routine.
+    just _pull-stack-images connectors/{{proto}}/docker-compose.yaml
     docker compose -p tedge-dot-sim-{{proto}} -f connectors/{{proto}}/docker-compose.yaml up -d --build --wait simulator
     echo "{{proto}} simulator ready — see demo/config/{{proto}}.toml for usage"
 
