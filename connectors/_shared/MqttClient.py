@@ -84,6 +84,17 @@ class MqttClient:
         return entry[1]
 
     @keyword
+    def get_messages(self, topic):
+        """Return every payload seen on an exact topic so far, oldest first.
+
+        For asserting on a whole exchange rather than its latest state: a command topic is
+        retained, so a second responder's transitions simply overwrite the first's, and only
+        the full history shows that two parties answered one command.
+        """
+        with self._lock:
+            return [payload for _recv_time, payload in self._messages.get(topic, [])]
+
+    @keyword
     def wait_for_retained(self, topic, timeout=10):
         """Wait until any message has been seen on the topic; return its payload.
 

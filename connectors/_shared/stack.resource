@@ -58,11 +58,16 @@ Setup OT Stack
     [Documentation]    Start the protocol's compose stack and subscribe to the broker.
     ...    `broker_port` pins the host port for stacks whose broker runs in the host network
     ...    namespace (canbus, canopen); leave it empty to resolve the published ephemeral port.
+    ...    `compose_file` selects another stack of the protocol (e.g. its multi-device one);
+    ...    empty means `connectors/<protocol>/docker-compose.yaml`.
     [Arguments]    ${protocol}    ${broker_port}=${EMPTY}    ${device_service}=${EMPTY}
+    ...    ${compose_file}=${EMPTY}
 
+    ${compose_file}=    Set Variable If    "${compose_file}" == "${EMPTY}"
+    ...    ${CURDIR}/../${protocol}/docker-compose.yaml    ${compose_file}
     ${cleanup}=    Evaluate    not $KEEP_STACK
     ${serial}=    DeviceLibrary.Setup
-    ...    compose_file=${CURDIR}/../${protocol}/docker-compose.yaml
+    ...    compose_file=${compose_file}
     ...    device_service=${device_service}
     ...    skip_bootstrap=${True}
     ...    build=${True}

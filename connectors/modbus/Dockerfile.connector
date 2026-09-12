@@ -33,6 +33,9 @@ COPY connectors/modbus/connector.toml /etc/connector.toml
 # config's own directory).
 COPY connectors/modbus/points.d/ /usr/share/tedge-dot/points.d/
 COPY connectors/modbus/points.d/ /etc/points.d/
+# Config template of the multi-device stack (docker-compose.multi-device.yaml), rendered by the
+# entrypoint when MULTI_DEVICE_COUNT is set.
+COPY connectors/modbus/multi-device/ /usr/share/tedge-dot/multi-device/
 COPY connectors/modbus/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENV RUST_LOG=info

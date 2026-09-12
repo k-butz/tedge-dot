@@ -46,6 +46,9 @@ RUN cp /opt/connector/connector.toml /etc/connector.toml \
     && if [ -d /opt/connector/points.d ]; then mkdir -p /usr/share/tedge-dot \
         && cp -r /opt/connector/points.d /usr/share/tedge-dot/points.d \
         && cp -r /opt/connector/points.d /etc/points.d; fi \
+    # Config template of a multi-device stack, rendered by its entrypoint (modbus only).
+    && if [ -d /opt/connector/multi-device ]; then mkdir -p /usr/share/tedge-dot \
+        && cp -r /opt/connector/multi-device /usr/share/tedge-dot/multi-device; fi \
     && if [ -f /opt/connector/sim/test.dbc ]; then cp /opt/connector/sim/test.dbc /test.dbc; fi \
     && rm -rf /opt/connector
 ENTRYPOINT ["/entrypoint.sh"]
