@@ -1,0 +1,78 @@
+# Degenerate `meta.parameter` shapes, so the parity check pins that the Rust and C
+# implementations agree on all of them — the flow's JS is held to the same rules by
+# flows/test-flows.sh. Every point here is deliberately odd; none of it is advice.
+[connector]
+protocol = "modbus"
+
+[[device]]
+name             = "plc-shapes"
+type             = "shape-probe-v1"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+
+  # A list of groups: the point belongs to each of them.
+  [[device.point]]
+  id       = "multi"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 1, count = 1 }
+  meta     = { parameter = { group = ["control", "commissioning"] } }
+
+  # Two group names that fold to one set name: the point must appear once.
+  [[device.point]]
+  id       = "folded"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 2, count = 1 }
+  meta     = { parameter = { group = ["a b", "a-b"] } }
+
+  # An absolute list wins over the groups.
+  [[device.point]]
+  id       = "absolute"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 3, count = 1 }
+  meta     = { parameter = { set = ["plant_a", "plant_b"], group = "ignored" } }
+
+  # An empty list, and a list of non-strings: both mean "no list" (the default group).
+  [[device.point]]
+  id       = "empty_list"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 4, count = 1 }
+  meta     = { parameter = { group = [] } }
+
+  [[device.point]]
+  id       = "junk_list"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 5, count = 1 }
+  meta     = { parameter = { group = [1, true] } }
+
+  # A mixed list keeps only the usable entries.
+  [[device.point]]
+  id       = "mixed_list"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 6, count = 1 }
+  meta     = { parameter = { group = [1, "ok", ""] } }
+
+  # A bare string is an absolute set; `true` opts a read-only point in; `false` opts out.
+  [[device.point]]
+  id       = "bare_string"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 7, count = 1 }
+  meta     = { parameter = "pump" }
+
+  [[device.point]]
+  id       = "opted_in"
+  datatype = "uint16"
+  address  = { table = "holding", address = 8, count = 1 }
+  meta     = { parameter = true }
+
+  [[device.point]]
+  id       = "opted_out"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 9, count = 1 }
+  meta     = { parameter = false }

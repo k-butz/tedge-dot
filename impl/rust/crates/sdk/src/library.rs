@@ -124,7 +124,7 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
         // otherwise be accepted as a type and silently behave like an absent one — and the C
         // loader must reject exactly the same files as this one.
         if let Some(declared) = device.get("type") {
-            match declared.as_str().map(str::trim) {
+            match declared.as_str().map(trim_c) {
                 None | Some("") => {
                     return Err(format!("device '{name}': type must be a non-empty string"))
                 }
@@ -393,6 +393,19 @@ fn locate(
     ))
 }
 
+/// The whitespace C's `isspace()` recognises, which is what the C loader trims and rejects
+/// with. Rust's own `str::trim` also strips Unicode spaces, so a type containing a non-breaking
+/// space would be trimmed here and kept there — one configuration file, two different
+/// tenant-wide parameter set names depending on which package is installed.
+fn is_c_whitespace(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\x0B' | '\x0C' | '\r')
+}
+
+/// `str::trim`, but with the C loader's definition of whitespace.
+pub fn trim_c(s: &str) -> &str {
+    s.trim_matches(is_c_whitespace)
+}
+
 /// One parsed point library: the device type it describes, and its points.
 struct Library {
     /// `[library] type`, the device type these points belong to (§3.4). Absent when the
@@ -429,7 +442,7 @@ fn read_library(path: &Path, protocol: &str) -> Result<Library, String> {
         .map(|t| {
             t.as_str()
                 // Normalised like the device's own type: one spelling, everywhere.
-                .map(|t| t.trim().to_string())
+                .map(|t| trim_c(t).to_string())
                 .filter(|t| !t.is_empty())
                 .ok_or_else(|| {
                     format!("point library '{where_}': [library] type must be a non-empty string")
@@ -679,6 +692,8 @@ points_from      = [{refs}]
 
     /// A padded type is normalised at load, so the set names, the sample envelope and the link
     /// status cannot spell it differently from one another (they all read the stored value).
+    /// Whitespace means what C's `isspace()` means, so the C loader normalises identically —
+    /// a non-breaking space is *not* whitespace and stays part of the name in both.
     #[test]
     fn a_declared_type_is_trimmed_once_at_load() {
         let dir = Dir::new("type-trim");
@@ -701,6 +716,24 @@ points_from      = [{refs}]
         )
         .unwrap();
         assert_eq!(own.devices[0].device_type.as_deref(), Some("site-special"));
+
+        // A non-breaking space is not whitespace to C's isspace(), so it must survive here too:
+        // trimming it would give the two builds different set names for one configuration.
+        // Written as the literal character, not a `\u` escape, because the C loader's TOML
+        // parser mis-reads `\u00a0acme` (it consumes hex digits greedily) — which is also why
+        // the mirrored C test writes the same bytes.
+        let nbsp = resolve(
+            &config_with(Some(dir.path()), "\"acme-meter\"", "").replace(
+                "points_from",
+                "type             = \"\u{a0}acme\u{a0}\"\npoints_from",
+            ),
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            nbsp.devices[0].device_type.as_deref(),
+            Some("\u{a0}acme\u{a0}")
+        );
     }
 
     #[test]
@@ -708,8 +741,9 @@ points_from      = [{refs}]
         let dir = Dir::new("device-type-invalid");
         dir.write("modbus/acme-meter.toml", LIBRARY);
         // An array or a table is *present but unusable*, not absent — the case the C loader's
-        // scalar-only presence check used to drop silently.
-        for bad in ["\"\"", "\"  \"", "7", "true", "[\"acme\"]", "{ a = 1 }"] {
+        // scalar-only presence check used to drop silently. `\u{b}` is a vertical tab, which
+        // C counts as whitespace and Rust's own `str::trim` does not.
+        for bad in ["\"\"", "\"  \"", "\"\\u000B\"", "7", "true", "[\"acme\"]", "{ a = 1 }"] {
             let text = config_with(Some(dir.path()), "\"acme-meter\"", "").replace(
                 "points_from",
                 &format!("type             = {bad}\npoints_from"),
@@ -722,7 +756,7 @@ points_from      = [{refs}]
     #[test]
     fn library_type_must_be_a_non_empty_string() {
         let dir = Dir::new("type-invalid");
-        for bad in ["\"\"", "\"  \"", "7", "true", "[\"acme\"]", "{ a = 1 }"] {
+        for bad in ["\"\"", "\"  \"", "\"\\u000B\"", "7", "true", "[\"acme\"]", "{ a = 1 }"] {
             dir.write(
                 "modbus/bad.toml",
                 &LIBRARY.replace("[library]\n", &format!("[library]\ntype = {bad}\n")),

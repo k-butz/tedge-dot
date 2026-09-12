@@ -470,6 +470,35 @@ static void check_device_type_is_inherited_from_the_first_library(void) {
              "points_from = [\"acme-meter\"]\n",
              s.dir);
     write_file(&s, "etc/padded-type.toml", padded_dev);
+    /* A non-breaking space is NOT isspace(), so it stays part of the type -- and
+     * the Rust loader must keep it too, or one config names two different
+     * tenant-wide sets depending on the package installed.
+     * Mirrors library.rs::a_declared_type_is_trimmed_once_at_load. */
+    char nbsp_dev[1024];
+    snprintf(nbsp_dev, sizeof nbsp_dev,
+             "[connector]\n"
+             "protocol = \"modbus\"\n"
+             "point_library_path = [\"%s\"]\n"
+             "\n"
+             "[[device]]\n"
+             "name = \"plc1\"\n"
+             "type = \"\xc2\xa0" "acme" "\xc2\xa0\"\n"
+             "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+             "port = 502, unit_id = 1 }\n"
+             "points_from = [\"acme-meter\"]\n",
+             s.dir);
+    write_file(&s, "etc/nbsp-type.toml", nbsp_dev);
+    cfg = tdot_config_load(scratch_path(&s, "etc/nbsp-type.toml"), err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].type &&
+                  strcmp(cfg->devices[0].type, "\xc2\xa0" "acme" "\xc2\xa0") == 0,
+              "a non-breaking space must survive trimming, got '%s'",
+              cfg->devices[0].type ? cfg->devices[0].type : "<none>");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL nbsp device type did not load: %s\n", err);
+        failures++;
+    }
     cfg = tdot_config_load(scratch_path(&s, "etc/padded-type.toml"), err, sizeof err);
     if (cfg) {
         CHECK(cfg->devices[0].type &&
@@ -486,8 +515,12 @@ static void check_device_type_is_inherited_from_the_first_library(void) {
      * type -- and the Rust loader must reject the same files. */
     /* An array or a table is present but unusable, not absent: tomlc99's
      * scalar-only lookup would drop it silently while Rust rejects the file. */
-    static const char *bad_types[] = {"\"\"", "\"  \"", "7", "true",
-                                      "[\"acme\"]", "{ a = 1 }"};
+    /* "\\u000B" is a vertical tab: whitespace to C's isspace(), and the Rust
+     * loader is held to the same definition so both reject it. (Upper-case hex
+     * deliberately: tomlc99 only accepts A-F in a \\u escape.) */
+    static const char *bad_types[] = {"\"\"",   "\"  \"",     "\"\\u000B\"",
+                                      "7",    "true",     "[\"acme\"]",
+                                      "{ a = 1 }"};
     for (size_t i = 0; i < sizeof bad_types / sizeof *bad_types; i++) {
         char bad_body[1024];
         snprintf(bad_body, sizeof bad_body,

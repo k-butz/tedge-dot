@@ -447,6 +447,10 @@ static void on_message(struct mosquitto *mosq, void *ud,
         char reason[TDOT_ERR_MAX];
         snprintf(reason, sizeof reason, "unsupported verb: %s", verb);
         cJSON_AddStringToObject(res, "reason", reason);
+        /* §6.4: EVERY transition echoes the request's origin, this one included --
+         * the requester's correlation data must come back even when the verb
+         * was refused. */
+        add_origin(res, req);
         logmsg("warn", "cmd %s %s: unsupported verb", verb, dev_name);
         publish_retained(rt, msg->topic, res);
         cJSON_Delete(res);

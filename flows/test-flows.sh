@@ -408,6 +408,14 @@ check "command-forward: unintelligible parameter update forwarded as an empty ba
   '[te/device/plc1///cmd/parameter_update/x2] {"status":"init","operation":{"c8y_ParameterUpdate":{}}}' \
   '"writes":[],"origin":{"command":"parameter_update","set":null,"parameters":null,"error":"c8y_ParameterUpdate operation names no parameter set"}'
 
+# The connector echoes `origin` into its results (§6.4), so a terminal result replayed on its
+# own — a mapper restarted between the request and the result, its in-memory cache gone — still
+# completes the command type the requester asked for. Without this the result is mirrored onto
+# ot_write_batch and the Cumulocity operation waits on parameter_update forever.
+check "command-result: a replayed result alone routes by the echoed origin" ot-command-result \
+  '[te/device/plc1/ot/modbus/cmd/write-batch/ot--c8y-mapper-7] {"status":"successful","results":[{"point":"temp_u16","status":"successful","value":4242}],"origin":{"command":"parameter_update","set":"acme_boiler_v2_control_parameters"}}' \
+  '[te/device/plc1///cmd/parameter_update/c8y-mapper-7] {'
+
 # --- ot-command-result: origin.command routes reshaped commands back ---
 BINIT='{"status":"init","writes":[{"point":"temp_u16","value":4242}],"origin":{"command":"parameter_update","set":"acme_boiler_v2_control_parameters","parameters":{"temp_u16":4242}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
 BRESULT="[te/device/plc1/ot/modbus/cmd/write-batch/ot--c8y-mapper-1] $BINIT"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--c8y-mapper-1] {\"status\":\"successful\",\"results\":[{\"point\":\"temp_u16\",\"status\":\"successful\",\"value\":4242}]}"

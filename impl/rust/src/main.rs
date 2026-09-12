@@ -842,6 +842,14 @@ async fn cmd_write(args: WriteArgs) -> Result<(), String> {
 /// Print the Cumulocity DTM definitions derived from a configuration.
 fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
     let mut config = load_config(&args.config)?;
+    // A blank `--set` means "none given", as an empty `default_set` does in the flow: an unset
+    // variable in a provisioning script (`--set "$PARAM_SET"`) must not force every point into
+    // a nameless set. The C build applies the same rule.
+    let forced = args
+        .set
+        .as_deref()
+        .map(tedge_dot_sdk::descriptor::trim_c)
+        .filter(|s| !s.is_empty());
     if args.device != "*" {
         config
             .devices
@@ -851,7 +859,7 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
         }
     }
     // Parameter ids become fragment keys on the device twin, so they must be plain identifiers.
-    let bad = tedge_dot_sdk::descriptor::invalid_keys(&config, args.set.as_deref());
+    let bad = tedge_dot_sdk::descriptor::invalid_keys(&config, forced);
     if !bad.is_empty() {
         return Err(format!(
             "parameter keys must match [A-Za-z0-9_]: {}",
@@ -860,7 +868,7 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
     }
     // A DTM identifier is tenant-wide, so a set named after the protocol is shared with every
     // other device type that speaks it. Declaring the device type is what keeps them apart.
-    if args.set.is_none() {
+    if forced.is_none() {
         // Worded and shaped exactly like the C build's warning (impl/c/src/main.c): the two
         // CLIs are meant to be interchangeable, and `describe-parity.sh` compares stderr.
         let untyped = tedge_dot_sdk::descriptor::devices_without_type(&config);
@@ -876,7 +884,7 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
         }
     }
     let docs: Vec<serde_json::Value> = match args.format {
-        DescribeFormat::C8yDtm => tedge_dot_sdk::c8y_dtm_definitions(&config, args.set.as_deref()),
+        DescribeFormat::C8yDtm => tedge_dot_sdk::c8y_dtm_definitions(&config, forced),
     };
     if args.compact {
         for doc in &docs {

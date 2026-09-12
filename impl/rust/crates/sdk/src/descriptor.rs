@@ -47,6 +47,8 @@ use crate::connector::Access;
 use crate::model::DataType;
 use serde_json::{json, Map, Value};
 
+pub use crate::library::trim_c;
+
 /// The group a parameter belongs to when it names none.
 pub const DEFAULT_GROUP: &str = "control";
 

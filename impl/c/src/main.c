@@ -7,6 +7,7 @@
  *   tedge-dot describe [-c <config>] [-d <device-glob>] [--set <name>]
  *                      [--format c8y-dtm] [--compact]
  */
+#include <ctype.h>
 #include <dirent.h>
 #include <fnmatch.h>
 #include <signal.h>
@@ -425,7 +426,20 @@ static int cmd_describe(const args_t *a) {
 
     /* Parameter ids become fragment keys on the device twin, so they must be
      * plain identifiers. */
-    char *bad = tdot_param_invalid_keys(cfg, a->set);
+    /* A blank --set means "none given", as an empty `default_set` does in the
+     * flow: an unset variable in a provisioning script (--set "$PARAM_SET")
+     * must not force every point into a nameless set. The Rust build applies
+     * the same rule. */
+    const char *forced = a->set;
+    if (forced) {
+        const char *p = forced;
+        while (*p && isspace((unsigned char)*p))
+            p++;
+        if (!*p)
+            forced = NULL;
+    }
+
+    char *bad = tdot_param_invalid_keys(cfg, forced);
     if (bad) {
         fprintf(stderr, "error: parameter keys must match [A-Za-z0-9_]: %s\n",
                 bad);
@@ -436,7 +450,7 @@ static int cmd_describe(const args_t *a) {
     /* A DTM identifier is tenant-wide, so a set named after the protocol is
      * shared with every other device type that speaks it. Declaring the device
      * type is what keeps them apart. */
-    if (!a->set) {
+    if (!forced) {
         char *untyped = tdot_param_untyped_devices(cfg);
         if (untyped) {
             fprintf(stderr,
@@ -449,7 +463,7 @@ static int cmd_describe(const args_t *a) {
         }
     }
 
-    cJSON *docs = tdot_c8y_dtm_definitions(cfg, a->set);
+    cJSON *docs = tdot_c8y_dtm_definitions(cfg, forced);
     if (a->compact) {
         cJSON *doc;
         cJSON_ArrayForEach(doc, docs) {

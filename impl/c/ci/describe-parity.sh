@@ -74,7 +74,9 @@ if [ ${#configs[@]} -eq 0 ]; then
              "$repo"/cloud/modbus/modbus.toml
              # Deliberately untyped, so the stderr comparison below actually compares a
              # warning instead of two empty files (§5.2).
-             "$repo"/impl/c/ci/fixtures/untyped-modbus.toml)
+             "$repo"/impl/c/ci/fixtures/untyped-modbus.toml
+             # Degenerate meta.parameter shapes (lists, empty lists, junk entries).
+             "$repo"/impl/c/ci/fixtures/parameter-shapes-modbus.toml)
 fi
 
 # stdout is the JSON and stderr carries diagnostics (a config with no device `type` is
@@ -84,19 +86,22 @@ c_errs=$(mktemp)
 trap 'rm -f "$compare" "$rust_errs" "$c_errs"' EXIT
 
 fail=0
-for config in "${configs[@]}"; do
-    name=${config#"$repo"/}
-    if ! rust_out=$("$rust_bin" describe -c "$config" --compact 2>"$rust_errs"); then
-        echo "FAIL $name: the Rust binary rejected the config:" >&2
-        cat "$rust_errs" >&2
+
+# Compare one `describe` invocation: exit status, stdout (parsed) and stderr must all match.
+compare_run() {
+    local name=$1 config=$2
+    shift 2
+    local rust_out c_out rust_rc=0 c_rc=0
+    rust_out=$("$rust_bin" describe -c "$config" --compact "$@" 2>"$rust_errs") || rust_rc=$?
+    c_out=$("$c_bin" describe -c "$config" --compact "$@" 2>"$c_errs") || c_rc=$?
+    # A config one binary rejects and the other accepts is the divergence that matters most:
+    # the same file must be usable, or unusable, from either package.
+    if [ "$rust_rc" != "$c_rc" ]; then
+        echo "FAIL $name: rust exited $rust_rc, c exited $c_rc" >&2
+        echo "  rust: $(cat "$rust_errs")" >&2
+        echo "  c:    $(cat "$c_errs")" >&2
         fail=1
-        continue
-    fi
-    if ! c_out=$("$c_bin" describe -c "$config" --compact 2>"$c_errs"); then
-        echo "FAIL $name: the C binary rejected the config:" >&2
-        cat "$c_errs" >&2
-        fail=1
-        continue
+        return
     fi
     # Diagnostics are part of the CLI contract too: the untyped-device warning (§5.2) must read
     # the same from either binary, or a user gets different advice depending on the package.
@@ -104,12 +109,30 @@ for config in "${configs[@]}"; do
         echo "FAIL $name: the two binaries print different diagnostics:" >&2
         diff -u "$rust_errs" "$c_errs" >&2 || true
         fail=1
-        continue
+        return
+    fi
+    if [ "$rust_rc" != 0 ]; then
+        echo "OK   $name: both rejected it identically"
+        return
     fi
     if ! NAME="$name" RUST_OUT="$rust_out" C_OUT="$c_out" python3 "$compare"; then
         fail=1
     fi
+}
+
+for config in "${configs[@]}"; do
+    compare_run "${config#"$repo"/}" "$config"
 done
+
+# `--set` forces one name for every point that does not give an absolute one, and a BLANK one
+# means "not given" (an unset variable in a provisioning script). Both are easy to get subtly
+# different between the two CLIs, and neither is exercised by the plain runs above.
+if [ $# -eq 0 ]; then
+    for forced in "plant_settings" "" "  "; do
+        compare_run "demo/config/modbus.toml --set '$forced'" \
+            "$repo/demo/config/modbus.toml" --set "$forced"
+    done
+fi
 
 if [ "$fail" != 0 ]; then
     echo "== describe parity FAILED" >&2

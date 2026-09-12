@@ -186,4 +186,14 @@ the sets are renamed from the next publish, the fragment under the old name stay
 it is cleared the same way, and `ot-registration` — which registers a device once per mapper
 lifetime — keeps the entity type it first published until the mapper restarts.
 
+Dropping a point from one of several groups has the same consequence at a finer grain: the set
+it left keeps that point's key in its retained fragment until the fragment is cleared the same
+way.
+
 `type` itself is optional everywhere, so no configuration fails to load.
+
+The SDK APIs changed for out-of-tree connectors (a source break, loud at compile time, not a
+silent one): Rust's `parameter_of` became `parameters_of` (one entry per set), `default_set` is
+gone, and `parameters`/`invalid_keys` take an `Option<&str>` override; C's `tdot_param_of` and
+`tdot_param_default_set` were replaced by `tdot_param_sets`/`tdot_param_sets_free`/
+`tdot_param_is` and `tdot_param_set_name`.
