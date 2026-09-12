@@ -151,11 +151,20 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
         // Inline points come last: a device's own definition wins over every library it
         // references, which is what makes extending a packaged list possible without editing
         // the packaged file.
-        let inline = device
-            .get_mut("point")
-            .and_then(Value::as_array_mut)
-            .map(std::mem::take)
-            .unwrap_or_default();
+        //
+        // A `point` key that is present but not an array is a mistake, not an absence: the
+        // resolved list is written back over this key, so treating it as absent would silently
+        // discard a mistyped `[[device.point]]` (an inline table, say) that the typed parse
+        // would otherwise have rejected.
+        let inline = match device.get_mut("point") {
+            Some(Value::Array(points)) => std::mem::take(points),
+            Some(_) => {
+                return Err(format!(
+                    "device '{name}': point must be an array of tables ([[device.point]])"
+                ))
+            }
+            None => Vec::new(),
+        };
         let inline_count = inline.len();
         for point in inline {
             merge_point(&mut points, point);
@@ -930,6 +939,35 @@ points_from      = ["acme-meter"]
         assert_eq!(ids, ["boiler_temp", "pump_run"]);
     }
 
+    /// Resolution writes the merged list back over the device's `point` key, so a key that is
+    /// present but not an array must be reported rather than treated as absent — otherwise
+    /// adding a `points_from` reference silently removes the validation the typed parse does,
+    /// and a mistyped inline point disappears without a word.
+    #[test]
+    fn a_malformed_point_key_is_reported_not_discarded() {
+        let dir = Dir::new("bad-point-key");
+        dir.write("modbus/acme-meter.toml", LIBRARY);
+
+        for value in ["\"typo\"", "42", "{ id = \"temp\" }"] {
+            let text = format!(
+                r#"
+[connector]
+protocol           = "modbus"
+point_library_path = ["{dir}"]
+
+[[device]]
+name             = "plc-1"
+protocol_address = {{ transport = "tcp", host = "10.0.0.1", port = 502, unit_id = 1 }}
+points_from      = ["acme-meter"]
+point            = {value}
+"#,
+                dir = dir.path().display()
+            );
+            let err = resolve(&text, dir.path()).unwrap_err();
+            assert!(err.contains("must be an array of tables"), "{value}: {err}");
+        }
+    }
+
     /// §3.3: unique within a connector. Two same-named devices would publish over each other
     /// on one entity's topics, and they make "was this reference already here" ambiguous for
     /// the management guard — which is where the two implementations drifted apart.
@@ -1174,6 +1212,11 @@ points_from      = ["acme-meter"]
         assert!(is_path_reference("meter.toml"));
         assert!(is_path_reference("/opt/meter"));
         assert!(!is_path_reference("acme-meter-v2"));
+        // Exactly ".toml" is a path too. The C check guarded on `n > 5` and classified it as a
+        // name, which split the two implementations — and with them the management guard.
+        assert!(is_path_reference(".toml"));
+        assert!(!is_path_reference("toml"));
+        assert!(!is_path_reference(".tom"));
     }
 
     mod props {

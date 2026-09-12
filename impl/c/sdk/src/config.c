@@ -422,7 +422,10 @@ static bool is_file(const char *path) {
 /* True when a points_from entry is a path rather than a library name. */
 bool tdot_is_path_reference(const char *ref) {
     size_t n = strlen(ref);
-    return strchr(ref, '/') != NULL || (n > 5 && strcmp(ref + n - 5, ".toml") == 0);
+    /* >= 5, not > 5: ".toml" is itself a path, which is how the Rust
+     * `ends_with(".toml")` classifies it. The two must agree, because this also
+     * decides what a management command is allowed to name. */
+    return strchr(ref, '/') != NULL || (n >= 5 && strcmp(ref + n - 5, ".toml") == 0);
 }
 
 static bool is_path_reference(const char *ref) { return tdot_is_path_reference(ref); }
@@ -654,6 +657,11 @@ static int resolve_device_points(tdot_config_t *cfg, tdot_device_t *dev,
     }
 
     toml_array_t *inline_points = toml_array_in(dt, "point");
+    if (!inline_points && (toml_raw_in(dt, "point") || toml_table_in(dt, "point"))) {
+        snprintf(err, errlen,
+                 "device %s: point must be an array of tables ([[device.point]])", dev->name);
+        return -1;
+    }
     int ninline = inline_points ? toml_array_nelem(inline_points) : 0;
     for (int j = 0; j < ninline; j++) {
         toml_table_t *pt = toml_table_at(inline_points, j);
