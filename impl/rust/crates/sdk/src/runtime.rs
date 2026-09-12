@@ -366,7 +366,7 @@ pub async fn run_until_watched(
 ) -> Result<(), BoxError> {
     let limits = Limits::from_config(&config);
     let protocol = config.connector.protocol.clone();
-    let service = config.connector.service_name.clone();
+    let service = config.connector.service_name();
 
     // Keep the raw configuration document so management commands can patch & persist it
     // (preserving comments/formatting via toml_edit).
@@ -386,7 +386,12 @@ pub async fn run_until_watched(
     // 2. MQTT setup.
     let health_topic = format!("te/device/main/service/{service}/status/health");
     let cap_topic = format!("te/device/main/service/{service}/ot/capabilities");
-    let cmd_sub = format!("te/device/+/ot/{protocol}/cmd/+/+");
+    // Device commands for the whole protocol, and management commands for this service (§6).
+    // Every instance of the protocol on the broker receives every device command, so the one
+    // it acts on is decided per message (`route_command`) against the live configuration —
+    // which define-device/remove-device change, so a subscription per device would go stale.
+    let device_cmd_sub = format!("te/device/+/ot/{protocol}/cmd/+/+");
+    let service_cmd_sub = format!("te/device/main/service/{service}/ot/cmd/+/+");
 
     let mut opts = MqttOptions::new(
         format!("{service}-{protocol}"),
@@ -440,7 +445,8 @@ pub async fn run_until_watched(
     // 3. Publish capability descriptor + service health (retained).
     publish_retained(&client, &cap_topic, capability_payload(&caps, &config)).await?;
     publish_health(&client, &health_topic, "up").await?;
-    client.subscribe(&cmd_sub, QoS::AtLeastOnce).await?;
+    client.subscribe(&device_cmd_sub, QoS::AtLeastOnce).await?;
+    client.subscribe(&service_cmd_sub, QoS::AtLeastOnce).await?;
     info!(%protocol, %service, "connector started");
 
     // 4. Connect to devices and publish link status.
@@ -573,7 +579,7 @@ pub async fn run_until_watched(
             }
             Some(p) = incoming_rx.recv() => {
                 match handle_command(
-                    &mut connector, &client, &protocol, &mut links,
+                    &mut connector, &client, &protocol, &service, &mut links,
                     &mut config, &mut config_doc, &config_path, &cap_topic,
                     &p.topic, &p.payload, limits,
                 ).await {
@@ -973,11 +979,51 @@ pub fn point_ref(point: &crate::config::PointConfig, device_default: Option<Mode
     }
 }
 
+/// Who a message on the connector's command subscriptions is for (contract §6).
+#[derive(Debug, PartialEq)]
+enum CommandRoute<'a> {
+    /// `te/device/<device>/ot/<protocol>/cmd/<verb>/<id>` for a device this instance's
+    /// configuration defines.
+    Device { device: &'a str, verb: &'a str },
+    /// `te/device/main/service/<service>/ot/cmd/<verb>/<id>` for this instance's service.
+    Service { verb: &'a str },
+    /// Anything else — above all a command for a device this instance does not own. Left
+    /// unanswered: every instance of the protocol on the broker receives it, and an "unknown
+    /// device" failure from one that does not own it would race (and usually beat) the owner's
+    /// real result.
+    Elsewhere,
+}
+
+/// Route a command topic against the live configuration, so the devices an instance answers
+/// for follow define-device/remove-device.
+fn route_command<'a>(
+    topic: &'a str,
+    protocol: &str,
+    service: &str,
+    config: &ConnectorConfig,
+) -> CommandRoute<'a> {
+    let parts: Vec<&'a str> = topic.split('/').collect();
+    match parts[..] {
+        ["te", "device", device, "ot", p, "cmd", verb, _id] if p == protocol => {
+            if config.devices.iter().any(|d| d.name == device) {
+                CommandRoute::Device { device, verb }
+            } else {
+                CommandRoute::Elsewhere
+            }
+        }
+        ["te", "device", "main", "service", s, "ot", "cmd", verb, _id] if s == service => {
+            CommandRoute::Service { verb }
+        }
+        _ => CommandRoute::Elsewhere,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
     connector: &mut Box<dyn Connector>,
     client: &AsyncClient,
     protocol: &str,
+    service: &str,
     links: &mut LinkTracker,
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
@@ -986,19 +1032,13 @@ async fn handle_command(
     topic: &str,
     payload: &[u8],
     limits: Limits,
-) -> Result<bool, BoxError> {    // Expect te/device/<device>/ot/<protocol>/cmd/<verb>/<id>
-    let parts: Vec<&str> = topic.split('/').collect();
-    if parts.len() != 8
-        || parts[0] != "te"
-        || parts[1] != "device"
-        || parts[3] != "ot"
-        || parts[4] != protocol
-        || parts[5] != "cmd"
-    {
-        return Ok(false);
-    }
-    let device = parts[2].to_string();
-    let verb = parts[6];
+) -> Result<bool, BoxError> {
+    let route = route_command(topic, protocol, service, config);
+    let (device, verb) = match route {
+        CommandRoute::Device { device, verb } => (device.to_string(), verb),
+        CommandRoute::Service { verb } => (String::new(), verb),
+        CommandRoute::Elsewhere => return Ok(false),
+    };
 
     let json: serde_json::Value = match serde_json::from_slice(payload) {
         Ok(v) => v,
@@ -1010,13 +1050,36 @@ async fn handle_command(
     }
 
     // Management verbs (§6.3) are handled generically by the runtime; they mutate and persist
-    // the connector configuration, then live-reload the protocol module.
-    if is_management_verb(verb) {
+    // the connector configuration, then live-reload the protocol module. That configuration
+    // belongs to this instance alone, so they are accepted on its service topic only.
+    let service_cmd = matches!(route, CommandRoute::Service { .. });
+    if service_cmd && is_management_verb(verb) {
         return handle_management(
             connector, client, links, config, config_doc, config_path, cap_topic, topic, verb,
             &json, limits,
         )
         .await;
+    }
+    // A verb on the wrong kind of topic is refused rather than ignored: the topic already names
+    // this instance as the only addressee, so the refusal cannot race another instance's answer.
+    if service_cmd || is_management_verb(verb) {
+        let reason = if service_cmd {
+            format!(
+                "'{verb}' is not a service command: only set-config, define-device and \
+                 remove-device are; device commands go to \
+                 te/device/<device>/ot/{protocol}/cmd/{verb}/<id>"
+            )
+        } else {
+            format!(
+                "management verb '{verb}' is addressed to the connector service: \
+                 te/device/main/service/{service}/ot/cmd/{verb}/<id>"
+            )
+        };
+        warn!(%verb, "command refused: {reason}");
+        let failed = serde_json::json!({ "status": "failed", "reason": reason });
+        publish_retained(client, topic, with_origin(failed, json.get("origin")).to_string())
+            .await?;
+        return Ok(false);
     }
 
     // `write-batch` (§6.4) is implemented once here on top of the module's `write`.
@@ -1302,10 +1365,14 @@ async fn handle_management(
     json: &serde_json::Value,
     limits: Limits,
 ) -> Result<bool, BoxError> {
+    // Every transition echoes the request's `origin` (§6.4): a bridge completing the command on
+    // the entity it was issued for reads it back from the retained result, since the service
+    // topic does not name that entity.
+    let origin = json.get("origin");
     publish_retained(
         client,
         topic,
-        serde_json::json!({ "status": "executing" }).to_string(),
+        with_origin(serde_json::json!({ "status": "executing" }), origin).to_string(),
     )
     .await?;
 
@@ -1315,7 +1382,7 @@ async fn handle_management(
         match apply_management(verb, json, &mut doc) {
             Ok(()) => doc,
             Err(e) => {
-                publish_failed(client, topic, &e).await?;
+                publish_failed(client, topic, &e, origin).await?;
                 return Ok(false);
             }
         }
@@ -1331,7 +1398,7 @@ async fn handle_management(
     // filesystem detail reaches the command result.
     if let Err(e) = crate::library::reject_path_references(&config_doc.to_string(), &candidate_text)
     {
-        publish_failed(client, topic, &e).await?;
+        publish_failed(client, topic, &e, origin).await?;
         return Ok(false);
     }
     let new_config: ConnectorConfig = match crate::library::resolve(
@@ -1340,7 +1407,13 @@ async fn handle_management(
     ) {
         Ok(c) => c,
         Err(e) => {
-            publish_failed(client, topic, &format!("resulting config is invalid: {e}")).await?;
+            publish_failed(
+                client,
+                topic,
+                &format!("resulting config is invalid: {e}"),
+                origin,
+            )
+            .await?;
             return Ok(false);
         }
     };
@@ -1348,7 +1421,7 @@ async fn handle_management(
     // Validate against the protocol module before committing.
     if let Err(e) = connector.configure(&new_config) {
         let _ = connector.configure(config); // restore previous good state
-        publish_failed(client, topic, &format!("configure failed: {e}")).await?;
+        publish_failed(client, topic, &format!("configure failed: {e}"), origin).await?;
         return Ok(false);
     }
 
@@ -1379,21 +1452,22 @@ async fn handle_management(
     publish_retained(
         client,
         topic,
-        serde_json::json!({ "status": "successful" }).to_string(),
+        with_origin(serde_json::json!({ "status": "successful" }), origin).to_string(),
     )
     .await?;
     info!(%verb, "management command applied");
     Ok(true)
 }
 
-async fn publish_failed(client: &AsyncClient, topic: &str, reason: &str) -> Result<(), BoxError> {
+async fn publish_failed(
+    client: &AsyncClient,
+    topic: &str,
+    reason: &str,
+    origin: Option<&serde_json::Value>,
+) -> Result<(), BoxError> {
     warn!("management command failed: {reason}");
-    publish_retained(
-        client,
-        topic,
-        serde_json::json!({ "status": "failed", "reason": reason }).to_string(),
-    )
-    .await
+    let failed = serde_json::json!({ "status": "failed", "reason": reason });
+    publish_retained(client, topic, with_origin(failed, origin).to_string()).await
 }
 
 /// Dispatch a management verb onto the configuration document.
@@ -1420,6 +1494,19 @@ fn apply_set_config(json: &serde_json::Value, doc: &mut DocumentMut) -> Result<(
         .get("config")
         .and_then(|c| c.as_object())
         .ok_or("set-config requires a 'config' object")?;
+    // The service name addresses this connector's management commands (§6.3) and the protocol
+    // selects its module: a running instance cannot take either from a command.
+    if target == "connector" {
+        if let Some(key) = ["service_name", "protocol"]
+            .into_iter()
+            .find(|key| patch.contains_key(*key))
+        {
+            return Err(format!(
+                "set-config cannot change connector.{key}: edit the configuration file and \
+                 restart the connector"
+            ));
+        }
+    }
     let root = doc.as_table_mut();
 
     if let Some(name) = target.strip_prefix("device:") {
@@ -1815,6 +1902,21 @@ default_mode = "typed"
         assert_eq!(dev.points.len(), 1);
     }
 
+    /// The service name addresses the connector's management commands and the protocol selects
+    /// its module, so neither can be changed by a command while the connector runs.
+    #[test]
+    fn set_config_cannot_change_the_connector_identity() {
+        for key in ["service_name", "protocol"] {
+            let mut config = serde_json::Map::new();
+            config.insert(key.to_string(), "other".into());
+            let request = serde_json::json!({ "target": "connector", "config": config });
+            let mut d = doc();
+            let err = apply_management("set-config", &request, &mut d).unwrap_err();
+            assert!(err.contains(key), "{err}");
+            assert_eq!(d.to_string(), BASE, "the document must be left untouched");
+        }
+    }
+
     #[test]
     fn set_config_unknown_target_rejected() {
         let mut d = doc();
@@ -1825,6 +1927,66 @@ default_mode = "typed"
         )
         .unwrap_err();
         assert!(err.contains("unknown set-config target"), "{err}");
+    }
+
+    fn route<'a>(topic: &'a str, config: &ConnectorConfig) -> CommandRoute<'a> {
+        route_command(topic, "modbus", "tedge-dot", config)
+    }
+
+    /// Every instance of a protocol receives every device command, and each must act only on
+    /// the devices its own configuration defines — plus the management commands addressed to
+    /// its own service. Everything else is another instance's to answer.
+    #[test]
+    fn commands_route_to_the_owning_instance_only() {
+        let config: ConnectorConfig = toml::from_str(BASE).unwrap();
+        assert_eq!(
+            route("te/device/plc-1/ot/modbus/cmd/write/1", &config),
+            CommandRoute::Device { device: "plc-1", verb: "write" }
+        );
+        assert_eq!(
+            route("te/device/main/service/tedge-dot/ot/cmd/define-device/1", &config),
+            CommandRoute::Service { verb: "define-device" }
+        );
+        for elsewhere in [
+            // a device another instance owns
+            "te/device/plc-2/ot/modbus/cmd/write/1",
+            // the same device name under another protocol
+            "te/device/plc-1/ot/opcua/cmd/write/1",
+            // another instance's service
+            "te/device/main/service/tedge-dot-2/ot/cmd/define-device/1",
+            // not a command topic, or not exactly one
+            "te/device/plc-1/ot/modbus/cmd/write",
+            "te/device/plc-1/ot/modbus/cmd/write/1/2",
+            "te/device/plc-1/ot/modbus/sample/temp",
+            "te/device/main/service/tedge-dot/ot/capabilities",
+            "te/device/main/service/tedge-dot/ot/cmd/define-device",
+        ] {
+            assert_eq!(route(elsewhere, &config), CommandRoute::Elsewhere, "{elsewhere}");
+        }
+    }
+
+    /// Ownership is the live configuration: a device added by define-device routes to this
+    /// instance from then on, and a removed one no longer does.
+    #[test]
+    fn command_routing_follows_the_configuration() {
+        let topic = "te/device/plc-9/ot/modbus/cmd/write/1";
+        let config: ConnectorConfig = toml::from_str(BASE).unwrap();
+        assert_eq!(route(topic, &config), CommandRoute::Elsewhere);
+
+        let (_, added) = apply(
+            "define-device",
+            serde_json::json!({ "device": {
+                "name": "plc-9",
+                "protocol_address": { "transport": "tcp", "host": "10.0.0.9", "port": 502, "unit_id": 1 },
+                "point": [{ "id": "t", "datatype": "uint16",
+                            "address": { "table": "holding", "address": 1, "count": 1 } }]
+            }}),
+        );
+        assert_eq!(route(topic, &added), CommandRoute::Device { device: "plc-9", verb: "write" });
+
+        let (_, removed) = apply("remove-device", serde_json::json!({ "device": "plc-1" }));
+        let topic = "te/device/plc-1/ot/modbus/cmd/write/1";
+        assert_eq!(route(topic, &removed), CommandRoute::Elsewhere);
     }
 
     #[test]

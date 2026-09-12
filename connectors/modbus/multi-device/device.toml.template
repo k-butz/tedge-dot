@@ -1,0 +1,34 @@
+# One connector instance of the multi-device e2e stack (docker-compose.multi-device.yaml).
+#
+# entrypoint.sh renders one copy per simulated device into a single directory, replacing @N@
+# with the device number and @PORT@ with that device's simulator port, and runs the directory
+# with one `tedge-dot run -c <dir>` process: the one-device-per-file layout that a fleet of
+# identical PLCs (or a discovery script writing a file per instance) produces.
+
+[connector]
+protocol      = "modbus"
+service_name  = "tedge-dot-@N@"
+poll_interval = "1s"
+log_level     = "info"
+
+[mqtt]
+host = "broker"
+port = 1883
+
+[[device]]
+name             = "plc-@N@"
+protocol_address = { transport = "tcp", host = "simulator", port = @PORT@, unit_id = 1 }
+default_mode     = "typed"
+
+  # Seeded with the device number by the simulator (sim/simulator.py), so a sample shows which
+  # simulated device this instance is connected to.
+  [[device.point]]
+  id       = "device_id"
+  datatype = "uint16"
+  address  = { table = "holding", address = 2100, count = 1 }
+
+  [[device.point]]
+  id       = "temp_u16"
+  datatype = "uint16"
+  access   = "read_write"
+  address  = { table = "holding", address = 3, count = 1 }

@@ -61,6 +61,21 @@ Host ports are pinned only for manual work, through env vars the compose files i
 configs expect, `just e2e-up <proto>` pins the broker on 1884. Fixed published ports must not
 be committed to the compose files — DeviceLibrary rejects them, since they break parallel runs.
 
+### Several devices and connector instances (modbus)
+
+`modbus/docker-compose.multi-device.yaml` is a second modbus stack: one `tedge-dot` process
+running a directory of ten connector configs (one instance per file, service `tedge-dot-N`
+owning device `plc-N`) against ten simulated devices. `modbus/tests/multi_device_e2e.robot`
+starts it with `Setup OT Stack    modbus    compose_file=...` and checks that every command is
+acted on by exactly one instance (contract §6.5).
+
+Both halves are switches on the regular images, usable on their own:
+
+| Setting | Where | Effect |
+|---|---|---|
+| `SIM_DEVICES=N` (1–32) | simulator | serves N independent devices: device N on port 501+N, own datastore, the device number in holding register 2100 |
+| `MULTI_DEVICE_COUNT=N` | connector | renders `modbus/multi-device/device.toml.template` once per device into `/etc/tedge-dot/multi-device/` and runs that directory |
+
 ---
 
 ## `just` recipes

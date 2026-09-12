@@ -176,6 +176,55 @@ impl Ctx<'_> {
     }
 }
 
+/// How long a connector is given to (wrongly) answer a command that is not its own.
+const OWNERSHIP_SETTLE: Duration = Duration::from_secs(3);
+
+/// B11 — command ownership (contract §6.5): a command for a device the connector's configuration
+/// does not define is left unanswered. Every instance of a protocol on a broker receives it, and a
+/// `failed` from one that does not own the device would overwrite the owner's retained result.
+async fn check_b11_unowned_device_ignored(ctx: &Ctx<'_>, layer: &mut Layer) {
+    let topic = format!(
+        "te/device/conf-b11-not-configured/ot/{}/cmd/write/conf-b11",
+        ctx.protocol
+    );
+    let mark = ctx.broker.mark();
+    let request = serde_json::json!({ "status": "init", "point": "any", "value": 1 });
+    ctx.broker.publish(&topic, request.to_string().as_bytes(), true);
+    tokio::time::sleep(OWNERSHIP_SETTLE).await;
+    let answered: Vec<String> = ctx
+        .broker
+        .records_from(mark)
+        .into_iter()
+        .filter(|r| r.client == ctx.client && r.topic == topic)
+        .map(|r| r.json().map(|j| j.to_string()).unwrap_or_default())
+        .collect();
+    // The request is retained: clear it rather than leave it for later checks.
+    ctx.broker.publish(&topic, b"", true);
+    // Silence only counts from a connector that is still working: samples keep coming after the
+    // command was given its time (a fresh mark — one published before a crash does not count).
+    let settled = ctx.broker.mark();
+    let alive = ctx
+        .wait_connector_record(settled, SAMPLE_TIMEOUT, "a sample after the ownership check", |r| {
+            r.topic.contains("/sample/")
+        })
+        .await;
+    layer.check(
+        "B11-ownership",
+        "a command for a device the connector does not own is left unanswered",
+        if let Err(reason) = alive {
+            Err(format!("{reason} — the connector stopped publishing, so its silence proves nothing"))
+        } else if answered.is_empty() {
+            Ok(None)
+        } else {
+            Err(format!(
+                "published {} transition(s) for a device it does not own: {}",
+                answered.len(),
+                answered.join(", ")
+            ))
+        },
+    );
+}
+
 /// Run the behavioural layer. Returns the behavioural checks plus the captured-traffic schema
 /// checks as separate report layers.
 pub async fn run(manifest: &Manifest, schemas: &Schemas) -> Result<Vec<Layer>, String> {
@@ -208,7 +257,7 @@ pub async fn run(manifest: &Manifest, schemas: &Schemas) -> Result<Vec<Layer>, S
             manifest.connector.protocol
         ));
     }
-    let service = config.connector.service_name.clone();
+    let service = config.connector.service_name();
     let ctx = Ctx {
         broker: &broker,
         sim: sim.as_ref(),
@@ -243,6 +292,7 @@ pub async fn run(manifest: &Manifest, schemas: &Schemas) -> Result<Vec<Layer>, S
     check_b6_write_roundtrip(&ctx, &mut layer).await;
     check_b7_access_control(&ctx, &mut layer).await;
     check_b8_hot_reload(&ctx, &mut layer, &config_path).await;
+    check_b11_unowned_device_ignored(&ctx, &mut layer).await;
     check_b5_link_drop_and_recovery(&ctx, &mut layer).await;
     check_b5_silent_peer(&ctx, &mut layer).await;
 
@@ -924,9 +974,10 @@ async fn check_b8_hot_reload(ctx: &Ctx<'_>, layer: &mut Layer, config_path: &std
         points.push(clone);
 
         let device_name = device["name"].as_str().unwrap_or_default().to_string();
+        // Management verbs are addressed to the connector service (contract §6.3).
         let topic = format!(
-            "te/device/{}/ot/{}/cmd/define-device/conf-b8",
-            device_name, ctx.protocol
+            "te/device/main/service/{}/ot/cmd/define-device/conf-b8",
+            ctx.service
         );
         let mark = ctx.broker.mark();
         ctx.broker.publish(
@@ -1154,6 +1205,7 @@ fn check_b10_topic_discipline(ctx: &Ctx<'_>, layer: &mut Layer, from: usize) {
         format!("te/device/+/ot/{}/status/link", ctx.protocol),
         format!("te/device/+/ot/{}/sample/+", ctx.protocol),
         format!("te/device/+/ot/{}/cmd/+/+", ctx.protocol),
+        format!("te/device/main/service/{}/ot/cmd/+/+", ctx.service),
     ];
     let mut violations: Vec<String> = ctx
         .broker
@@ -1280,8 +1332,9 @@ fn validate_captured_traffic(ctx: &Ctx<'_>, from: usize) -> Layer {
             "command transitions",
             Kind::Command,
             Box::new({
-                let f = format!("te/device/+/ot/{}/cmd/+/+", ctx.protocol);
-                move |t: &str| topic_matches(&f, t)
+                let device = format!("te/device/+/ot/{}/cmd/+/+", ctx.protocol);
+                let service = format!("te/device/main/service/{}/ot/cmd/+/+", ctx.service);
+                move |t: &str| topic_matches(&device, t) || topic_matches(&service, t)
             }),
         ),
         (

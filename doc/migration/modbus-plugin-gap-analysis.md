@@ -156,7 +156,7 @@ suite asserts them. The new `ot_set_config` path applies and persists the change
 reflects it back to the inventory.
 
 **Closure:** a small `ot-config-twin` flow subscribed to
-`te/+/+/ot/+/cmd/set-config/+` that, on `status: "successful"`, republishes the applied
+`te/device/main/service/+/ot/cmd/set-config/+` that, on `status: "successful"`, republishes the applied
 `config` object as the matching twin fragment(s). Alternatively the SDK runtime publishes an
 "effective config" descriptor after every reload (also serves RFC 0002's export path).
 `transmitRate` should be accepted and mapped to the `ot-measurement` `min_interval` param (or

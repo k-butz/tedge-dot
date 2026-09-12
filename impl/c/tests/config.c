@@ -87,6 +87,26 @@ static void check_timeout_defaults(void) {
     tdot_config_free(cfg);
 }
 
+/* The service name addresses the connector's management commands (contract
+ * §6.3) and the flows default to tedge-dot-<protocol> when a command names
+ * none, so that is the connector default too (mirrors the Rust SDK test). */
+static void check_service_name_default(void) {
+    tdot_config_t *cfg = load("", "");
+    if (cfg) {
+        CHECK(strcmp(cfg->service_name, "tedge-dot-modbus") == 0,
+              "default service_name should be tedge-dot-modbus, got %s",
+              cfg->service_name);
+        tdot_config_free(cfg);
+    }
+    cfg = load("service_name = \"plant-a\"\n", "");
+    if (cfg) {
+        CHECK(strcmp(cfg->service_name, "plant-a") == 0,
+              "configured service_name should be kept, got %s",
+              cfg->service_name);
+        tdot_config_free(cfg);
+    }
+}
+
 static void check_timeouts_are_parsed(void) {
     tdot_config_t *cfg =
         load("operation_timeout = \"5s\"\nstall_timeout = \"90s\"\n", "");
@@ -1172,6 +1192,7 @@ static void check_watchdog_period(void) {
 
 int main(void) {
     check_timeout_defaults();
+    check_service_name_default();
     check_timeouts_are_parsed();
     check_stall_timeout_is_floored();
     check_stall_timeout_zero_disables();

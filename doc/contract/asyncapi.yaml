@@ -65,11 +65,26 @@ channels:
     description: >
       Retained command request/result topic. The requester publishes the 'init' message;
       the connector advances the state machine (executing -> successful|failed) on the
-      same topic.
+      same topic. Only the connector instance whose configuration defines the device acts
+      on it; every other instance leaves it unanswered (contract §6.5).
     parameters:
       device: { description: thin-edge device entity id segment }
       protocol: { description: protocol module id }
-      verb: { description: command verb, e.g. write, write-batch, set-config }
+      verb: { description: command verb, e.g. write, write-batch }
+      id: { description: unique command instance id }
+    messages:
+      Command:
+        $ref: '#/components/messages/Command'
+
+  serviceCommand:
+    address: 'te/device/main/service/{service}/ot/cmd/{verb}/{id}'
+    description: >
+      Retained request/result topic of the management verbs, addressed to one connector
+      instance by its service name (contract §6.3). Same state machine as 'command';
+      every transition echoes the request's 'origin'.
+    parameters:
+      service: { description: connector service name }
+      verb: { description: 'management verb: set-config, define-device or remove-device' }
       id: { description: unique command instance id }
     messages:
       Command:
@@ -110,6 +125,16 @@ operations:
     action: send
     channel: { $ref: '#/channels/command' }
     summary: Connector reports command progress and result.
+
+  requestServiceCommand:
+    action: receive
+    channel: { $ref: '#/channels/serviceCommand' }
+    summary: Connector receives a management command 'init' request for its service.
+
+  reportServiceCommand:
+    action: send
+    channel: { $ref: '#/channels/serviceCommand' }
+    summary: Connector reports management command progress and result.
 
 components:
   messages:

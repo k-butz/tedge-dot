@@ -111,7 +111,7 @@ typedef struct tdot_device {
 typedef struct tdot_config {
     char *path;
     char *protocol;
-    char *service_name; /* default "tedge-dot" */
+    char *service_name; /* default "tedge-dot-<protocol>" */
     char *log_level;    /* default "info" */
     double poll_interval_s; /* default 2.0 */
 

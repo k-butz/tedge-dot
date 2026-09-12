@@ -1,0 +1,63 @@
+# Multi-instance e2e stack for the Modbus connector: ONE tedge-dot process running ten connector
+# instances (one config file each, see multi-device/device.toml.template) against ten simulated
+# Modbus devices served by one simulator container (SIM_DEVICES, see sim/simulator.py).
+#
+# Every instance of a protocol receives the commands of every other one, so this is the layout in
+# which a command must be acted on by exactly one instance. tests/multi_device_e2e.robot starts it
+# (`Setup OT Stack    modbus    compose_file=...`); keep MULTI_DEVICE_COUNT/SIM_DEVICES in step
+# with that suite's ${DEVICE_COUNT}.
+#
+# Same images as docker-compose.yaml, so a build is reused between the two, and IMPL /
+# CONNECTOR_DOCKERFILE select the implementation under test here too. Ports are published
+# without a fixed host port for the same parallel-safety reason (BROKER_PORT pins it by hand).
+services:
+  broker:
+    image: public.ecr.aws/docker/library/eclipse-mosquitto:2
+    volumes:
+      - ../_shared/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    ports:
+      - target: 1883
+        published: "${BROKER_PORT:-}"
+
+  simulator:
+    build:
+      context: ../..
+      dockerfile: connectors/modbus/sim/Dockerfile
+    environment:
+      SIM_DEVICES: "10"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  connector:
+    image: tedge-dot-${IMPL:-rust}-modbus-connector
+    build:
+      context: ../..
+      dockerfile: ${CONNECTOR_DOCKERFILE:-connectors/modbus/Dockerfile.connector}
+      args:
+        PROTOCOL: modbus
+    environment:
+      MULTI_DEVICE_COUNT: "10"
+    labels:
+      device-test-core.role: main
+    depends_on:
+      broker:
+        condition: service_started
+      simulator:
+        condition: service_healthy
+
+  # The flows engine, so the suite can check that a management command bridged from thin-edge
+  # reaches the one instance it names.
+  flows:
+    build:
+      context: ../..
+      dockerfile: connectors/_shared/Dockerfile.flows
+      args:
+        PROTOCOL: modbus
+    depends_on:
+      broker:
+        condition: service_started

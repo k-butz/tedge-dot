@@ -266,6 +266,7 @@ async fn run(args: RunArgs) -> ExitCode {
     }
 
     warn_duplicate_service_names(&configs);
+    warn_duplicate_devices(&configs);
     let restart_delay = restart_delay_from_env();
 
     // One shutdown trigger shared by every connector: flipped on Ctrl-C / SIGTERM (or when
@@ -494,7 +495,7 @@ fn warn_duplicate_service_names(configs: &[PathBuf]) {
     for path in configs {
         if let Some(connector) = connector_section(path) {
             by_service
-                .entry(connector.service_name)
+                .entry(connector.service_name())
                 .or_default()
                 .push(path.display().to_string());
         }
@@ -508,6 +509,42 @@ fn warn_duplicate_service_names(configs: &[PathBuf]) {
             );
         }
     }
+}
+
+/// Two configs of one protocol defining the same device both own it: both act on its commands
+/// (§6), racing each other's results, and both poll it.
+fn warn_duplicate_devices(configs: &[PathBuf]) {
+    for ((protocol, device), paths) in duplicate_devices(configs) {
+        warn!(
+            "configs {} all define {protocol} device '{device}'; define each device in one \
+             config only or every one of them will answer its commands",
+            paths.join(", ")
+        );
+    }
+}
+
+/// The `(protocol, device)` pairs defined by more than one config, with those configs.
+fn duplicate_devices(configs: &[PathBuf]) -> Vec<((String, String), Vec<String>)> {
+    let mut owners: std::collections::BTreeMap<(String, String), Vec<String>> =
+        std::collections::BTreeMap::new();
+    for path in configs {
+        let Some(config) = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| toml::from_str::<ConnectorConfig>(&text).ok())
+        else {
+            continue;
+        };
+        let path = path.display().to_string();
+        for device in &config.devices {
+            let paths = owners
+                .entry((config.connector.protocol.clone(), device.name.clone()))
+                .or_default();
+            if paths.last() != Some(&path) {
+                paths.push(path.clone());
+            }
+        }
+    }
+    owners.into_iter().filter(|(_, paths)| paths.len() > 1).collect()
 }
 
 /// Per-connector restart backoff, tunable via TEDGE_DOT_RESTART_DELAY (seconds).
@@ -1036,6 +1073,36 @@ mod tests {
 
     fn config_with(connector_section: &str) -> ConnectorConfig {
         toml::from_str(&format!("[connector]\nprotocol = \"modbus\"\n{connector_section}")).unwrap()
+    }
+
+    /// A device two configs of one protocol define would have its commands answered by both
+    /// instances; the same name under different protocols is two different devices.
+    #[test]
+    fn duplicate_devices_are_found_per_protocol() {
+        let dir = std::env::temp_dir().join(format!("tdot-dup-devices-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = |protocol: &str, service: &str, devices: &[&str]| {
+            let mut text =
+                format!("[connector]\nprotocol = \"{protocol}\"\nservice_name = \"{service}\"\n");
+            for device in devices {
+                text.push_str(&format!("[[device]]\nname = \"{device}\"\nprotocol_address = {{}}\n"));
+            }
+            text
+        };
+        let a = write(&dir, "a.toml", &config("modbus", "a", &["plc-1", "plc-2"]));
+        let b = write(&dir, "b.toml", &config("modbus", "b", &["plc-2"]));
+        let c = write(&dir, "c.toml", &config("opcua", "c", &["plc-1"]));
+
+        let duplicates = duplicate_devices(&[a.clone(), b.clone(), c]);
+        assert_eq!(
+            duplicates,
+            vec![(
+                ("modbus".to_string(), "plc-2".to_string()),
+                vec![a.display().to_string(), b.display().to_string()]
+            )]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

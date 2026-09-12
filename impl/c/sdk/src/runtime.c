@@ -250,6 +250,8 @@ static int json_to_value(const cJSON *jv, tdot_value_t *out) {
 static bool is_management_verb(const char *verb);
 static void handle_management(rt_t *rt, const char *topic, const char *verb,
                               const cJSON *req);
+static void publish_status(rt_t *rt, const char *topic, const char *status,
+                           const char *reason, const cJSON *req);
 static char *augmented_capabilities(const char *json, const tdot_config_t *cfg);
 
 static void publish_retained(rt_t *rt, const char *topic, cJSON *obj) {
@@ -414,17 +416,44 @@ static void on_message(struct mosquitto *mosq, void *ud,
     if (!msg->payload || msg->payloadlen == 0)
         return;
 
-    /* Parse topic segments. */
+    /* Parse topic segments. One more than a command topic has, so a longer
+     * topic is told apart from a valid one instead of being truncated into it. */
     char topic[256];
     snprintf(topic, sizeof topic, "%s", msg->topic);
-    char *seg[8] = {0};
+    char *seg[10] = {0};
     int nseg = 0;
-    for (char *p = strtok(topic, "/"); p && nseg < 8; p = strtok(NULL, "/"))
+    for (char *p = strtok(topic, "/"); p && nseg < 10; p = strtok(NULL, "/"))
         seg[nseg++] = p;
-    /* te device <dev> ot <proto> cmd <verb> <id> */
-    if (nseg != 8 || strcmp(seg[5], "cmd") != 0)
+
+    /* Every instance of the protocol on the broker receives every device
+     * command, so each message is routed here (mirrors `route_command` in the
+     * Rust runtime):
+     *   te/device/<dev>/ot/<proto>/cmd/<verb>/<id>        a device THIS config
+     *                                                     defines, else ignored
+     *   te/device/main/service/<svc>/ot/cmd/<verb>/<id>   this service's own
+     *                                                     management commands
+     * A command for a device this instance does not own is left unanswered:
+     * another instance (or process) may own it, and an "unknown device" failure
+     * from here would race that owner's real result. */
+    const char *dev_name = NULL, *verb = NULL;
+    bool service_cmd = false;
+    if (nseg == 8 && !strcmp(seg[0], "te") && !strcmp(seg[1], "device") &&
+        !strcmp(seg[3], "ot") && !strcmp(seg[4], rt->cfg->protocol) &&
+        !strcmp(seg[5], "cmd")) {
+        dev_name = seg[2];
+        verb = seg[6];
+    } else if (nseg == 9 && !strcmp(seg[0], "te") && !strcmp(seg[1], "device") &&
+               !strcmp(seg[2], "main") && !strcmp(seg[3], "service") &&
+               !strcmp(seg[4], rt->cfg->service_name) && !strcmp(seg[5], "ot") &&
+               !strcmp(seg[6], "cmd")) {
+        verb = seg[7];
+        service_cmd = true;
+    } else {
         return;
-    const char *dev_name = seg[2], *verb = seg[6];
+    }
+    tdot_device_t *dev = dev_name ? tdot_config_device(rt->cfg, dev_name) : NULL;
+    if (!service_cmd && !dev)
+        return;
 
     cJSON *req = cJSON_ParseWithLength(msg->payload, (size_t)msg->payloadlen);
     if (!req)
@@ -435,7 +464,31 @@ static void on_message(struct mosquitto *mosq, void *ud,
         return;
     }
 
-    tdot_device_t *dev = tdot_config_device(rt->cfg, dev_name);
+    if (service_cmd || is_management_verb(verb)) {
+        if (service_cmd && is_management_verb(verb)) {
+            handle_management(rt, msg->topic, verb, req);
+        } else {
+            /* A verb on the wrong kind of topic. Refused rather than ignored:
+             * the topic already names this instance as the only addressee. */
+            char reason[TDOT_ERR_MAX];
+            if (service_cmd)
+                snprintf(reason, sizeof reason,
+                         "'%s' is not a service command: only set-config, "
+                         "define-device and remove-device are; device commands "
+                         "go to te/device/<device>/ot/%s/cmd/%s/<id>",
+                         verb, rt->cfg->protocol, verb);
+            else
+                snprintf(reason, sizeof reason,
+                         "management verb '%s' is addressed to the connector "
+                         "service: te/device/main/service/%s/ot/cmd/%s/<id>",
+                         verb, rt->cfg->service_name, verb);
+            publish_status(rt, msg->topic, "failed", reason, req);
+            logmsg("warn", "cmd %s: %s", verb, reason);
+        }
+        cJSON_Delete(req);
+        return;
+    }
+
     if (strcmp(verb, "write") == 0 || strcmp(verb, "write-coil") == 0) {
         /* write-coil is c8y_SetCoil's alias for write (see the Rust module) */
         handle_write(rt, msg->topic, dev_name, dev, req);
@@ -850,6 +903,22 @@ static int apply_management(cJSON *doc, const char *verb, const cJSON *req,
             return -1;
         }
         const char *t = target->valuestring;
+        /* The service name addresses this connector's management commands
+         * (§6.3) and the protocol selects its module: a running instance cannot
+         * take either from a command. Mirrors apply_set_config (Rust). */
+        if (strcmp(t, "connector") == 0) {
+            const char *key =
+                cJSON_GetObjectItemCaseSensitive(config, "service_name") ? "service_name"
+                : cJSON_GetObjectItemCaseSensitive(config, "protocol")   ? "protocol"
+                                                                          : NULL;
+            if (key) {
+                snprintf(reason, rlen,
+                         "set-config cannot change connector.%s: edit the "
+                         "configuration file and restart the connector",
+                         key);
+                return -1;
+            }
+        }
         cJSON *section = NULL;
         if (strcmp(t, "connector") == 0 || strcmp(t, "mqtt") == 0 ||
             strcmp(t, "connection") == 0) {
@@ -899,12 +968,17 @@ static int apply_management(cJSON *doc, const char *verb, const cJSON *req,
     return 0;
 }
 
+/* One transition of a command handled by the runtime itself (management verbs,
+ * refusals). `req` is the request, for its `origin` echo (§6.4): a requester
+ * routing the result back — a bridge flow completing the command on the entity
+ * it was issued for — replays only this retained message. */
 static void publish_status(rt_t *rt, const char *topic, const char *status,
-                           const char *reason) {
+                           const char *reason, const cJSON *req) {
     cJSON *res = cJSON_CreateObject();
     cJSON_AddStringToObject(res, "status", status);
     if (reason)
         cJSON_AddStringToObject(res, "reason", reason);
+    add_origin(res, req);
     publish_retained(rt, topic, res);
     cJSON_Delete(res);
 }
@@ -914,19 +988,19 @@ static void publish_status(rt_t *rt, const char *topic, const char *status,
  * failure the running configuration is kept (and re-configured). */
 static void handle_management(rt_t *rt, const char *topic, const char *verb,
                               const cJSON *req) {
-    publish_status(rt, topic, "executing", NULL);
+    publish_status(rt, topic, "executing", NULL, req);
     char reason[TDOT_ERR_MAX] = "";
     tdot_config_t *cfg = rt->cfg;
 
     if (!cfg->path) {
-        publish_status(rt, topic, "failed", "configuration has no file path to persist to");
+        publish_status(rt, topic, "failed", "configuration has no file path to persist to", req);
         return;
     }
     char *json = tdot_config_root_json(cfg);
     cJSON *doc = json ? cJSON_Parse(json) : NULL;
     free(json);
     if (!doc) {
-        publish_status(rt, topic, "failed", "cannot read the running configuration document");
+        publish_status(rt, topic, "failed", "cannot read the running configuration document", req);
         return;
     }
     cJSON *before = cJSON_Duplicate(doc, 1); /* apply_management mutates `doc` in place */
@@ -936,7 +1010,7 @@ static void handle_management(rt_t *rt, const char *topic, const char *verb,
     cJSON_Delete(before);
     if (rc != 0) {
         cJSON_Delete(doc);
-        publish_status(rt, topic, "failed", reason);
+        publish_status(rt, topic, "failed", reason, req);
         logmsg("warn", "cmd %s: %s", verb, reason);
         return;
     }
@@ -951,7 +1025,7 @@ static void handle_management(rt_t *rt, const char *topic, const char *verb,
     if (!f || fputs(text, f) == EOF || fclose(f) != 0) {
         free(text);
         snprintf(reason, sizeof reason, "cannot write %s: %s", tmp_path, strerror(errno));
-        publish_status(rt, topic, "failed", reason);
+        publish_status(rt, topic, "failed", reason, req);
         return;
     }
     free(text);
@@ -960,7 +1034,7 @@ static void handle_management(rt_t *rt, const char *topic, const char *verb,
     if (!candidate) {
         unlink(tmp_path);
         snprintf(reason, sizeof reason, "resulting config is invalid: %s", err);
-        publish_status(rt, topic, "failed", reason);
+        publish_status(rt, topic, "failed", reason, req);
         logmsg("warn", "cmd %s: %s", verb, reason);
         return;
     }
@@ -982,7 +1056,7 @@ static void handle_management(rt_t *rt, const char *topic, const char *verb,
             cfg->devices[i].link = TDOT_LINK_UNKNOWN;
             connect_device(rt, &cfg->devices[i]);
         }
-        publish_status(rt, topic, "failed", reason);
+        publish_status(rt, topic, "failed", reason, req);
         logmsg("warn", "cmd %s: %s", verb, reason);
         return;
     }
@@ -992,7 +1066,7 @@ static void handle_management(rt_t *rt, const char *topic, const char *verb,
     publish_capabilities(rt); /* point_labels follow the configuration (§7) */
     for (size_t i = 0; i < cfg->ndevices; i++)
         connect_device(rt, &cfg->devices[i]);
-    publish_status(rt, topic, "successful", NULL);
+    publish_status(rt, topic, "successful", NULL, req);
     logmsg("info", "cmd %s: applied and persisted to %s", verb, cfg->path);
 }
 
@@ -1068,9 +1142,15 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
             mosquitto_destroy(rt.mosq);
             return -1;
         }
+        /* Device commands for the whole protocol (on_message keeps the ones
+         * for devices this config defines), and management commands for this
+         * service (contract §6.3, §6.5). */
         char cmd_topic[256];
         snprintf(cmd_topic, sizeof cmd_topic, "te/device/+/ot/%s/cmd/+/+",
                  cfg->protocol);
+        mosquitto_subscribe(rt.mosq, NULL, cmd_topic, 0);
+        snprintf(cmd_topic, sizeof cmd_topic,
+                 "te/device/main/service/%s/ot/cmd/+/+", cfg->service_name);
         mosquitto_subscribe(rt.mosq, NULL, cmd_topic, 0);
         logmsg("info", "connected to MQTT broker %s:%d", cfg->mqtt_host,
                cfg->mqtt_port);
@@ -1387,6 +1467,32 @@ int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
         logmsg("info", "loaded %s (%s)", paths[i], cfg->protocol);
         started++;
     }
+    /* Mirrors the Rust supervisor's warnings: instances sharing a service_name
+     * take over each other's MQTT session, and two of one protocol defining the
+     * same device both own it -- both act on its commands, racing each other's
+     * results. */
+    for (size_t i = 0; i < started; i++) {
+        for (size_t j = i + 1; j < started; j++) {
+            tdot_config_t *a = workers[i].cfg, *b = workers[j].cfg;
+            if (strcmp(a->service_name, b->service_name) == 0)
+                logmsg("warn",
+                       "configs %s and %s share service_name '%s'; give each "
+                       "connector a unique service_name or they will steal "
+                       "each other's MQTT session",
+                       slots[i].name, slots[j].name, a->service_name);
+            if (strcmp(a->protocol, b->protocol) != 0)
+                continue;
+            for (size_t x = 0; x < a->ndevices; x++)
+                if (tdot_config_device(b, a->devices[x].name))
+                    logmsg("warn",
+                           "configs %s and %s both define %s device '%s'; "
+                           "define each device in one config only or both "
+                           "will answer its commands",
+                           slots[i].name, slots[j].name, a->protocol,
+                           a->devices[x].name);
+        }
+    }
+
     if (started == 0) {
         free(workers);
         free(threads);

@@ -24,8 +24,8 @@ modules that run inside a mapper and are hot-reloaded without restarts.
 | [ot-alarm](ot-alarm/) | thin-edge → thin-edge | `m/<group>` | `a/<type>` alarm (hysteresis) |
 | [ot-event](ot-event/) | thin-edge → thin-edge | `m/<group>` | `e/<type>` event (on change) |
 | [ot-registration](ot-registration/) | OT → thin-edge | `ot/<protocol>/status/link` | `te/device/<device>//` child registration (+ optional `twin/<fragment>`) |
-| [ot-command-forward](ot-command-forward/) | thin-edge → OT | `cmd/ot_<verb>/<id>` (incl. `parameter_update`) | `ot/<protocol>/cmd/<verb>/<id>` |
-| [ot-command-result](ot-command-result/) | OT → thin-edge | `ot/<protocol>/cmd/<verb>/<id>` | `cmd/ot_<verb>/<id>` (or the `origin.command`) |
+| [ot-command-forward](ot-command-forward/) | thin-edge → OT | `cmd/ot_<verb>/<id>` (incl. `parameter_update`) | `ot/<protocol>/cmd/<verb>/<id>`, or `service/<service>/ot/cmd/<verb>/<id>` for management verbs |
+| [ot-command-result](ot-command-result/) | OT → thin-edge | `ot/<protocol>/cmd/<verb>/<id>`, `service/<service>/ot/cmd/<verb>/<id>` | `cmd/ot_<verb>/<id>` (or the `origin.command`) |
 | [ot-parameter-state](ot-parameter-state/) | OT → thin-edge | `sample/<point>`, `cmd/write*/<id>`, `status/link` | `twin/<set>` |
 
 The two `ot-command-*` flows form a bidirectional, **verb-neutral** bridge: *forward* turns a
@@ -51,6 +51,14 @@ The `write` verb is implemented by the protocol module; the `set-config`/`define
 `remove-device` management verbs are implemented once by the SDK runtime (it owns the connector
 configuration), so every connector supports them. `ot-command-forward` subscribes to an explicit
 allow-list of `ot_*` command types (add a line to its `flow.toml` to support a new verb).
+
+Management verbs change one connector instance's configuration, so `ot-command-forward` sends
+them to that instance's service topic (`te/device/main/service/<service>/ot/cmd/<verb>/<id>`,
+contract §6.3). The service is the command's `service` field, else `tedge-dot-<protocol>` — the
+default `service_name` of a connector config — so name the service whenever the connector's config
+sets its own `service_name`, e.g. when a gateway runs several connectors of one protocol. A
+command whose `service` is not a plain topic level is **not forwarded**: the flow cannot fail it
+(its output would match its own input), so it stays pending.
 
 **Device parameters** (see [RFC 0003](../doc/rfc/0003-parameter-writes.md)): writable points are
 parameters. `ot-parameter-state` keeps one retained twin fragment per *parameter set*

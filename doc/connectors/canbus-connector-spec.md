@@ -233,7 +233,8 @@ For `cmd/write/<id>` with `status: "init"`:
   - `connected` once the SocketCAN socket opens successfully.
   - `disconnected` if `CanSocket::open()` fails.
   - `degraded` if `recv_frame()` returns an `io::Error` while subscribed.
-- Publish service health on `te/device/main/service/tedge-dot/status/health`.
+- Publish service health on `te/device/main/service/<service>/status/health` (`<service>` is
+  `[connector] service_name`, default `tedge-dot-canbus`).
 
 ---
 
