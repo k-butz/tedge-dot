@@ -76,6 +76,14 @@ char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced);
  * `describe` warns about them. Caller frees. */
 char *tdot_param_untyped_devices(const tdot_config_t *cfg);
 
+/* Warnings about device types that FOLD to the same set-name qualifier --
+ * "acme meter" and "acme-meter" both sanitize to "acme_meter", so their sets
+ * share one tenant-wide identifier and the first definition rendered silently
+ * wins. One message per colliding qualifier, '\n'-separated; NULL when there
+ * are none. Same text as the Rust build's, which describe-parity.sh compares.
+ * Caller frees. */
+char *tdot_param_type_collisions(const tdot_config_t *cfg);
+
 /* Cumulocity Digital Twin Manager property definitions — one per parameter set
  * — as a cJSON array. Each element is the request body of
  * POST /service/dtm/definitions/properties, which a tenant admin registers

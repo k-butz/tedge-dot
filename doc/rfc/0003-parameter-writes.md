@@ -47,11 +47,14 @@ From the connector configuration, rendered on demand for a tenant admin to regis
 
 ```sh
 # One definition per line, and the DTM service takes one per request — a configuration that
-# groups its parameters (§5.2) renders several.
+# groups its parameters (§5.2) renders several. `</dev/null` matters: without it c8y reads the
+# loop's stdin as its own input pipeline and the remaining definitions are never registered.
+tmp=$(mktemp)
 tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact | while read -r definition; do
-    printf '%s' "$definition" > /tmp/dtm-definition.json
-    C8Y_SETTINGS_CI=true c8y api POST /service/dtm/definitions/properties --data @/tmp/dtm-definition.json
+    printf '%s' "$definition" > "$tmp"
+    C8Y_SETTINGS_CI=true c8y api POST /service/dtm/definitions/properties --data "@$tmp" </dev/null
 done
+rm -f "$tmp"
 ```
 
 The device does not push the definition: device users do not hold the DTM roles, and

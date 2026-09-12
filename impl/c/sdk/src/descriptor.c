@@ -215,6 +215,59 @@ char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced) {
     return buf;
 }
 
+char *tdot_param_type_collisions(const tdot_config_t *cfg) {
+    char *buf = NULL;
+    size_t len = 0;
+    /* For each distinct folded qualifier, the raw types that produced it. */
+    for (size_t i = 0; i < cfg->ndevices; i++) {
+        const char *declared = cfg->devices[i].type;
+        if (!declared || !*declared)
+            continue;
+        char *key = tdot_param_set_name(declared, TDOT_PARAM_DEFAULT_GROUP);
+        /* Only report the first device of each folded group, so each collision
+         * is named once (the Rust build reports in the same order). */
+        bool first = true;
+        char *names = NULL;
+        size_t nlen = 0;
+        for (size_t j = 0; j < cfg->ndevices; j++) {
+            const char *other = cfg->devices[j].type;
+            if (!other || !*other)
+                continue;
+            char *other_key = tdot_param_set_name(other, TDOT_PARAM_DEFAULT_GROUP);
+            bool same_key = strcmp(key, other_key) == 0;
+            free(other_key);
+            if (!same_key)
+                continue;
+            if (j < i && strcmp(other, declared) != 0)
+                first = false; /* an earlier device already reported this group */
+            if (j < i && strcmp(other, declared) == 0)
+                first = false; /* this exact type was already seen */
+            char item[280];
+            snprintf(item, sizeof item, "'%s'", other);
+            if (!strstr(names ? names : "", item))
+                append(&names, &nlen, ", ", item);
+        }
+        if (first && names && strchr(names, ',')) {
+            /* Trim the "_control_parameters" suffix: the message names the
+             * qualifier, not one set. */
+            char *suffix = strstr(key, "_" TDOT_PARAM_DEFAULT_GROUP "_parameters");
+            if (suffix)
+                *suffix = '\0';
+            char msg[1024];
+            snprintf(msg, sizeof msg,
+                     "warning: device types %s all name their parameter sets "
+                     "'%s_...', so they share one tenant-wide definition and the "
+                     "first one rendered wins; give them names that differ by "
+                     "more than punctuation",
+                     names, key);
+            append(&buf, &len, "\n", msg);
+        }
+        free(names);
+        free(key);
+    }
+    return buf;
+}
+
 char *tdot_param_untyped_devices(const tdot_config_t *cfg) {
     char *buf = NULL;
     size_t len = 0;
@@ -296,24 +349,31 @@ static cJSON *property_schema(const tdot_point_t *point, const cJSON *options) {
         title = point->name;
     cJSON_AddStringToObject(schema, "title", title ? title : point->id);
 
-    char description[320] = "";
+    /* Heap-built, because `description` and `unit` are arbitrary configured
+     * strings: a fixed buffer would truncate where the Rust SDK does not, and
+     * the two builds must render the same definition. */
     const char *d = opt_string(options, "description");
     if (!d)
         d = point->description;
-    if (d)
-        snprintf(description, sizeof description, "%s", d);
-    if (point->unit) {
-        size_t n = strlen(description);
-        snprintf(description + n, sizeof description - n, "%s[%s]",
-                 n ? " " : "", point->unit);
+    static const char *WRITE_ONLY = "(write-only: shows the last value written)";
+    size_t len = (d ? strlen(d) : 0) +
+                 (point->unit ? strlen(point->unit) + 4 : 0) +
+                 (point->access == TDOT_ACCESS_WRITE ? strlen(WRITE_ONLY) + 1 : 0) + 1;
+    char *description = calloc(1, len);
+    if (description) {
+        size_t n = 0;
+        if (d)
+            n += (size_t)snprintf(description + n, len - n, "%s", d);
+        if (point->unit)
+            n += (size_t)snprintf(description + n, len - n, "%s[%s]",
+                                  n ? " " : "", point->unit);
+        if (point->access == TDOT_ACCESS_WRITE)
+            n += (size_t)snprintf(description + n, len - n, "%s%s", n ? " " : "",
+                                  WRITE_ONLY);
+        if (*description)
+            cJSON_AddStringToObject(schema, "description", description);
+        free(description);
     }
-    if (point->access == TDOT_ACCESS_WRITE) {
-        size_t n = strlen(description);
-        snprintf(description + n, sizeof description - n,
-                 "%s(write-only: shows the last value written)", n ? " " : "");
-    }
-    if (*description)
-        cJSON_AddStringToObject(schema, "description", description);
 
     const cJSON *opt_min = cJSON_GetObjectItemCaseSensitive(options, "min");
     const cJSON *opt_max = cJSON_GetObjectItemCaseSensitive(options, "max");
@@ -338,11 +398,20 @@ static cJSON *property_schema(const tdot_point_t *point, const cJSON *options) {
 }
 
 /* "modbus_control_parameters" -> "Modbus control parameters" (only the first word is
- * capitalized, as in Rust's title_from_key). Writes into `out`. */
-static void title_from_key(const char *key, char *out, size_t outlen) {
+ * capitalized, as in Rust's title_from_key). Caller frees. */
+static char *title_from_key(const char *key) {
+    /* Heap, not a fixed buffer: the key contains the device type (§3.1), which
+     * is an arbitrary configured string. The old fixed buffer both truncated
+     * where Rust does not AND could write its terminator one byte past the end,
+     * because the word-start branch emits two characters in one iteration.
+     * Every input character yields at most one output character ('_' becomes a
+     * single space or nothing), so strlen(key) + 1 always fits. */
     size_t o = 0;
+    char *out = malloc(strlen(key) + 1);
+    if (!out)
+        return NULL;
     bool first_word = true, word_start = true;
-    for (const char *p = key; *p && o + 1 < outlen; p++) {
+    for (const char *p = key; *p; p++) {
         if (*p == '_') {
             if (!word_start) {
                 word_start = true;
@@ -351,7 +420,7 @@ static void title_from_key(const char *key, char *out, size_t outlen) {
             continue;
         }
         if (word_start) {
-            if (!first_word && o + 1 < outlen)
+            if (!first_word)
                 out[o++] = ' ';
             out[o++] = first_word ? (char)toupper((unsigned char)*p) : *p;
             word_start = false;
@@ -360,6 +429,7 @@ static void title_from_key(const char *key, char *out, size_t outlen) {
         out[o++] = *p;
     }
     out[o] = '\0';
+    return out;
 }
 
 cJSON *tdot_c8y_dtm_definitions(const tdot_config_t *cfg, const char *forced) {
@@ -400,15 +470,19 @@ cJSON *tdot_c8y_dtm_definitions(const tdot_config_t *cfg, const char *forced) {
         cJSON *schema = cJSON_AddObjectToObject(doc, "jsonSchema");
         cJSON_AddStringToObject(schema, "$schema",
                                 "http://json-schema.org/draft-07/schema#");
-        char title[256];
-        title_from_key(props->string, title, sizeof title);
-        cJSON_AddStringToObject(schema, "title", title);
-        char description[320];
-        snprintf(description, sizeof description,
-                 "Writable %s points exposed by tedge-dot (generated from the "
-                 "connector configuration)",
-                 cfg->protocol);
-        cJSON_AddStringToObject(schema, "description", description);
+        char *title = title_from_key(props->string);
+        cJSON_AddStringToObject(schema, "title", title ? title : props->string);
+        free(title);
+        static const char *DESC_FMT =
+            "Writable %s points exposed by tedge-dot (generated from the "
+            "connector configuration)";
+        size_t dlen = strlen(DESC_FMT) + strlen(cfg->protocol) + 1;
+        char *description = malloc(dlen);
+        if (description) {
+            snprintf(description, dlen, DESC_FMT, cfg->protocol);
+            cJSON_AddStringToObject(schema, "description", description);
+            free(description);
+        }
         cJSON_AddStringToObject(schema, "type", "object");
 
         /* Properties without an explicit `order` get their 1-based position. */

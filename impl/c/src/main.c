@@ -419,6 +419,7 @@ static int cmd_describe(const args_t *a) {
     }
     cfg->ndevices = keep;
     int rc = 1;
+    char *forced_owned = NULL;
     if (keep == 0 && a->device) {
         fprintf(stderr, "error: no device matches '%s'\n", a->device);
         goto out;
@@ -430,13 +431,21 @@ static int cmd_describe(const args_t *a) {
      * flow: an unset variable in a provisioning script (--set "$PARAM_SET")
      * must not force every point into a nameless set. The Rust build applies
      * the same rule. */
-    const char *forced = a->set;
-    if (forced) {
-        const char *p = forced;
-        while (*p && isspace((unsigned char)*p))
-            p++;
-        if (!*p)
-            forced = NULL;
+    const char *forced = NULL;
+    if (a->set) {
+        /* Trimmed, not just tested for blankness: `--set "$(cat name.txt)"`
+         * carries a trailing newline, and the Rust CLI trims the same way, so
+         * the two must not disagree on a padded value either. */
+        forced_owned = strdup(a->set);
+        const char *start = forced_owned;
+        while (*start && isspace((unsigned char)*start))
+            start++;
+        size_t end = strlen(start);
+        while (end && isspace((unsigned char)start[end - 1]))
+            end--;
+        memmove(forced_owned, start, end);
+        forced_owned[end] = '\0';
+        forced = *forced_owned ? forced_owned : NULL;
     }
 
     char *bad = tdot_param_invalid_keys(cfg, forced);
@@ -463,6 +472,12 @@ static int cmd_describe(const args_t *a) {
         }
     }
 
+    char *collisions = tdot_param_type_collisions(cfg);
+    if (collisions) {
+        fprintf(stderr, "%s\n", collisions);
+        free(collisions);
+    }
+
     cJSON *docs = tdot_c8y_dtm_definitions(cfg, forced);
     if (a->compact) {
         cJSON *doc;
@@ -480,6 +495,7 @@ static int cmd_describe(const args_t *a) {
     rc = 0;
 
 out:
+    free(forced_owned);
     cfg->ndevices = all;
     tdot_config_free(cfg);
     return rc;

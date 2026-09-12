@@ -264,6 +264,46 @@ pub fn devices_without_type(config: &ConnectorConfig) -> Vec<String> {
         .collect()
 }
 
+/// Warnings about device types that *fold* to the same set-name qualifier — `"acme meter"` and
+/// `"acme-meter"` both sanitize to `acme_meter`, so their sets share one tenant-wide identifier
+/// and the first definition silently wins over the second (which is this feature's own failure
+/// mode, one scope down). One message per colliding qualifier, in configuration order.
+///
+/// Deliberately not reported for an absolute `meta.parameter.set` shared by several device
+/// types: that is the documented way to share a set on purpose (§5.2).
+pub fn type_collision_warnings(config: &ConnectorConfig) -> Vec<String> {
+    // sanitized qualifier -> the distinct raw types that produced it
+    let mut folded: Vec<(String, Vec<String>)> = Vec::new();
+    for device in &config.devices {
+        let Some(declared) = device.device_type.as_deref().filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let key = sanitize(declared);
+        match folded.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, types)) => {
+                if !types.iter().any(|t| t == declared) {
+                    types.push(declared.to_string());
+                }
+            }
+            None => folded.push((key, vec![declared.to_string()])),
+        }
+    }
+    folded
+        .into_iter()
+        .filter(|(_, types)| types.len() > 1)
+        .map(|(key, types)| {
+            let names: Vec<String> = types.iter().map(|t| format!("'{t}'")).collect();
+            format!(
+                "warning: device types {} all name their parameter sets '{}_...', so they \
+                 share one tenant-wide definition and the first one rendered wins; give them \
+                 names that differ by more than punctuation",
+                names.join(", "),
+                key
+            )
+        })
+        .collect()
+}
+
 /// Parameter ids (and set names) that cannot be used as fragment keys.
 pub fn invalid_keys(config: &ConnectorConfig, forced: Option<&str>) -> Vec<String> {
     parameters(config, forced)
@@ -644,6 +684,22 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
         }
         // ...and opting out still beats every list.
         assert!(sets(&point("meta = { parameter = false }")).is_empty());
+    }
+
+    /// Two device types that differ only in punctuation fold to one qualifier, so their sets
+    /// collide exactly as two protocols' did before this feature — `describe` says so.
+    #[test]
+    fn folded_device_types_are_warned_about() {
+        let mut c = cfg();
+        assert!(type_collision_warnings(&c).is_empty());
+        c.devices[1].device_type = Some("acme boiler v2".into()); // vs plc1's "acme-boiler-v2"
+        let warnings = type_collision_warnings(&c);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("'acme-boiler-v2', 'acme boiler v2'"), "{}", warnings[0]);
+        assert!(warnings[0].contains("acme_boiler_v2_..."), "{}", warnings[0]);
+        // The same type twice is one device type, not a collision.
+        c.devices[1].device_type = Some("acme-boiler-v2".into());
+        assert!(type_collision_warnings(&c).is_empty());
     }
 
     #[test]

@@ -1,0 +1,23 @@
+# Two device types that differ only in punctuation, so they fold to one set-name qualifier.
+# `describe` must warn about it identically from either build — this fixture is what makes the
+# parity script's stderr comparison cover the collision warning as well as the untyped one.
+[connector]
+protocol = "modbus"
+[[device]]
+name = "d1"
+type = "acme meter"
+protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id = 1 }
+  [[device.point]]
+  id = "p1"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 1, count = 1 }
+[[device]]
+name = "d2"
+type = "acme-meter"
+protocol_address = { transport = "tcp", host = "127.0.0.2", port = 502, unit_id = 1 }
+  [[device.point]]
+  id = "p2"
+  datatype = "bool"
+  access = "read_write"
+  address = { table = "coil", address = 1, count = 1 }

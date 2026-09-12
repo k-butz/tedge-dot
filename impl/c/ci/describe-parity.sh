@@ -76,7 +76,12 @@ if [ ${#configs[@]} -eq 0 ]; then
              # warning instead of two empty files (§5.2).
              "$repo"/impl/c/ci/fixtures/untyped-modbus.toml
              # Degenerate meta.parameter shapes (lists, empty lists, junk entries).
-             "$repo"/impl/c/ci/fixtures/parameter-shapes-modbus.toml)
+             "$repo"/impl/c/ci/fixtures/parameter-shapes-modbus.toml
+             # Long type/labels: the C build used to truncate the rendered title and
+             # description where Rust does not (and overflowed a fixed title buffer).
+             "$repo"/impl/c/ci/fixtures/long-strings-modbus.toml
+             # Two device types folding to one qualifier: exercises the collision warning.
+             "$repo"/impl/c/ci/fixtures/folded-types-modbus.toml)
 fi
 
 # stdout is the JSON and stderr carries diagnostics (a config with no device `type` is
@@ -103,16 +108,18 @@ compare_run() {
         fail=1
         return
     fi
+    if [ "$rust_rc" != 0 ]; then
+        # Both refused it, which is the part that has to match. The wording does not: the two
+        # CLIs phrase and prefix their load errors differently, by design.
+        echo "OK   $name: both rejected it"
+        return
+    fi
     # Diagnostics are part of the CLI contract too: the untyped-device warning (§5.2) must read
     # the same from either binary, or a user gets different advice depending on the package.
     if ! diff -u "$rust_errs" "$c_errs" >/dev/null; then
         echo "FAIL $name: the two binaries print different diagnostics:" >&2
         diff -u "$rust_errs" "$c_errs" >&2 || true
         fail=1
-        return
-    fi
-    if [ "$rust_rc" != 0 ]; then
-        echo "OK   $name: both rejected it identically"
         return
     fi
     if ! NAME="$name" RUST_OUT="$rust_out" C_OUT="$c_out" python3 "$compare"; then
@@ -128,7 +135,7 @@ done
 # means "not given" (an unset variable in a provisioning script). Both are easy to get subtly
 # different between the two CLIs, and neither is exercised by the plain runs above.
 if [ $# -eq 0 ]; then
-    for forced in "plant_settings" "" "  "; do
+    for forced in "plant_settings" "  plant_settings  " "" "  "; do
         compare_run "demo/config/modbus.toml --set '$forced'" \
             "$repo/demo/config/modbus.toml" --set "$forced"
     done

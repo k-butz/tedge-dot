@@ -291,7 +291,9 @@ static int do_write(rt_t *rt, tdot_device_t *dev, const char *dev_name,
  * parameter set an acknowledged write belongs to (§5.2), instead of guessing
  * the default one and retaining a fragment no definition matches. */
 static void add_origin(cJSON *out, const cJSON *req) {
-    const cJSON *origin = cJSON_GetObjectItem(req, "origin");
+    /* Case-sensitive, like the Rust runtime's `json.get("origin")`: a request
+     * carrying "Origin" must be ignored by both, not echoed by one. */
+    const cJSON *origin = cJSON_GetObjectItemCaseSensitive(req, "origin");
     if (origin)
         cJSON_AddItemToObject(out, "origin", cJSON_Duplicate(origin, 1));
 }
@@ -447,9 +449,9 @@ static void on_message(struct mosquitto *mosq, void *ud,
         char reason[TDOT_ERR_MAX];
         snprintf(reason, sizeof reason, "unsupported verb: %s", verb);
         cJSON_AddStringToObject(res, "reason", reason);
-        /* §6.4: EVERY transition echoes the request's origin, this one included --
-         * the requester's correlation data must come back even when the verb
-         * was refused. */
+        /* The origin echo applies to this refusal too: the requester's
+         * correlation data must come back even when the verb was not
+         * recognised, so a consumer can still tell which request failed. */
         add_origin(res, req);
         logmsg("warn", "cmd %s %s: unsupported verb", verb, dev_name);
         publish_retained(rt, msg->topic, res);

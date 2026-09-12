@@ -883,6 +883,9 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
             );
         }
     }
+    for warning in tedge_dot_sdk::descriptor::type_collision_warnings(&config) {
+        eprintln!("{warning}");
+    }
     let docs: Vec<serde_json::Value> = match args.format {
         DescribeFormat::C8yDtm => tedge_dot_sdk::c8y_dtm_definitions(&config, forced),
     };
