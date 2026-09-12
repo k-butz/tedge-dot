@@ -871,7 +871,7 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
     if forced.is_none() {
         // Worded and shaped exactly like the C build's warning (impl/c/src/main.c): the two
         // CLIs are meant to be interchangeable, and `describe-parity.sh` compares stderr.
-        for warning in tedge_dot_sdk::descriptor::type_collision_warnings(&config) {
+        for warning in tedge_dot_sdk::descriptor::type_warnings(&config) {
             eprintln!("{warning}");
         }
         let untyped = tedge_dot_sdk::descriptor::devices_without_type(&config);

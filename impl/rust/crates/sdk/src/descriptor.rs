@@ -264,7 +264,10 @@ pub fn devices_without_type(config: &ConnectorConfig) -> Vec<String> {
         .collect()
 }
 
-/// Warnings about device types that produce the *same* set names — `"acme meter"` and
+/// Warnings about the device types a configuration declares: types that produce the *same* set
+/// names, and types that produce no usable name at all.
+///
+/// The collision case — `"acme meter"` and
 /// `"acme-meter"` both give `acme_meter_control_parameters`, so their sets share one
 /// tenant-wide definition and the first one rendered silently wins, which is this feature's own
 /// failure mode one scope down.
@@ -275,13 +278,29 @@ pub fn devices_without_type(config: &ConnectorConfig) -> Vec<String> {
 ///
 /// Deliberately not reported for an absolute `meta.parameter.set` shared by several device
 /// types: that is the documented way to share a set on purpose (§5.2).
-pub fn type_collision_warnings(config: &ConnectorConfig) -> Vec<String> {
+pub fn type_warnings(config: &ConnectorConfig) -> Vec<String> {
+    let mut warnings: Vec<String> = Vec::new();
     // representative set name -> the distinct raw types that derive it
     let mut folded: Vec<(String, Vec<String>)> = Vec::new();
     for device in &config.devices {
         let Some(declared) = device.device_type.as_deref().filter(|t| !t.is_empty()) else {
             continue;
         };
+        // A type with nothing usable in it (`"日本語"`, `"---"`) folds away entirely and the
+        // sets are named `_control_parameters` — which every such type shares, silently.
+        if !declared.bytes().any(|b| b.is_ascii_alphanumeric()) {
+            warnings.push(format!(
+                "warning: device type '{declared}' has no [A-Za-z0-9] character, so its \
+                 parameter sets are named '{}' with nothing to tell them apart from another \
+                 such type's; name the type in ASCII",
+                set_name(declared, DEFAULT_GROUP)
+            ));
+        }
+        // A device with no parameters derives no set, so it cannot collide with anything.
+        let naming = SetNaming::of(device, &config.connector.protocol, None);
+        if !device.points.iter().any(|p| !parameters_of(p, &naming).is_empty()) {
+            continue;
+        }
         let key = set_name(declared, DEFAULT_GROUP);
         match folded.iter_mut().find(|(k, _)| *k == key) {
             Some((_, types)) => {
@@ -292,7 +311,7 @@ pub fn type_collision_warnings(config: &ConnectorConfig) -> Vec<String> {
             None => folded.push((key, vec![declared.to_string()])),
         }
     }
-    folded
+    warnings.extend(folded
         .into_iter()
         .filter(|(_, types)| types.len() > 1)
         .map(|(key, types)| {
@@ -304,8 +323,8 @@ pub fn type_collision_warnings(config: &ConnectorConfig) -> Vec<String> {
                 names.join(", "),
                 key
             )
-        })
-        .collect()
+        }));
+    warnings
 }
 
 /// Parameter ids (and set names) that cannot be used as fragment keys.
@@ -693,11 +712,11 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
     /// Two device types that differ only in punctuation fold to one qualifier, so their sets
     /// collide exactly as two protocols' did before this feature — `describe` says so.
     #[test]
-    fn folded_device_types_are_warned_about() {
+    fn device_type_problems_are_warned_about() {
         let mut c = cfg();
-        assert!(type_collision_warnings(&c).is_empty());
+        assert!(type_warnings(&c).is_empty());
         c.devices[1].device_type = Some("acme boiler v2".into()); // vs plc1's "acme-boiler-v2"
-        let warnings = type_collision_warnings(&c);
+        let warnings = type_warnings(&c);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("'acme-boiler-v2', 'acme boiler v2'"), "{}", warnings[0]);
         // Named by the set the two actually derive, not by a separately-computed qualifier —
@@ -710,14 +729,29 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
         );
         // The same type twice is one device type, not a collision.
         c.devices[1].device_type = Some("acme-boiler-v2".into());
-        assert!(type_collision_warnings(&c).is_empty());
+        assert!(type_warnings(&c).is_empty());
         // A trailing separator folds into the same name: 'acme-boiler-v2-' collides too.
         c.devices[1].device_type = Some("acme-boiler-v2-".into());
-        assert_eq!(type_collision_warnings(&c).len(), 1);
+        assert_eq!(type_warnings(&c).len(), 1);
         // A type containing a comma is one type, not two.
         c.devices[0].device_type = Some("Acme, Inc. Meter".into());
         c.devices[1].device_type = None;
-        assert!(type_collision_warnings(&c).is_empty());
+        assert!(type_warnings(&c).is_empty());
+
+        // A type with nothing usable in it folds away entirely, which every such type shares.
+        c.devices[0].device_type = Some("日本語".into());
+        let warnings = type_warnings(&c);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("no [A-Za-z0-9] character"), "{}", warnings[0]);
+
+        // A device that exposes no parameters derives no set, so it cannot collide.
+        let mut none = cfg();
+        none.devices[1].device_type = Some("acme boiler v2".into());
+        for point in &mut none.devices[1].points {
+            point.access = Some("read".into());
+            point.meta = None;
+        }
+        assert!(type_warnings(&none).is_empty());
     }
 
     #[test]

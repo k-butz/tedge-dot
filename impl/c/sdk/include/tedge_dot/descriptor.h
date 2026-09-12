@@ -76,13 +76,19 @@ char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced);
  * `describe` warns about them. Caller frees. */
 char *tdot_param_untyped_devices(const tdot_config_t *cfg);
 
-/* Warnings about device types that FOLD to the same set-name qualifier --
- * "acme meter" and "acme-meter" both sanitize to "acme_meter", so their sets
- * share one tenant-wide identifier and the first definition rendered silently
- * wins. One message per colliding qualifier, '\n'-separated; NULL when there
- * are none. Same text as the Rust build's, which describe-parity.sh compares.
- * Caller frees. */
-char *tdot_param_type_collisions(const tdot_config_t *cfg);
+/* Warnings about the device types a configuration declares, '\n'-separated;
+ * NULL when there are none. Same text as the Rust build's type_warnings(),
+ * which describe-parity.sh compares. Caller frees.
+ *
+ *  - types that derive the SAME set names ("acme meter" and "acme-meter" both
+ *    give acme_meter_control_parameters), so their sets share one tenant-wide
+ *    identifier and the first definition rendered silently wins. Grouped and
+ *    displayed by the set name they derive -- never by a separately computed
+ *    "qualifier", which is how the two builds drifted apart once;
+ *  - a type with no [A-Za-z0-9] character at all, which folds away entirely.
+ *
+ * Devices that expose no parameters derive no set and are not reported. */
+char *tdot_param_type_warnings(const tdot_config_t *cfg);
 
 /* Cumulocity Digital Twin Manager property definitions — one per parameter set
  * — as a cJSON array. Each element is the request body of

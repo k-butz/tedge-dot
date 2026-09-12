@@ -45,3 +45,15 @@ protocol_address = { transport = "tcp", host = "127.0.0.4", port = 502, unit_id 
   datatype = "uint16"
   access = "read_write"
   address = { table = "holding", address = 4, count = 1 }
+
+# A type with no [A-Za-z0-9] character folds away to nothing, so its sets are named
+# "_control_parameters" — shared silently with every other such type. Both builds warn.
+[[device]]
+name = "d5"
+type = "---"
+protocol_address = { transport = "tcp", host = "127.0.0.5", port = 502, unit_id = 1 }
+  [[device.point]]
+  id = "p5"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 5, count = 1 }

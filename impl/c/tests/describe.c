@@ -151,6 +151,9 @@ static void check_type_collisions(void) {
         {"acme-boiler-v2", "acme-boiler-v2-", 1, NULL}, /* trailing separator folds in */
         {"Acme, Inc. Meter", NULL, 0, NULL},           /* a comma is not two types */
         {"acme-boiler-v2", "other-type", 0, NULL},
+        /* Nothing usable in the type: it folds away entirely. */
+        {"日本語", NULL, 1, "no [A-Za-z0-9] character"},
+        {"---", NULL, 1, "no [A-Za-z0-9] character"},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
         char body[2048];
@@ -180,7 +183,7 @@ static void check_type_collisions(void) {
             CHECK(false, "case %zu did not load: %s", i, err);
             continue;
         }
-        char *warning = tdot_param_type_collisions(cfg);
+        char *warning = tdot_param_type_warnings(cfg);
         CHECK((warning != NULL) == (cases[i].want != 0),
               "case %zu ('%s' vs '%s'): warning=%s", i, cases[i].a,
               cases[i].b ? cases[i].b : "<none>", warning ? warning : "<none>");

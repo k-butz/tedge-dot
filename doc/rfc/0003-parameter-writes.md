@@ -49,13 +49,16 @@ From the connector configuration, rendered on demand for a tenant admin to regis
 # One definition per line, and the DTM service takes one per request — a configuration that
 # groups its parameters (§5.2) renders several. `</dev/null` matters: without it c8y reads the
 # loop's stdin as its own input pipeline and the remaining definitions are never registered.
-tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact | while read -r definition; do
-    printf '%s' "$definition" > "$tmp"
-    C8Y_SETTINGS_CI=true c8y api POST /service/dtm/definitions/properties --data "@$tmp" </dev/null ||
+defs=$(mktemp) one=$(mktemp)
+trap 'rm -f "$defs" "$one"' EXIT
+tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact > "$defs"
+# Read from a file, not a pipe: a `while` on the right of a pipe runs in a subshell, where
+# `exit 1` would abort only the loop and leave the script reporting success.
+while read -r definition; do
+    printf '%s' "$definition" > "$one"
+    C8Y_SETTINGS_CI=true c8y api POST /service/dtm/definitions/properties --data "@$one" </dev/null ||
         exit 1   # stop at the first rejected definition rather than reporting only the last
-done
+done < "$defs"
 ```
 
 The device does not push the definition: device users do not hold the DTM roles, and

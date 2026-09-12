@@ -140,6 +140,12 @@ if [ $# -eq 0 ]; then
         compare_run "demo/config/modbus.toml --set '$forced'" \
             "$repo/demo/config/modbus.toml" --set "$forced"
     done
+    # `-d` filters the devices, and the warnings are computed on what survives the filter —
+    # the two CLIs implement that filter differently (retain vs swap-to-front).
+    for glob in "d1" "d*" "nomatch"; do
+        compare_run "folded-types-modbus.toml -d '$glob'" \
+            "$repo/impl/c/ci/fixtures/folded-types-modbus.toml" -d "$glob"
+    done
 fi
 
 if [ "$fail" != 0 ]; then

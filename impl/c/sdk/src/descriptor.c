@@ -215,7 +215,7 @@ char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced) {
     return buf;
 }
 
-char *tdot_param_type_collisions(const tdot_config_t *cfg) {
+char *tdot_param_type_warnings(const tdot_config_t *cfg) {
     /* Grouped by the set name the types actually derive -- the same string the
      * Rust build groups and displays by, so there is no second notion of
      * "qualifier" for the two to disagree about. Everything here is heap-built:
@@ -228,9 +228,49 @@ char *tdot_param_type_collisions(const tdot_config_t *cfg) {
     } *groups = NULL;
     size_t ngroups = 0;
 
+    char *buf = NULL;
+    size_t len = 0;
+
     for (size_t i = 0; i < cfg->ndevices; i++) {
         const char *declared = cfg->devices[i].type;
         if (!declared || !*declared)
+            continue;
+        /* A type with nothing usable in it ("日本語", "---") folds away entirely
+         * and the sets are named "_control_parameters" -- which every such type
+         * shares, silently. */
+        bool usable = false;
+        for (const char *p = declared; *p; p++)
+            if (isalnum((unsigned char)*p)) {
+                usable = true;
+                break;
+            }
+        if (!usable) {
+            char *derived =
+                tdot_param_set_name(declared, TDOT_PARAM_DEFAULT_GROUP);
+            static const char *UNUSABLE_FMT =
+                "warning: device type '%s' has no [A-Za-z0-9] character, so its "
+                "parameter sets are named '%s' with nothing to tell them apart "
+                "from another such type's; name the type in ASCII";
+            size_t ulen =
+                strlen(UNUSABLE_FMT) + strlen(declared) + strlen(derived) + 1;
+            char *msg = malloc(ulen);
+            if (msg) {
+                snprintf(msg, ulen, UNUSABLE_FMT, declared, derived);
+                append(&buf, &len, "\n", msg);
+                free(msg);
+            }
+            free(derived);
+        }
+        /* A device with no parameters derives no set, so it cannot collide. */
+        tdot_set_naming_t naming =
+            tdot_param_naming(&cfg->devices[i], cfg->protocol, NULL);
+        bool has_parameters = false;
+        for (size_t j = 0; j < cfg->devices[i].npoints; j++)
+            if (tdot_param_is(&cfg->devices[i].points[j], &naming)) {
+                has_parameters = true;
+                break;
+            }
+        if (!has_parameters)
             continue;
         char *key = tdot_param_set_name(declared, TDOT_PARAM_DEFAULT_GROUP);
         struct group *g = NULL;
@@ -264,8 +304,6 @@ char *tdot_param_type_collisions(const tdot_config_t *cfg) {
         "warning: device types %s derive the same parameter set names (e.g. "
         "'%s'), so they share one tenant-wide definition and the first one "
         "rendered wins; give them names that differ by more than punctuation";
-    char *buf = NULL;
-    size_t len = 0;
     for (size_t k = 0; k < ngroups; k++) {
         /* More than one DISTINCT type is the collision -- counted, never
          * inferred from the rendered text (a type may contain a comma). */

@@ -460,7 +460,7 @@ static int cmd_describe(const args_t *a) {
      * shared with every other device type that speaks it. Declaring the device
      * type is what keeps them apart. */
     if (!forced) {
-        char *collisions = tdot_param_type_collisions(cfg);
+        char *collisions = tdot_param_type_warnings(cfg);
         if (collisions) {
             fprintf(stderr, "%s\n", collisions);
             free(collisions);

@@ -392,6 +392,21 @@ OPTOUT='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","type":"acme-boiler-v2"
 check_empty "parameter-state: origin.set cannot resurrect an opted-out point" ot-parameter-state \
   "[te/device/plc1/ot/modbus/sample/hidden_rw] $OPTOUT"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--8] {\"status\":\"successful\",\"results\":[{\"point\":\"hidden_rw\",\"status\":\"successful\",\"value\":2}],\"origin\":{\"command\":\"parameter_update\",\"set\":\"acme_boiler_v2_control_parameters\"}}"
 
+# A set name becomes a twin fragment key AND a topic segment, and `origin.set` comes from the
+# cloud (the c8y operation fragment). `#`/`+` would be an illegal PUBLISH topic and a name with
+# `/` would publish outside te/<device>///twin/ — so an unusable name falls back to the derived
+# set, which is the rule `tedge-dot describe` already refuses to render without.
+for BAD_SET in '#' '+' 'a/b' 'evil/../../cmd/software_update/x' 'dotted.name' ''; do
+  check "parameter-state: a cloud set name of '$BAD_SET' cannot reach the topic" ot-parameter-state \
+    "[te/device/plc1/ot/modbus/cmd/write-batch/ot--9] {\"status\":\"successful\",\"results\":[{\"point\":\"valve_cmd\",\"status\":\"successful\",\"value\":true}],\"origin\":{\"command\":\"parameter_update\",\"set\":\"$BAD_SET\"}}" \
+    '[te/device/plc1///twin/modbus_control_parameters] {"valve_cmd":true}'
+done
+# The same rule applies to a set name the connector echoes from its own configuration.
+SBADSET='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"p","mode":"typed","datatype":"uint16","value":1,"value_repr":"number","raw":"0001","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"set":"a/b"}}}'
+check "parameter-state: an unusable meta.parameter.set falls back to the derived name" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/p] $SBADSET" \
+  '[te/device/plc1///twin/modbus_control_parameters] {"p":1}'
+
 # --- ot-command-forward: parameter_update -> write-batch ---
 C8YOP='{"status":"init","operation":{"deviceId":"123","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_acme_boiler_v2_control_parameters":{},"acme_boiler_v2_control_parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
 check "command-forward: c8y parameter update -> one write-batch with origin + mapper metadata" ot-command-forward \

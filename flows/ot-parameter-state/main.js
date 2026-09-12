@@ -83,13 +83,25 @@ function setFor(names, group) {
   return sanitize(`${names.qualifier}_${group || DEFAULT_GROUP}_parameters`);
 }
 
-// The names a `set`/`group` option holds: one string, or an array of them. Empty and
-// non-string entries are ignored, so a mistyped entry degrades to the default group rather
+// A set name becomes BOTH a twin fragment key and a segment of the topic it is published on,
+// so it must be a plain identifier — the same rule `tedge-dot describe` refuses to render
+// without (descriptor.rs::is_valid_key). Enforced here because an absolute set name can come
+// from outside the device: `origin.set` is derived from the Cumulocity operation fragment the
+// cloud sent. Unchecked, `#` or `+` would make an illegal PUBLISH topic and a name with `/`
+// would publish outside te/<device>///twin/.
+function isValidSet(name) {
+  return /^[A-Za-z0-9_]+$/.test(name);
+}
+
+// The names a `set`/`group` option holds: one string, or an array of them. Empty, non-string
+// and unusable entries are ignored, so a mistyped entry degrades to the default group rather
 // than inventing a set name. Mirrors descriptor.rs::names_of / descriptor.c::names_of.
-function namesOf(value) {
+function namesOf(value, validate) {
   const out = [];
   for (const name of Array.isArray(value) ? value : [value]) {
-    if (typeof name === "string" && name && !out.includes(name)) out.push(name);
+    if (typeof name !== "string" || !name || out.includes(name)) continue;
+    if (validate && !isValidSet(name)) continue;
+    out.push(name);
   }
   return out;
 }
@@ -98,7 +110,9 @@ function namesOf(value) {
 // can appear on several operator screens and its value reaches each of their fragments.
 // `set` is absolute and wins over `group`. Mirrors SetNaming::sets_of in both SDKs.
 function setsOf(options, names) {
-  const absolute = namesOf(options.set);
+  // An absolute name is used verbatim, so it is the one that has to be checked; a group name
+  // is folded into a derived name and cannot produce anything but [A-Za-z0-9_].
+  const absolute = namesOf(options.set, true);
   if (absolute.length) return absolute;
   if (names.forced) return [names.forced];
   const groups = namesOf(options.group);
@@ -116,7 +130,8 @@ function setsOf(options, names) {
 function setsFromSample(sample, names) {
   const mp = sample.meta?.parameter;
   if (mp === false) return false;
-  if (typeof mp === "string" && mp) return [mp]; // a bare string names the set, absolutely
+  // A bare string names the set, absolutely.
+  if (typeof mp === "string" && mp) return isValidSet(mp) ? [mp] : [setFor(names)];
   if (mp && typeof mp === "object" && !Array.isArray(mp)) return setsOf(mp, names);
   if (mp === undefined || mp === null) return canWrite(sample.access) ? [setFor(names)] : false;
   return [setFor(names)]; // `true`, or any other scalar
@@ -205,7 +220,7 @@ export function onMessage(message, context) {
   // Recorded, never overriding what a sample already established.
   if (kind === "cmd") {
     const set = payload.origin?.set;
-    if (typeof set === "string" && set) {
+    if (typeof set === "string" && isValidSet(set)) {
       for (const point of writtenPoints(parts[6], payload)) {
         // A missing key reads back as undefined or null depending on the runtime; `false` is a
         // real value (an opted-out point) and must not be overwritten.

@@ -181,6 +181,11 @@ Set names change, which matters to anyone who registered the old ones:
 tedge mqtt pub -r -q 1 'te/device/plc1///twin/modbus_parameters' ''
 ```
 
+A write-only parameter is the one value that does not follow a live `type` change at all: the
+flow records its set when the write is acknowledged and never re-derives it (the point produces
+no samples to correct it), so it keeps publishing to the pre-change set until the mapper
+restarts.
+
 The same applies when a `type` changes on a *running* connector (`set-config`, `define-device`):
 the sets are renamed from the next publish, the fragment under the old name stays retained until
 it is cleared the same way, and `ot-registration` — which registers a device once per mapper
