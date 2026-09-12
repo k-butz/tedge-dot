@@ -799,7 +799,16 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
     cfg->protocol = d.u.s;
 
     d = toml_string_in(conn, "service_name");
-    cfg->service_name = d.ok ? d.u.s : strdup("tedge-dot");
+    if (d.ok) {
+        cfg->service_name = d.u.s;
+    } else {
+        /* tedge-dot-<protocol>, like the Rust SDK: connectors of different
+         * protocols run from one directory by default and must not share a
+         * service, and the name addresses their management commands (§6.3). */
+        size_t n = strlen(cfg->protocol) + sizeof "tedge-dot-";
+        cfg->service_name = malloc(n);
+        snprintf(cfg->service_name, n, "tedge-dot-%s", cfg->protocol);
+    }
     d = toml_string_in(conn, "log_level");
     cfg->log_level = d.ok ? d.u.s : strdup("info");
 

@@ -61,7 +61,9 @@ up naturally. `<device>` is the thin-edge entity id segment for the device
 
 Notes:
 
-- `<service>` is the connector service name (default `tedge-dot`).
+- `<service>` is the connector service name (`[connector] service_name`, default
+  `tedge-dot-<protocol>`). It addresses the connector's management commands (§6.3), so it
+  must be unique on the broker and cannot be changed by `set-config`.
 - Samples MUST NOT be retained; they are time series.
 - Status, capability, and command messages MUST be retained so late subscribers and the
   command state machine observe the latest state.
@@ -86,7 +88,7 @@ future protocol.
 
 [connector]
 protocol      = "<protocol>"    # protocol module id (MUST match a compiled-in module)
-service_name  = "tedge-dot"
+service_name  = "tedge-dot-modbus"
 poll_interval = "2s"            # default poll interval (duration string); per-point override allowed
 log_level     = "info"
 operation_timeout = "30s"       # optional: upper bound on one protocol-module call (§8.1)
@@ -629,6 +631,9 @@ Request (`status: "init"`):
   single device's fields (its `point` list is left untouched unless included).
 - `config` is deep-merged into the target section (objects merge recursively; scalars and arrays
   replace).
+- The runtime rejects (`failed`) a `connector` patch that sets `service_name` or `protocol`: the
+  service name is the address of the management commands themselves, and the protocol selects the
+  module. Both change only by editing the configuration file and restarting the connector.
 - The runtime rejects (`failed`) a patch that produces an invalid configuration.
 
 #### `define-device` — add or replace a device

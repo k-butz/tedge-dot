@@ -21,8 +21,10 @@ pub struct ConnectorConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConnectorSection {
     pub protocol: String,
-    #[serde(default = "default_service_name")]
-    pub service_name: String,
+    /// The configured service name; read it through [`ConnectorSection::service_name`], which
+    /// applies the default.
+    #[serde(rename = "service_name", default)]
+    pub configured_service_name: Option<String>,
     #[serde(default = "default_poll_interval")]
     pub poll_interval: String,
     #[serde(default = "default_log_level")]
@@ -147,8 +149,17 @@ impl PointConfig {
     }
 }
 
-fn default_service_name() -> String {
-    "tedge-dot".to_string()
+impl ConnectorSection {
+    /// The connector's service name: `service_name` as configured, else `tedge-dot-<protocol>`.
+    ///
+    /// The default carries the protocol because connectors of different protocols run from one
+    /// configuration directory and must not share a service (health, capability descriptor and
+    /// the management command topic, contract §6.3, all hang off it).
+    pub fn service_name(&self) -> String {
+        self.configured_service_name
+            .clone()
+            .unwrap_or_else(|| format!("tedge-dot-{}", self.protocol))
+    }
 }
 fn default_poll_interval() -> String {
     "2s".to_string()

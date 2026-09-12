@@ -54,12 +54,11 @@ allow-list of `ot_*` command types (add a line to its `flow.toml` to support a n
 
 Management verbs change one connector instance's configuration, so `ot-command-forward` sends
 them to that instance's service topic (`te/device/main/service/<service>/ot/cmd/<verb>/<id>`,
-contract §6.3). The service is the command's `service` field; without one, the only connector
-service whose capability descriptor reports the command's protocol; and before any descriptor was
-seen, `tedge-dot-<protocol>`. A command that names no service while several services run its
-protocol, or names one that is not a plain topic level, is **not forwarded** — the flow cannot fail
-it (its output would match its own input), so it stays pending: name the service when a gateway
-runs several connectors of one protocol.
+contract §6.3). The service is the command's `service` field, else `tedge-dot-<protocol>` — the
+default `service_name` of a connector config — so name the service whenever the connector's config
+sets its own `service_name`, e.g. when a gateway runs several connectors of one protocol. A
+command whose `service` is not a plain topic level is **not forwarded**: the flow cannot fail it
+(its output would match its own input), so it stays pending.
 
 **Device parameters** (see [RFC 0003](../doc/rfc/0003-parameter-writes.md)): writable points are
 parameters. `ot-parameter-state` keeps one retained twin fragment per *parameter set*

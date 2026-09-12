@@ -490,23 +490,12 @@ check "command-forward: remove-device keeps the requester's origin and adds the 
   '[te/device/main/service/tedge-dot-modbus/ot/cmd/remove-device/ot--r1] {"status":"init","device":"plc-9","origin":{"ticket":7,"device":"gw1"}}'
 check_empty "command-forward: a service that is not a topic level is not forwarded" ot-command-forward \
   '[te/device/main///cmd/ot_define_device/d2] {"status":"init","service":"+","device":{"name":"plc-9"}}'
-# A command naming no service goes to the connector service the capability descriptors show for
-# its protocol, whatever that service is called; with several, it is not guessed.
-CAPS_A='[te/device/main/service/plant-a/ot/capabilities] {"protocol":"modbus","command_verbs":["write"]}'
-CAPS_B='[te/device/main/service/plant-b/ot/capabilities] {"protocol":"modbus","command_verbs":["write"]}'
-CAPS_OPC='[te/device/main/service/opc-gw/ot/capabilities] {"protocol":"opcua","command_verbs":["write"]}'
-SETCFG='[te/device/main///cmd/ot_set_config/cfg2] {"status":"init","target":"connector","config":{"poll_interval":"5s"}}'
-check "command-forward: management command naming no service goes to the only service of its protocol" ot-command-forward \
-  "$CAPS_A"$'\n'"$CAPS_OPC"$'\n'"$SETCFG" \
-  '[te/device/main/service/plant-a/ot/cmd/set-config/ot--cfg2]'
-check_empty "command-forward: management command naming no service is not guessed among several" ot-command-forward \
-  "$CAPS_A"$'\n'"$CAPS_B"$'\n'"$SETCFG"
-check "command-forward: a service whose descriptor is cleared no longer counts" ot-command-forward \
-  "$CAPS_A"$'\n'"$CAPS_B"$'\n''[te/device/main/service/plant-b/ot/capabilities] '$'\n'"$SETCFG" \
-  '[te/device/main/service/plant-a/ot/cmd/set-config/ot--cfg2]'
-check "command-forward: a service named by the command wins over the descriptors" ot-command-forward \
-  "$CAPS_A"$'\n''[te/device/main///cmd/ot_set_config/cfg3] {"status":"init","service":"plant-b","target":"connector","config":{}}' \
-  '[te/device/main/service/plant-b/ot/cmd/set-config/ot--cfg3]'
+# The default follows the protocol the command targets: the one ot-parameter-state recorded for
+# the entity, else params.protocol.
+check_params "command-forward: management command naming no service goes to tedge-dot-<recorded protocol>" ot-command-forward '' \
+  '[te/device/gw1///cmd/ot_set_config/cfg2] {"status":"init","target":"connector","config":{"poll_interval":"5s"}}' \
+  '[te/device/main/service/tedge-dot-opcua/ot/cmd/set-config/ot--cfg2]' \
+  --context '{"ot-protocol:gw1":"opcua"}'
 check_empty "command-forward: non-ot command ignored" ot-command-forward \
   '[te/device/plc1///cmd/restart/abc] {"status":"init"}'
 

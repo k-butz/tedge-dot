@@ -366,7 +366,7 @@ pub async fn run_until_watched(
 ) -> Result<(), BoxError> {
     let limits = Limits::from_config(&config);
     let protocol = config.connector.protocol.clone();
-    let service = config.connector.service_name.clone();
+    let service = config.connector.service_name();
 
     // Keep the raw configuration document so management commands can patch & persist it
     // (preserving comments/formatting via toml_edit).
@@ -1494,6 +1494,19 @@ fn apply_set_config(json: &serde_json::Value, doc: &mut DocumentMut) -> Result<(
         .get("config")
         .and_then(|c| c.as_object())
         .ok_or("set-config requires a 'config' object")?;
+    // The service name addresses this connector's management commands (§6.3) and the protocol
+    // selects its module: a running instance cannot take either from a command.
+    if target == "connector" {
+        if let Some(key) = ["service_name", "protocol"]
+            .into_iter()
+            .find(|key| patch.contains_key(*key))
+        {
+            return Err(format!(
+                "set-config cannot change connector.{key}: edit the configuration file and \
+                 restart the connector"
+            ));
+        }
+    }
     let root = doc.as_table_mut();
 
     if let Some(name) = target.strip_prefix("device:") {
@@ -1887,6 +1900,21 @@ default_mode = "typed"
         assert_eq!(dev.poll_interval.as_deref(), Some("10s"));
         // existing points untouched
         assert_eq!(dev.points.len(), 1);
+    }
+
+    /// The service name addresses the connector's management commands and the protocol selects
+    /// its module, so neither can be changed by a command while the connector runs.
+    #[test]
+    fn set_config_cannot_change_the_connector_identity() {
+        for key in ["service_name", "protocol"] {
+            let mut config = serde_json::Map::new();
+            config.insert(key.to_string(), "other".into());
+            let request = serde_json::json!({ "target": "connector", "config": config });
+            let mut d = doc();
+            let err = apply_management("set-config", &request, &mut d).unwrap_err();
+            assert!(err.contains(key), "{err}");
+            assert_eq!(d.to_string(), BASE, "the document must be left untouched");
+        }
     }
 
     #[test]

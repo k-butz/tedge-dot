@@ -80,49 +80,15 @@ function parameterBatch(payload) {
   return out;
 }
 
-// Connector services by protocol, from their retained capability descriptors (contract §7):
-//   ot-services:<protocol>         { "<service>": true, ... }
-//   ot-service-protocol:<service>  "<protocol>"  (to forget a service whose descriptor goes away)
-function recordService(service, text, context) {
-  let protocol = null;
-  try {
-    protocol = JSON.parse(text)?.protocol ?? null;
-  } catch (_e) {
-    // cleared (empty) or unreadable descriptor: the service is gone
-  }
-  const previous = context.mapper.get(`ot-service-protocol:${service}`);
-  if (previous && previous !== protocol) {
-    const { [service]: _gone, ...rest } = context.mapper.get(`ot-services:${previous}`) || {};
-    context.mapper.set(`ot-services:${previous}`, rest);
-  }
-  if (typeof protocol !== "string" || protocol === "") {
-    context.mapper.set(`ot-service-protocol:${service}`, null);
-    return;
-  }
-  context.mapper.set(`ot-service-protocol:${service}`, protocol);
-  const known = context.mapper.get(`ot-services:${protocol}`) || {};
-  context.mapper.set(`ot-services:${protocol}`, { ...known, [service]: true });
-}
-
-// The service a management command goes to: the one it names; else the only connector service
-// seen for its protocol; else — before any descriptor was seen — the packaged tedge-dot-<protocol>.
-// Several services and none named is ambiguous: undefined, and the command is not forwarded.
-function managementService(requested, protocol, context) {
-  if (requested !== undefined) return requested;
-  const known = Object.keys(context.mapper.get(`ot-services:${protocol}`) || {});
-  if (known.length === 0) return `tedge-dot-${protocol}`;
-  return known.length === 1 ? known[0] : undefined;
+// The service a management command goes to: the one it names, else `tedge-dot-<protocol>` — the
+// connector's default service_name. Deterministic on purpose: guessing from retained capability
+// descriptors counts services that are long gone (a descriptor outlives its connector).
+function managementService(requested, protocol) {
+  return requested ?? `tedge-dot-${protocol}`;
 }
 
 export function onMessage(message, context) {
   const parts = message.topic.split("/");
-
-  // te/device/main/service/<service>/ot/capabilities
-  if (parts.length === 7 && parts[3] === "service" && parts[6] === "capabilities") {
-    recordService(parts[4], decoder.decode(message.payload), context);
-    return [];
-  }
-
   const device = parts[2];
   const commandType = parts[parts.length - 2];
   const id = parts[parts.length - 1];
@@ -154,7 +120,7 @@ export function onMessage(message, context) {
 
   if (MANAGEMENT_VERBS.has(verb)) {
     const { service: requested, ...rest } = payload;
-    const service = managementService(requested, protocol, context);
+    const service = managementService(requested, protocol);
     // Ambiguous, or not a topic segment: forwarding would publish somewhere no connector listens,
     // or to a wildcard. (This flow cannot fail the command itself — its output would match its
     // input.)

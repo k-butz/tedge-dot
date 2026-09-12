@@ -135,7 +135,7 @@ both load-bearing:
   device from connection information plus a reference alone:
 
 ```sh
-tedge mqtt pub -r te/device/plc-7/ot/modbus/cmd/define-device/d1 '{
+tedge mqtt pub -r te/device/main/service/tedge-dot-modbus/ot/cmd/define-device/d1 '{
   "status": "init",
   "device": {
     "name": "plc-7",

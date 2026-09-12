@@ -903,6 +903,22 @@ static int apply_management(cJSON *doc, const char *verb, const cJSON *req,
             return -1;
         }
         const char *t = target->valuestring;
+        /* The service name addresses this connector's management commands
+         * (§6.3) and the protocol selects its module: a running instance cannot
+         * take either from a command. Mirrors apply_set_config (Rust). */
+        if (strcmp(t, "connector") == 0) {
+            const char *key =
+                cJSON_GetObjectItemCaseSensitive(config, "service_name") ? "service_name"
+                : cJSON_GetObjectItemCaseSensitive(config, "protocol")   ? "protocol"
+                                                                          : NULL;
+            if (key) {
+                snprintf(reason, rlen,
+                         "set-config cannot change connector.%s: edit the "
+                         "configuration file and restart the connector",
+                         key);
+                return -1;
+            }
+        }
         cJSON *section = NULL;
         if (strcmp(t, "connector") == 0 || strcmp(t, "mqtt") == 0 ||
             strcmp(t, "connection") == 0) {

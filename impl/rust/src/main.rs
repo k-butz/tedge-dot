@@ -495,7 +495,7 @@ fn warn_duplicate_service_names(configs: &[PathBuf]) {
     for path in configs {
         if let Some(connector) = connector_section(path) {
             by_service
-                .entry(connector.service_name)
+                .entry(connector.service_name())
                 .or_default()
                 .push(path.display().to_string());
         }

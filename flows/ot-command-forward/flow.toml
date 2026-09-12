@@ -11,9 +11,6 @@ input.mqtt.topics = [
   "te/+/+/+/+/cmd/ot_define_device/+",
   "te/+/+/+/+/cmd/ot_remove_device/+",
   "te/+/+/+/+/cmd/parameter_update/+",   # tedge-parameter-plugin's command type, on OT child devices
-  # Connector capability descriptors (retained): which services run which protocol, so a
-  # management command that names no service reaches the only one there is (contract §6.3).
-  "te/device/main/service/+/ot/capabilities",
 ]
 
 [config]

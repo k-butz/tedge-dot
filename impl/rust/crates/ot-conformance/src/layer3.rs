@@ -200,10 +200,18 @@ async fn check_b11_unowned_device_ignored(ctx: &Ctx<'_>, layer: &mut Layer) {
         .collect();
     // The request is retained: clear it rather than leave it for later checks.
     ctx.broker.publish(&topic, b"", true);
+    // Silence only counts from a connector that is still working: samples keep coming.
+    let alive = ctx
+        .wait_connector_record(mark, SAMPLE_TIMEOUT, "a sample during the ownership check", |r| {
+            r.topic.contains("/sample/")
+        })
+        .await;
     layer.check(
         "B11-ownership",
         "a command for a device the connector does not own is left unanswered",
-        if answered.is_empty() {
+        if let Err(reason) = alive {
+            Err(format!("{reason} — the connector stopped publishing, so its silence proves nothing"))
+        } else if answered.is_empty() {
             Ok(None)
         } else {
             Err(format!(
@@ -247,7 +255,7 @@ pub async fn run(manifest: &Manifest, schemas: &Schemas) -> Result<Vec<Layer>, S
             manifest.connector.protocol
         ));
     }
-    let service = config.connector.service_name.clone();
+    let service = config.connector.service_name();
     let ctx = Ctx {
         broker: &broker,
         sim: sim.as_ref(),
