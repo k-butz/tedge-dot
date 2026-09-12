@@ -9,8 +9,11 @@
 #                    nothing has to be built beforehand and dist/ is not read at all
 #                    (BuildKit skips the stage that COPYs it).
 #
-# Everything after the connector install is shared, so both implementations get the same
-# flows, configs and operation shims — `just test-cloud modbus` / `just test-cloud-c modbus`.
+# The flows come from the connector install itself (the .deb for rust; reproduced by hand for
+# c, as that stage does for the binary, unit and config dir) — so this suite exercises the
+# packaged layout, not a source-tree copy of it. Everything after the install is shared:
+# the same connector config, operator steps and operation shims for both implementations —
+# `just test-cloud modbus` / `just test-cloud-c modbus`.
 #
 # Build context is the repository root. Docker selects the correct arch via TARGETARCH.
 ARG BASE_REGISTRY=public.ecr.aws/docker/library
@@ -63,6 +66,16 @@ COPY packaging/tedge-dot.service /lib/systemd/system/tedge-dot.service
 RUN chmod 0755 /usr/bin/tedge-dot \
     && chmod 0644 /lib/systemd/system/tedge-dot.service \
     && install -d -o tedge -g tedge -m 0755 /etc/tedge/plugins/ot
+# The flows the package deploys: the core pipeline active in the c8y mapper, the opt-in
+# alarm/event flows parked in /usr/share for the operator. Same split as nfpm.yaml.
+COPY flows/ot-measurement       /etc/tedge/mappers/c8y/flows/ot-measurement
+COPY flows/ot-registration      /etc/tedge/mappers/c8y/flows/ot-registration
+COPY flows/ot-command-forward   /etc/tedge/mappers/c8y/flows/ot-command-forward
+COPY flows/ot-command-result    /etc/tedge/mappers/c8y/flows/ot-command-result
+COPY flows/ot-parameter-state   /etc/tedge/mappers/c8y/flows/ot-parameter-state
+COPY flows/ot-alarm             /usr/share/tedge-dot/flows/ot-alarm
+COPY flows/ot-event             /usr/share/tedge-dot/flows/ot-event
+RUN chown -R tedge:tedge /etc/tedge/mappers/c8y/flows /usr/share/tedge-dot/flows
 
 # --- everything below is shared by both implementations ------------------------------------
 FROM connector-${IMPL}
@@ -83,17 +96,17 @@ RUN rm -f /etc/tedge/plugins/ot/canbus.toml /etc/tedge/plugins/ot/canopen.toml \
     /etc/tedge/plugins/ot/opcua.toml /etc/tedge/plugins/ot/profibus.toml
 
 # --- thin-edge flows that map the generic OT envelopes to the thin-edge data model ----------
-COPY flows/ot-measurement     /etc/tedge/mappers/c8y/flows/ot-measurement
-COPY flows/ot-registration    /etc/tedge/mappers/c8y/flows/ot-registration
-COPY flows/ot-command-forward /etc/tedge/mappers/c8y/flows/ot-command-forward
-COPY flows/ot-command-result  /etc/tedge/mappers/c8y/flows/ot-command-result
-COPY flows/ot-alarm           /etc/tedge/mappers/c8y/flows/ot-alarm
-COPY flows/ot-event           /etc/tedge/mappers/c8y/flows/ot-event
-# Device parameters: writable points as twin fragments (the plugin's c8y_ParameterUpdate
-# operation is bridged by the command flows above).
-COPY flows/ot-parameter-state   /etc/tedge/mappers/c8y/flows/ot-parameter-state
+# Nothing is copied from the source tree here: the flows come from the connector install above,
+# exactly as they reach a real device. So this suite also tests the packaging: if the package
+# stopped shipping a flow, registration/measurements/operations would fail here.
+#
+# What is left are the steps a real operator performs. First the opt-in flows, which ship inert
+# in /usr/share/tedge-dot/flows/ because they need a per-signal threshold or event type:
+RUN cp -Ra /usr/share/tedge-dot/flows/ot-alarm /usr/share/tedge-dot/flows/ot-event \
+        /etc/tedge/mappers/c8y/flows/
 
-# Enable the c8y_ModbusDevice twin fragment on registration.
+# ...then the flow settings. Enable the c8y_ModbusDevice twin fragment on registration (the
+# packaged params.toml.template next to it documents the rest).
 COPY cloud/modbus/params/ot-registration.params.toml /etc/tedge/mappers/c8y/flows/ot-registration/params.toml
 
 # --- Cumulocity operation shims (deployed as tedge operation templates) ---------------------

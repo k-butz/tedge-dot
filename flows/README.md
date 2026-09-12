@@ -120,7 +120,34 @@ echo '[te/device/plc1/ot/modbus/sample/level_f32] {"ts":"2026-05-30T10:00:00.000
 
 ## Deploy
 
-Copy the flow directories into a mapper's flows folder; they are picked up and hot-reloaded:
+The `tedge-dot` packages (both the Rust and the C build) already ship these flows, so on a
+packaged install there is nothing to copy. The core pipeline is deployed **active**, into the
+Cumulocity mapper's flows directory:
+
+```
+/etc/tedge/mappers/c8y/flows/ot-measurement/
+/etc/tedge/mappers/c8y/flows/ot-registration/
+/etc/tedge/mappers/c8y/flows/ot-command-forward/
+/etc/tedge/mappers/c8y/flows/ot-command-result/
+/etc/tedge/mappers/c8y/flows/ot-parameter-state/
+```
+
+`ot-alarm` and `ot-event` only mean something once a threshold or an event type has been chosen
+for a specific signal, so they ship inert in `/usr/share/tedge-dot/flows/`. Opt one in by copying
+it across and giving it a `params.toml`:
+
+```sh
+sudo cp -Ra /usr/share/tedge-dot/flows/ot-alarm /etc/tedge/mappers/c8y/flows/
+sudo cp /etc/tedge/mappers/c8y/flows/ot-alarm/params.toml.template \
+        /etc/tedge/mappers/c8y/flows/ot-alarm/params.toml
+sudo -u tedge $EDITOR /etc/tedge/mappers/c8y/flows/ot-alarm/params.toml
+```
+
+Either way the mapper picks the change up and hot-reloads — no restart. Only the flow logic
+(`flow.toml`, `main.js`) and the `params.toml.template` are packaged; the `params.toml` you write
+next to them is not, so a package upgrade replaces the logic and leaves your settings alone.
+
+From a source checkout, or to target a different mapper, copy the directories yourself:
 
 ```sh
 sudo cp -Ra flows/ot-measurement /etc/tedge/mappers/c8y/flows/

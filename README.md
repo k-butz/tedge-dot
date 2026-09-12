@@ -47,6 +47,12 @@ installs:
   configured, so the service starts and idles until you add some);
 - `tedge-dot.service` — a single systemd service: one `tedge-dot` process runs
   every configured connector, each in an in-process restart loop;
+- the [flows](flows/) that map the connector's generic OT envelopes onto the
+  thin-edge data model. The core pipeline (measurement, registration, the two
+  command flows, parameter state) lands in `/etc/tedge/mappers/c8y/flows/`
+  ready to run — the mapper hot-reloads it, no restart. The opt-in alarm and
+  event flows wait in `/usr/share/tedge-dot/flows/` until you copy one over and
+  give it a `params.toml`;
 - demo configs in `/usr/share/tedge-dot/demo/`, pre-wired to the Docker
   simulators in [demo/](demo/) — see there for the all-protocols demo.
 

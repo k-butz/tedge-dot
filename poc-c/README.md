@@ -65,8 +65,10 @@ Debugging: `TDOT_OPCUA_DEBUG=1` keeps open62541's client handshake log on stdout
 **drop-in replacement** for the Rust `tedge-dot` package: same `/usr/bin/tedge-dot`
 binary, same `tedge-dot.service`, same `/etc/tedge/plugins/ot/` config layout,
 so the C package (`tedge-dot-c`) *conflicts* with the Rust one — install one or
-the other. It additionally ships the **PROFIBUS** connector, which the Rust
-package omits.
+the other. Same device-side [flows](../flows/) too: the core pipeline is
+deployed active into `/etc/tedge/mappers/c8y/flows/` and the opt-in alarm/event
+flows ship in `/usr/share/tedge-dot/flows/`. It additionally ships the
+**PROFIBUS** connector, which the Rust package omits.
 
 - Trigger it manually (**workflow_dispatch**) to refresh the rolling
   **`c-snapshot`** pre-release, so the latest build is always one download away.
