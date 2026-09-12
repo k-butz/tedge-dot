@@ -47,8 +47,12 @@ builds:
 archives:
   - formats: [tar.gz]
     # this name template makes the OS and Arch compatible with the results of `uname`.
+    #
+    # Named after the PACKAGE (tedge-dot-rs), not the project: a release carries the C
+    # implementation's tarballs too, and `tedge-dot_Linux_x86_64.tar.gz` next to
+    # `tedge-dot-c_0.1.0_linux_amd64.tar.gz` gives no clue which is which.
     name_template: >-
-      {{ .ProjectName }}_
+      tedge-dot-rs_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386

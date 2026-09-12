@@ -120,7 +120,7 @@ jobs:
           done
           echo "$contents" | grep -q "/usr/share/tedge-dot/flows/ot-alarm/flow.toml"
           echo "$contents" | grep -q "/usr/share/tedge-dot/flows/ot-event/flow.toml"
-          tar -tzf dist/tedge-dot_Linux_x86_64.tar.gz | grep -q "flows/ot-measurement/main.js"
+          tar -tzf dist/tedge-dot-rs_Linux_x86_64.tar.gz | grep -q "flows/ot-measurement/main.js"
 
       - uses: actions/upload-artifact@v4
         with:
