@@ -113,7 +113,7 @@ jobs:
           version: "~> v2"
           args: >-
             release --clean --skip=publish,announce
-            ${{ (github.event_name == 'push' && github.ref_type == 'tag') && '' || '--snapshot' }}
+            ${{ !(github.event_name == 'push' && github.ref_type == 'tag') && '--snapshot' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
