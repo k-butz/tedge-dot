@@ -124,6 +124,7 @@ just test-flows         # offline flow tests (tedge flows test)
 just test-e2e modbus    # Dockerised MQTT e2e suite for one protocol (the suite starts its own stack)
 just test-e2e-c modbus  # the same suite against the C connector (poc-c/)
 just test-cloud modbus  # live Cumulocity suite (needs C8Y_* credentials; device created per run)
+just test-cloud-c modbus # the same cloud suite against the C connector
 just fuzz config_toml   # fuzz one SDK target (nightly + cargo-fuzz)
 just build              # cross-compile + package everything (goreleaser)
 ```

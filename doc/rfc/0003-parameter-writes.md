@@ -190,8 +190,9 @@ The C proof of concept ([poc-c/](../../poc-c/)) implements the same runtime piec
 with persist + live reload) and the same parameter derivation and DTM rendering
 (`poc-c/sdk/src/descriptor.c`, `tedge-dot describe`), so the flows, the Cumulocity glue and the
 tenant admin's registration step work unchanged with either binary. The C build runs the same
-Robot e2e suites (`just test-e2e-c`) and the same conformance suite (`just conformance-c`) as
-the Rust build; `just c-describe-parity` additionally asserts that both binaries render the
+Robot e2e suites (`just test-e2e-c`), the same cloud suites (`just test-cloud-c`, which builds
+the C connector into the thin-edge demo image) and the same conformance suite
+(`just conformance-c`) as the Rust build; `just c-describe-parity` additionally asserts that both binaries render the
 same definitions (compared parsed, since key order differs) for every connector config in the
 repo.
 

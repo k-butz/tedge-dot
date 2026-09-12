@@ -11,6 +11,12 @@ on:
         description: Protocol harness under cloud/
         default: modbus
         required: true
+      impl:
+        description: Connector implementation under test
+        type: choice
+        options: [rust, c]
+        default: rust
+        required: true
 
 concurrency:
   group: cloud-e2e
@@ -30,20 +36,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
 
+      # Only the Rust image installs a package; the C image compiles poc-c/ in a build stage.
       - name: Build connector package (.deb)
+        if: inputs.impl == 'rust'
         run: |
           docker build -f Dockerfile.package --build-arg PKG_ARCH=amd64 --target export --output dist .
           mv dist/tedge-dot.deb dist/tedge-dot_0.0.0-ci_linux_amd64.deb
 
-      - name: Run cloud e2e suite
-        run: just test-cloud ${{ inputs.protocol }}
+      - name: Run cloud e2e suite (${{ inputs.impl }})
+        run: |
+          if [ "${{ inputs.impl }}" = "c" ]; then
+            just test-cloud-c ${{ inputs.protocol }}
+          else
+            just test-cloud ${{ inputs.protocol }}
+          fi
 
       - name: Upload robot output
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: robot-output-cloud-${{ inputs.protocol }}
-          path: cloud/${{ inputs.protocol }}/output/
+          name: robot-output-cloud-${{ inputs.protocol }}-${{ inputs.impl }}
+          path: cloud/${{ inputs.protocol }}/output*/
           if-no-files-found: ignore
 
       - name: Install go-c8y-cli

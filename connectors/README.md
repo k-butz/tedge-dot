@@ -91,11 +91,21 @@ and `entrypoint.sh`. Robot output goes to `output/` and `output-c/` respectively
 suite receives `${IMPL}` (`rust`/`c`) should a case ever need to differ (none does today).
 CI runs both matrices (`e2e` and `e2e-c`).
 
+The **cloud** suites under [cloud/](../cloud/) work the same way, with one difference: there is a
+single `Dockerfile.tedge` whose `IMPL` build argument selects one of two connector-install
+stages — the packaged `.deb` from `dist/` (`rust`) or a stage that compiles [poc-c/](../poc-c/)
+in the image (`c`). Everything after the install (flows, configs, operation shims) is shared, so
+both implementations are exercised by the same tests, and the C path needs no `just build`
+because `dist/` is never read. `Setup Cloud Device` asserts that the image really holds the
+requested implementation, so an unexported `IMPL` cannot silently produce a green "C" run.
+
 ```sh
 
 just cloud-up modbus       # bring up cloud (Cumulocity) stack and bootstrap
+just cloud-up modbus c     # ... with the C connector instead
 just cloud-down modbus     # tear it down
 just test-cloud modbus     # full cloud e2e run (requires C8Y_* env vars)
+just test-cloud-c modbus   # the same run against the C connector (output-c/)
 ```
 
 ### One virtualenv, shared with the editor
@@ -128,7 +138,8 @@ profile from [`robot.toml`](../robot.toml):
   interactive debugger attaches to a stack built from [poc-c/](../poc-c/). Switch back by
   selecting `rust` (or deselecting).
 - **CLI**: `robotcode --profile c run -- -t "<test>" connectors/modbus/tests/`, or just
-  `just test-e2e-c <proto>` for the whole suite.
+  `just test-e2e-c <proto>` for the whole suite. The same profile works for the cloud suites
+  (`robotcode --profile c run -- -t "<test>" cloud/modbus/tests/`), which read `IMPL` only.
 
 The profile only sets `IMPL` and `CONNECTOR_DOCKERFILE`, which the compose file interpolates
 into the connector service's image name and build recipe; each implementation therefore has its

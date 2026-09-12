@@ -49,6 +49,14 @@ struct tdot_connector {
     /* Close one device's transport (frees device->proto). */
     void (*disconnect_device)(tdot_connector_t *self, tdot_device_t *dev);
 
+    /* Optional: a device descriptor (transport/address details) as a JSON
+     * OBJECT string, published as the link status `info` (contract status
+     * schema) so flows can forward it into a digital-twin fragment — this is
+     * what the c8y harness turns into c8y_ModbusDevice. Derived from the
+     * configured address, so it is also available while the link is down.
+     * Caller frees the string. NULL (or a NULL hook) means no descriptor. */
+    char *(*device_info)(tdot_connector_t *self, const tdot_device_t *dev);
+
     /* Free the connector itself (per-point proto state included). */
     void (*destroy)(tdot_connector_t *self);
 };

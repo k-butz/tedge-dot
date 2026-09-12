@@ -1,4 +1,4 @@
-# Full Cumulocity end-to-end stack for the Rust OT connector.
+# Full Cumulocity end-to-end stack for the OT connector.
 #
 #   tedge      - thin-edge.io demo image + connector + flows + operation shims
 #   simulator  - the pymodbus Modbus TCP server (shared with the MQTT-only e2e)
@@ -12,9 +12,15 @@
 # c8y mapper, the connector service, and the deployed flows. The Robot suite drives Cumulocity.
 services:
   tedge:
+    # Stable image name per implementation so every (randomly named) project reuses the built
+    # image. IMPL selects the connector under test: the Rust .deb from dist/ by default, the C
+    # build (poc-c/) via `just test-cloud-c modbus` — see cloud/modbus/Dockerfile.tedge.
+    image: tedge-dot-${IMPL:-rust}-cloud-modbus
     build:
       context: ../..
       dockerfile: cloud/modbus/Dockerfile.tedge
+      args:
+        IMPL: ${IMPL:-rust}
     privileged: true
     labels:
       # The service DeviceLibrary treats as the device under test, so `Execute Command` runs

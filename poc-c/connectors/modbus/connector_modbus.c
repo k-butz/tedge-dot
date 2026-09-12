@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cjson/cJSON.h"
 #include "tedge_dot/connector.h"
 #include "tedge_dot/decode.h"
 
@@ -387,6 +388,55 @@ static int write_point(tdot_connector_t *self, tdot_device_t *dev,
     return 0;
 }
 
+/* Device descriptor for the link status `info` (mirrors device_descriptor() in
+ * crates/connector-modbus/src/lib.rs, field for field, so the c8y_ModbusDevice
+ * twin fragment the registration flow builds from it is the same in both
+ * implementations). The RTU serial options are read from the configured address
+ * rather than the resolved defaults, which is what the Rust connector reports. */
+static char *device_info(tdot_connector_t *self, const tdot_device_t *dev) {
+    (void)self;
+    const mb_device_t *mb = dev->proto;
+    if (!mb)
+        return NULL; /* not configured yet */
+
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "protocol", "modbus");
+    if (mb->tcp) {
+        cJSON_AddStringToObject(obj, "transport", "tcp");
+        cJSON_AddStringToObject(obj, "host", mb->host);
+        cJSON_AddNumberToObject(obj, "port", mb->port);
+        cJSON_AddNumberToObject(obj, "unit_id", mb->unit_id);
+    } else {
+        cJSON_AddStringToObject(obj, "transport", "rtu");
+        cJSON_AddStringToObject(obj, "serial_port", mb->serial);
+        cJSON_AddNumberToObject(obj, "unit_id", mb->unit_id);
+        /* Unset options are reported as null, as the Rust connector does. */
+        toml_table_t *pa = dev->protocol_address;
+        toml_datum_t d;
+        if (pa && (d = toml_int_in(pa, "baudrate")).ok)
+            cJSON_AddNumberToObject(obj, "baudrate", (double)d.u.i);
+        else
+            cJSON_AddNullToObject(obj, "baudrate");
+        if (pa && (d = toml_string_in(pa, "parity")).ok) {
+            cJSON_AddStringToObject(obj, "parity", d.u.s);
+            free(d.u.s);
+        } else {
+            cJSON_AddNullToObject(obj, "parity");
+        }
+        if (pa && (d = toml_int_in(pa, "stopbits")).ok)
+            cJSON_AddNumberToObject(obj, "stopbits", (double)d.u.i);
+        else
+            cJSON_AddNullToObject(obj, "stopbits");
+        if (pa && (d = toml_int_in(pa, "databits")).ok)
+            cJSON_AddNumberToObject(obj, "databits", (double)d.u.i);
+        else
+            cJSON_AddNullToObject(obj, "databits");
+    }
+    char *json = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+    return json;
+}
+
 static void destroy(tdot_connector_t *self) {
     free(self->state);
     free(self);
@@ -402,6 +452,7 @@ tdot_connector_t *tdot_connector_modbus_new(void) {
     c->read_point = read_point;
     c->write_point = write_point;
     c->disconnect_device = disconnect_device;
+    c->device_info = device_info;
     c->destroy = destroy;
     return c;
 }

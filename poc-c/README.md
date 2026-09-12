@@ -38,6 +38,11 @@ The C build is held to the same coverage as the Rust one:
   their Robot suite against the C connector with `just test-e2e-c <proto>` (the stack's
   `connector` service is swapped for [`connectors/_shared/Dockerfile.connector-c`](../connectors/_shared/Dockerfile.connector-c));
   CI runs it for every protocol (`e2e-c` matrix);
+- **cloud Robot suites** — the live Cumulocity harness under [cloud/](../cloud/) builds this
+  implementation into the thin-edge demo image with `just test-cloud-c <proto>` (`IMPL=c`
+  selects a connector-install stage that compiles poc-c/ instead of installing the Rust
+  package), so child registration, measurements, operations, the Cloud Fieldbus import and the
+  device-parameter round-trip are all covered for the C build too;
 - **smoke** — [`ci/smoke.sh <proto>`](ci/smoke.sh), a fast broker-and-simulator check
   without Docker for the connector itself (used by the `c-poc` CI job).
 
@@ -126,7 +131,9 @@ worker thread per file), matching the Rust single-service model.
 
 The Rust `Connector` trait maps to a C vtable (`tdot_connector_t` in
 [connector.h](sdk/include/tedge_dot/connector.h)): `configure`,
-`connect_device`, `read_point`, `write_point`, `disconnect_device`. Protocol
+`connect_device`, `read_point`, `write_point`, `disconnect_device`, plus the
+optional `device_info` (the link status `info` descriptor, which the c8y
+registration flow turns into the `c8y_ModbusDevice` twin fragment). Protocol
 modules are selected by `tdot_connector_factory(protocol)` and compiled in
 behind CMake options (`-DTDOT_MODBUS=ON/OFF`, `-DTDOT_OPCUA=ON/OFF`) —
 the C analogue of the cargo feature flags.

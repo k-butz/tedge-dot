@@ -81,12 +81,30 @@ static void publish_link(rt_t *rt, tdot_device_t *dev, tdot_link_t status) {
     logmsg("info", "device %s: link %s", dev->name, name);
     char ts[40];
     tdot_now_rfc3339(ts, sizeof ts);
-    char topic[256], payload[128];
+    char topic[256];
     snprintf(topic, sizeof topic, "te/device/%s/ot/%s/status/link", dev->name,
              rt->cfg->protocol);
-    snprintf(payload, sizeof payload, "{\"status\":\"%s\",\"since\":\"%s\"}",
-             name, ts);
+
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "status", name);
+    cJSON_AddStringToObject(obj, "since", ts);
+    /* Optional device descriptor from the module (contract status schema
+     * `info`); the registration flow forwards it into a twin fragment. */
+    if (rt->conn->device_info) {
+        char *info = rt->conn->device_info(rt->conn, dev);
+        if (info) {
+            cJSON *parsed = cJSON_Parse(info);
+            if (parsed && cJSON_IsObject(parsed))
+                cJSON_AddItemToObject(obj, "info", parsed);
+            else
+                cJSON_Delete(parsed);
+            free(info);
+        }
+    }
+    char *payload = cJSON_PrintUnformatted(obj);
     publish(rt, topic, payload, true);
+    free(payload);
+    cJSON_Delete(obj);
 }
 
 static void publish_health(rt_t *rt, const char *status) {

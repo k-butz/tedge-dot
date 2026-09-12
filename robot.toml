@@ -1,16 +1,18 @@
 # RobotCode configuration (read by the VS Code extension and the `robotcode` CLI; plain
 # `robot` ignores this file).
 #
-# Profiles select which connector implementation the e2e stacks build, so a test can be run or
-# debugged against either one from the editor:
+# Profiles select which connector implementation the e2e and cloud stacks build, so a test can
+# be run or debugged against either one from the editor:
 #
 #   VS Code:  command palette -> "RobotCode: Select Configuration Profiles" -> c
 #             (the selected profile applies to Run/Debug Test, including the test explorer)
 #   CLI:      robotcode --profile c run -- -t "<test>" connectors/modbus/tests/
 #
 # The profile only sets environment variables; the compose files interpolate them
-# (see connectors/<proto>/docker-compose.yaml), so nothing else has to change.
-# `just test-e2e <proto>` / `just test-e2e-c <proto>` set the same variables.
+# (see connectors/<proto>/docker-compose.yaml and cloud/<proto>/docker-compose.yaml), so
+# nothing else has to change. `just test-e2e{,-c} <proto>` and `just test-cloud{,-c} <proto>`
+# set the same variables. CONNECTOR_DOCKERFILE is only read by the connector e2e stacks; the
+# cloud image selects the implementation with IMPL alone (one Dockerfile, two build stages).
 
 [profiles.rust]
 description = "Connector under test: the Rust build (default)"

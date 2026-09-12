@@ -17,9 +17,14 @@ Documentation       Device lifecycle for the Cumulocity (cloud) e2e suites: Devi
 ...                 Needs C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD / C8Y_TENANT in the environment
 ...                 or the repo's .env file — the compose file forwards them to the container,
 ...                 and DeviceLibrary passes the generated DEVICE_ID alongside.
+...
+...                 IMPL (rust by default, or c) selects which connector implementation the
+...                 image installs, so the same suites cover both — `just test-cloud <proto>`
+...                 and `just test-cloud-c <proto>`.
 
 Library             Cumulocity
 Library             DeviceLibrary
+Library             OperatingSystem
 
 
 *** Variables ***
@@ -50,9 +55,32 @@ Setup Cloud Device
     Set Suite Variable    $DEVICE_ID    ${device_id}
     ${project}=    DeviceLibrary.Get Compose Project Name
     Log    Started ${protocol} cloud stack as compose project '${project}' (device ${device_id})
+    # Which connector the image installed (see cloud/<proto>/Dockerfile.tedge): IMPL=rust
+    # installs the packaged .deb, IMPL=c the C build (just test-cloud-c).
+    ${impl}=    Get Environment Variable    IMPL    rust
+    ${container}=    DeviceLibrary.Get Container Name
+    Log    Connector under test: ${impl} implementation (container ${container})
+    Connector Implementation Should Be    ${impl}
 
     Bootstrap Device
     Cumulocity.Device Should Exist    ${DEVICE_ID}    timeout=${REGISTRATION_TIMEOUT}
+
+Connector Implementation Should Be
+    [Documentation]    Guard against a silent fallback: the compose file defaults IMPL to rust,
+    ...    so a mistyped or unexported variable would quietly test the wrong binary and report a
+    ...    green C run. The Rust connector is installed as a package; the C one is copied into
+    ...    the image by its build stage, with no package behind it.
+    [Arguments]    ${impl}
+    ${packaged}=    DeviceLibrary.Execute Command
+    ...    cmd=dpkg -s tedge-dot >/dev/null 2>&1 && echo packaged || echo unpackaged
+    ...    strip=${True}
+    IF    "${impl}" == "rust"
+        Should Be Equal    ${packaged}    packaged
+        ...    msg=IMPL=rust but no tedge-dot package is installed in the image
+    ELSE
+        Should Be Equal    ${packaged}    unpackaged
+        ...    msg=IMPL=${impl} but the Rust tedge-dot package is installed in the image
+    END
 
 Bootstrap Device
     [Documentation]    Register the device with Cumulocity using the demo image's bootstrap
