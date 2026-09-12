@@ -8,17 +8,14 @@ Documentation       End-to-end tests for the Rust tedge-dot (opcua module) again
 ...
 ...                 Run via:  just test-e2e-opcua   (brings the Docker stack up/down automatically)
 
-Library             ../../_shared/MqttClient.py
+Resource            ../../_shared/stack.resource
 Library             Collections
 
-Suite Setup         Connect And Subscribe
-Suite Teardown      Disconnect Broker
+Suite Setup         Setup OT Stack    opcua
+Suite Teardown      Teardown OT Stack
 
 
 *** Variables ***
-${BROKER_HOST}          localhost
-${BROKER_PORT}          12883
-
 ${DEVICE}               opc1
 ${PROTOCOL}             opcua
 ${SERVICE}              tedge-dot
@@ -256,10 +253,6 @@ Generic Write Command Is Bridged By The Flows
 
 
 *** Keywords ***
-Connect And Subscribe
-    Connect Broker    ${BROKER_HOST}    ${BROKER_PORT}
-    Subscribe    te/#
-
 Sample Should Be Good
     [Arguments]    ${payload}
     ${quality}=    Get Json Field    ${payload}    quality

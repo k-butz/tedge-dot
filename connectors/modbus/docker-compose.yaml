@@ -1,25 +1,30 @@
-# End-to-end harness for the Rust Modbus connector.
+# End-to-end harness for the Modbus connector.
 #
-#   broker     - lightweight MQTT broker (no cloud)
-#   simulator  - the existing pymodbus simulator (a real Modbus TCP server)
-#   connector  - the Rust tedge-dot reading the simulator and publishing samples
+# The stack is started by the Robot suite itself (DeviceLibrary, see
+# connectors/_shared/stack.resource): every setup creates its own compose project with a
+# random name, so suites are isolated and nothing has to be started beforehand.
 #
-# The Robot suite runs on the host and connects to the broker on localhost:1883.
+# Ports are therefore published WITHOUT a fixed host port (parallel-safe); the suite resolves
+# the broker's ephemeral port with `Get Service Port`. For manual work the host ports can be
+# pinned via the env vars below (`just sim modbus` / `just e2e-up modbus` do this):
+#   BROKER_PORT
+#   MODBUS_SIM_PORT
 services:
   broker:
     image: public.ecr.aws/docker/library/eclipse-mosquitto:2
     volumes:
       - ../_shared/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     ports:
-      # Host port 11883 avoids clashing with a local tedge broker on 1883.
-      - "11883:1883"
+      - target: 1883
+        published: "${BROKER_PORT:-}"
 
   simulator:
     build:
       context: ../..
       dockerfile: connectors/modbus/sim/Dockerfile
     ports:
-      - "5020:502"
+      - target: 502
+        published: "${MODBUS_SIM_PORT:-}"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
@@ -29,9 +34,19 @@ services:
       start_period: 5s
 
   connector:
+    # Stable image name so every (randomly named) project reuses the built image instead of
+    # rebuilding it. IMPL/CONNECTOR_DOCKERFILE select the implementation under test:
+    # the Rust build by default, the C build (poc-c/) via `just test-e2e-c modbus`.
+    image: tedge-dot-${IMPL:-rust}-modbus-connector
     build:
       context: ../..
-      dockerfile: connectors/modbus/Dockerfile.connector
+      dockerfile: ${CONNECTOR_DOCKERFILE:-connectors/modbus/Dockerfile.connector}
+      args:
+        PROTOCOL: modbus
+    labels:
+      # Marks the service DeviceLibrary treats as the device under test, so `Execute Command`
+      # runs inside the connector container ("${SERIAL}:broker" etc. address the others).
+      device-test-core.role: main
     depends_on:
       broker:
         condition: service_started

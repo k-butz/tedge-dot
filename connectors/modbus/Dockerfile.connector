@@ -6,6 +6,9 @@
 # anonymous pull quota, and CI has hit auth.docker.io connection resets
 # mid-build. Override BASE_REGISTRY to go back to docker.io/library.
 ARG BASE_REGISTRY=public.ecr.aws/docker/library
+# Accepted (and ignored) so the compose file can pass it to either implementation's
+# Dockerfile; the C build (connectors/_shared/Dockerfile.connector-c) selects its module with it.
+ARG PROTOCOL=modbus
 
 FROM ${BASE_REGISTRY}/rust:1-bookworm AS build
 WORKDIR /src

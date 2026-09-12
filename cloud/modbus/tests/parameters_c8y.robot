@@ -11,17 +11,17 @@ Documentation       Device parameters round-trip (RFC 0003): the connector's wri
 ...                 tenant with the dtm + device-parameter microservices, and a running stack
 ...                 (see `just test-cloud modbus`).
 
-Library             Cumulocity
+Resource            ../../_shared/device.resource
 Library             Collections
 Library             ../../_shared/ParameterLibrary.py
 
 Suite Setup         Setup Child Context
+Suite Teardown      Teardown Cloud Device
 
 
 *** Variables ***
-${DEVICE_ID}            %{DEVICE_ID=}
 ${CHILD_NAME}           plc1
-${CHILD_EXTERNAL_ID}    ${DEVICE_ID}:device:${CHILD_NAME}
+# ${CHILD_EXTERNAL_ID} is built in the suite setup: it embeds the per-run device id.
 ${SET}                  modbus_parameters
 ${OP_TIMEOUT}           60
 ${MEAS_TIMEOUT}         90
@@ -88,4 +88,6 @@ Parameter Update With An Unknown Key Fails
 
 *** Keywords ***
 Setup Child Context
+    Setup Cloud Device
+    Set Suite Variable    $CHILD_EXTERNAL_ID    ${DEVICE_ID}:device:${CHILD_NAME}
     Cumulocity.Set Device    ${DEVICE_ID}

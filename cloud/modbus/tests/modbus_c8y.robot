@@ -9,20 +9,20 @@ Documentation       Full end-to-end test for the Rust tedge-dot against Cumuloci
 ...                 Requires C8Y_BASEURL / C8Y_USER / C8Y_PASSWORD / C8Y_TENANT and DEVICE_ID,
 ...                 plus a running stack (see just test-e2e-c8y).
 
-Library             Cumulocity
+Resource            ../../_shared/device.resource
 Library             Collections
 
 # Measurement assertions filter with value=<fragment> (valueFragmentType), not fragment=
 # (fragmentType): Cumulocity rejects fragmentType combined with valueFragmentSeries with an
 # HTTP 500 "Value Fragment filter already provided" (observed 2026-09-11).
 
-Suite Setup         Set Main Device
+Suite Setup         Setup Main Device Context
+Suite Teardown      Teardown Cloud Device
 
 
 *** Variables ***
-${DEVICE_ID}            %{DEVICE_ID=}
 ${CHILD_NAME}           plc1
-${CHILD_EXTERNAL_ID}    ${DEVICE_ID}:device:${CHILD_NAME}
+# ${CHILD_EXTERNAL_ID} is built in the suite setup: it embeds the per-run device id.
 
 ${MEAS_TIMEOUT}         60
 ${OP_TIMEOUT}           30
@@ -79,5 +79,10 @@ Set Coil Operation Round-Trips
 
 
 *** Keywords ***
+Setup Main Device Context
+    Setup Cloud Device
+    Set Suite Variable    $CHILD_EXTERNAL_ID    ${DEVICE_ID}:device:${CHILD_NAME}
+    Set Main Device
+
 Set Main Device
     Cumulocity.Set Device    ${DEVICE_ID}

@@ -1,35 +1,24 @@
-# End-to-end harness for the Rust CANopen connector.
+# End-to-end harness for the CANopen connector (SocketCAN).
 #
-#   broker     - lightweight MQTT broker (no cloud)
-#   simulator  - python-canopen SDO server node on vcan0 (node ID 1)
-#   connector  - Rust tedge-dot polling SDO objects and publishing samples
+# The stack is started by the Robot suite itself (DeviceLibrary, see
+# connectors/_shared/stack.resource): every setup creates its own compose project with a
+# random name, so nothing has to be started beforehand.
 #
-# Both simulator and connector use network_mode: host to share vcan0 with the host kernel.
-# The broker exposes port 13883 on the host.
-#
-# !! REQUIREMENTS !!
-#   - Linux host (or Linux VM) with CAN support:
-#       CONFIG_CAN=y or CONFIG_CAN=m
-#       CONFIG_CAN_VCAN=y or CONFIG_CAN_VCAN=m
-#   - Docker Engine with --privileged support
-#
-# On macOS Docker Desktop the LinuxKit VM kernel does NOT include CAN/vcan
-# support.  With colima the modules can be added to the Ubuntu VM (one-off):
-#   colima ssh -- sudo apt-get install -y wireless-regdb
-#   colima ssh -- sudo curl -sfLO --output-dir /tmp https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-extra-$(colima ssh -- uname -r)_<pkg-version>_arm64.deb
-#   colima ssh -- sudo dpkg -i /tmp/linux-modules-extra-*.deb && colima ssh -- sudo modprobe vcan
-# (find <pkg-version> via `colima ssh -- apt-cache policy linux-image-$(uname -r)`; if the
-# exact kernel is still in the archive a plain `apt-get install linux-modules-extra-$(uname -r)`
-# suffices).  Otherwise run the unit + integration tests instead:
-#   cargo test -p connector-canopen
-
+# Unlike the other protocols this stack is host-networked: the connector and the simulator need
+# the host's network namespace to see the virtual CAN interface (vcan0). The broker therefore
+# listens on the host loopback on port 13884 (no published container port), and the suite
+# connects to localhost:13884. Consequence: only ONE canopen stack can run at a time on a host,
+# since vcan0 is shared — the two CAN stacks use different ports so they can run together.
 services:
   broker:
+    # Host networking with a protocol-specific port: the SocketCAN connector and simulator need
+    # the host's network namespace (vcan0), so they reach the broker over the host loopback.
+    # No published port at all, which keeps the project parallel-safe.
+    network_mode: host
     image: public.ecr.aws/docker/library/eclipse-mosquitto:2
     volumes:
-      - ../_shared/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-    ports:
-      - "13883:1883"
+      - ../_shared/mosquitto-anon.conf:/mosquitto/config/mosquitto.conf:ro
+    command: ["mosquitto", "-c", "/mosquitto/config/mosquitto.conf", "-p", "13884"]
 
   simulator:
     build:
@@ -48,9 +37,19 @@ services:
       start_period: 5s
 
   connector:
+    # Stable image name so every (randomly named) project reuses the built image instead of
+    # rebuilding it. IMPL/CONNECTOR_DOCKERFILE select the implementation under test:
+    # the Rust build by default, the C build (poc-c/) via `just test-e2e-c canopen`.
+    image: tedge-dot-${IMPL:-rust}-canopen-connector
     build:
       context: ../..
-      dockerfile: connectors/canopen/Dockerfile.connector
+      dockerfile: ${CONNECTOR_DOCKERFILE:-connectors/canopen/Dockerfile.connector}
+      args:
+        PROTOCOL: canopen
+    labels:
+      # Marks the service DeviceLibrary treats as the device under test, so `Execute Command`
+      # runs inside the connector container ("${SERIAL}:broker" etc. address the others).
+      device-test-core.role: main
     network_mode: host
     privileged: true
     depends_on:

@@ -1,7 +1,7 @@
 # Connector configuration for the CANopen e2e test harness.
 #
 # The connector polls SDO objects on CANopen node 1 on vcan0 (virtual CAN, kernel loopback)
-# and publishes samples to the local broker at localhost:13883.
+# and publishes samples to the local broker at localhost:13884.
 #
 # Objects served by the simulator (simulator.py, node ID 1):
 #   0x2000:0x00  UNSIGNED16  analog_in    = 1234
@@ -16,7 +16,7 @@ log_level    = "info"
 
 [mqtt]
 host = "localhost"
-port = 13883
+port = 13884
 
 [connection]
 interface = "vcan0"

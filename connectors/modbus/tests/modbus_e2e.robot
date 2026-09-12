@@ -6,17 +6,14 @@ Documentation       End-to-end tests for the Rust tedge-dot against a real Modbu
 ...
 ...                 Run via:  just test-e2e   (brings the Docker stack up/down automatically)
 
-Library             ../../_shared/MqttClient.py
+Resource            ../../_shared/stack.resource
 Library             Collections
 
-Suite Setup         Connect And Subscribe
-Suite Teardown      Disconnect Broker
+Suite Setup         Setup OT Stack    modbus
+Suite Teardown      Teardown OT Stack
 
 
 *** Variables ***
-${BROKER_HOST}          localhost
-${BROKER_PORT}          11883
-
 ${DEVICE}               plc1
 ${PROTOCOL}             modbus
 ${SERVICE}              tedge-dot
@@ -227,10 +224,6 @@ Generic Write Command Is Bridged By The Flows
 
 
 *** Keywords ***
-Connect And Subscribe
-    Connect Broker    ${BROKER_HOST}    ${BROKER_PORT}
-    Subscribe    te/#
-
 Sample Should Be Good
     [Arguments]    ${payload}
     ${quality}=    Get Json Field    ${payload}    quality

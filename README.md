@@ -116,12 +116,14 @@ Requires Rust (stable) and [just](https://github.com/casey/just);
 Docker and Python for the e2e suites.
 
 ```sh
+just venv               # one virtualenv for every system test (also used by the editor)
 just test               # unit + integration + property tests
 just lint               # clippy -D warnings
 just conformance modbus # full conformance suite (no hardware/broker needed)
 just test-flows         # offline flow tests (tedge flows test)
-just test-e2e modbus    # Dockerised MQTT e2e suite for one protocol (incl. the flows-driven parameter bridge)
+just test-e2e modbus    # Dockerised MQTT e2e suite for one protocol (the suite starts its own stack)
 just test-e2e-c modbus  # the same suite against the C connector (poc-c/)
+just test-cloud modbus  # live Cumulocity suite (needs C8Y_* credentials; device created per run)
 just fuzz config_toml   # fuzz one SDK target (nightly + cargo-fuzz)
 just build              # cross-compile + package everything (goreleaser)
 ```

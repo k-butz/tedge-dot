@@ -1,0 +1,9 @@
+# Python dependencies for ALL system tests (the connector e2e suites and the Cumulocity cloud
+# suites), installed into ONE virtual environment at the repo root: `just venv`.
+#
+# One venv keeps the `just` recipes and the editor in sync — .vscode/settings.json points the
+# Python and Robot Framework extensions at ./.venv, so "Run Test" on a single test case in
+# VS Code uses exactly what `just test-e2e` / `just test-cloud` use.
+-r connectors/_shared/requirements.txt
+-r connectors/opcua/requirements.txt
+-r cloud/modbus/requirements.txt

@@ -11,13 +11,14 @@ no justfile changes are ever needed to add a new one.
 ```
 connectors/
   _shared/                      # files shared across all connectors
+    stack.resource              # stack lifecycle: DeviceLibrary starts/stops the compose stack
     MqttClient.py               # Robot keyword library (paho-mqtt subscribe/assert)
-    mosquitto.conf              # mosquitto config used by every e2e stack
-    requirements.txt            # base Robot deps (robotframework, paho-mqtt)
+    mosquitto.conf              # mosquitto config used by the bridged stacks
+    mosquitto-anon.conf         #   ... and by the host-networked ones (port from the CLI)
+    requirements.txt            # base Robot deps (robotframework, paho-mqtt, DeviceLibrary)
     Dockerfile.flows            # cloud-free flows runner: tedge (main channel) as the
     flows-entrypoint.sh         #   user-defined mapper "ot" running ../flows against the broker
     Dockerfile.connector-c      # the C implementation (poc-c/) built for any stack (ARG PROTOCOL)
-    docker-compose.c.yaml       # compose override swapping the stack's connector for the C build
 
   <proto>/                      # one directory per OT protocol
     sim/                        # simulator image (Dockerfile + server code)
@@ -38,19 +39,27 @@ The configs the package installs live outside this directory:
 `/etc/tedge/plugins/ot/`) and `demo/config/<proto>.toml` (demo configs shipped
 to `/usr/share/tedge-dot/demo/`, also used for local CLI exploration).
 
-### Broker port convention
+### The suite owns the stack
 
-Each protocol's e2e stack exposes the broker on a unique host port to avoid
-clashing when multiple stacks run simultaneously:
+Nothing has to be running before the tests: each suite's `Suite Setup` calls
+`Setup OT Stack` from [`_shared/stack.resource`](_shared/stack.resource), which hands the
+protocol's `docker-compose.yaml` to **DeviceLibrary**. Every setup gets its own compose
+project, named after a randomly generated device serial, with its own network and volumes — so
+suites are isolated, parallel runs cannot clash, and the stack is torn down when the suite
+ends. Moving the keyword to `Test Setup` gives a fresh stack per test case instead (slower;
+the per-test containers are reclaimed at suite end).
 
-| Protocol | Host broker port | Simulator port         |
-|----------|-----------------|------------------------|
-| modbus   | 11883           | 5020 (TCP)             |
-| opcua    | 12883           | 4840 (TCP)             |
-| canbus   | 13883           | vcan0 (kernel virtual) |
-| *(next)* | 14883           | *(protocol)*           |
+The same keyword resolves the broker endpoint, so no suite hardcodes a port:
 
-Pick the next unused port in `docker-compose.yaml` when adding a new connector.
+| Stack | Broker | Why |
+|---|---|---|
+| modbus, opcua, profibus | published on an **ephemeral** host port, resolved with `Get Service Port` | parallel-safe |
+| canbus, canopen | host network namespace, fixed port (13883 / 13884), no published port | the SocketCAN connector and simulator need the host's `vcan0`, so they reach the broker over the host loopback; one stack per protocol per host |
+
+Host ports are pinned only for manual work, through env vars the compose files interpolate
+(`BROKER_PORT`, `<PROTO>_SIM_PORT`): `just sim <proto>` pins the simulator port the demo
+configs expect, `just e2e-up <proto>` pins the broker on 1884. Fixed published ports must not
+be committed to the compose files — DeviceLibrary rejects them, since they break parallel runs.
 
 ---
 
@@ -59,25 +68,24 @@ Pick the next unused port in `docker-compose.yaml` when adding a new connector.
 All recipes take the protocol name as their first argument.
 
 ```sh
-just sim modbus            # start only the simulator (for manual CLI exploration)
+just sim modbus            # start only the simulator, on the demo config's fixed port
 just sim-down modbus       # stop the simulator
 
-just e2e-up modbus         # bring the full e2e stack up (broker + sim + connector)
-just e2e-down modbus       # tear it down
-
-just test-e2e modbus       # stack up → run robot suite → stack down
+just test-e2e modbus       # run the robot suite (it starts and stops its own stack)
 just test-e2e modbus --include smoke   # pass extra robot args
 just test-e2e-c modbus     # the SAME suite against the C connector (poc-c/)
-just e2e-up modbus c       # C variant of the stack, for manual inspection
+
+just e2e-up modbus [c]     # start a stack manually (ports pinned) for inspection
+just e2e-down modbus [c]   # tear that manual stack down
 ```
 
 ### Rust and C: one suite, two connectors
 
 The Rust crates and the C proof of concept ([poc-c/](../poc-c/)) implement the same
 contract and are maintained to the same coverage. Every stack therefore runs its Robot suite
-against both: `test-e2e` builds the stack's `Dockerfile.connector` (Rust), `test-e2e-c` adds
-[`_shared/docker-compose.c.yaml`](_shared/docker-compose.c.yaml), which swaps the `connector`
-service for [`_shared/Dockerfile.connector-c`](_shared/Dockerfile.connector-c) — the C build
+against both: `test-e2e` builds the stack's `Dockerfile.connector` (Rust), `test-e2e-c` sets
+`CONNECTOR_DOCKERFILE` so the same compose file builds the `connector` service from
+[`_shared/Dockerfile.connector-c`](_shared/Dockerfile.connector-c) instead — the C build
 with only that protocol's module compiled in, installed with the stack's own `connector.toml`
 and `entrypoint.sh`. Robot output goes to `output/` and `output-c/` respectively, and the
 suite receives `${IMPL}` (`rust`/`c`) should a case ever need to differ (none does today).
@@ -90,10 +98,31 @@ just cloud-down modbus     # tear it down
 just test-cloud modbus     # full cloud e2e run (requires C8Y_* env vars)
 ```
 
-The `test-e2e` recipe installs Python deps automatically:
+### One virtualenv, shared with the editor
 
-1. `connectors/_shared/requirements.txt` (always — robotframework, paho-mqtt)
-2. `connectors/<proto>/requirements.txt` (if present — protocol-specific extras)
+All system tests (these suites and the [cloud](../cloud/) ones) use a single virtualenv at the
+repo root, built from [`requirements-test.txt`](../requirements-test.txt):
+
+```sh
+just venv          # create/refresh ./.venv (the test-e2e / test-cloud recipes call it too)
+```
+
+[`.vscode/settings.json`](../.vscode/settings.json) points the Python and Robot Framework
+extensions at that same `./.venv`, so **Run/Debug Test on a single test case in the editor uses
+exactly what the `just` recipes use**. From the command line:
+
+```sh
+# one test case (it still starts the stack the suite needs, then tears it down)
+./.venv/bin/python -m robot --test "Parameter Twin Follows The Device" connectors/modbus/tests/
+# everything tagged `flows` (the command/parameter bridge cases)
+./.venv/bin/python -m robot --include flows connectors/modbus/tests/
+# keep the stack running afterwards to poke at it (the setup logs the project name)
+./.venv/bin/python -m robot --variable KEEP_STACK:true --test "Parameter Twin Follows The Device" connectors/modbus/tests/
+```
+
+Robot must run from the repo root (the default in VS Code) so the compose files and `.env` are
+found. If `just venv` reports that it is recreating the environment, the `./.venv` directory had
+been copied from another checkout — its `pip` would have installed into *that* project.
 
 ---
 
@@ -110,16 +139,21 @@ The `test-e2e` recipe installs Python deps automatically:
    whatever server code the protocol needs.
 
 3. **Docker stack** — create `connectors/<proto>/docker-compose.yaml`,
-   `Dockerfile.connector`, `connector.toml`, and `entrypoint.sh`.
-   Pick the next free host port from the table above. Add the `flows` service
-   (see `connectors/modbus/docker-compose.yaml`, build arg `PROTOCOL`) to run the
-   repo's flows in the stack and test the command/parameter bridges end to end;
-   tag those Robot cases `flows`.
+   `Dockerfile.connector`, `connector.toml`, and `entrypoint.sh`. Copy an existing
+   compose file: publish ports **without** a fixed host port (interpolate
+   `${...:-}` for the manual overrides), and label the connector service
+   `device-test-core.role: main` so DeviceLibrary knows which service is the device
+   under test. Add the `flows` service (see `connectors/modbus/docker-compose.yaml`,
+   build arg `PROTOCOL`) to run the repo's flows in the stack and test the
+   command/parameter bridges end to end; tag those Robot cases `flows`.
 
-4. **Tests** — create `connectors/<proto>/tests/<proto>_e2e.robot`.
-   Import the shared library:
-   ```
-   Library    ../../_shared/MqttClient.py
+4. **Tests** — create `connectors/<proto>/tests/<proto>_e2e.robot`. Import the shared
+   resource (it brings DeviceLibrary, the MQTT keywords and the stack lifecycle) and let
+   it start the stack:
+   ```robotframework
+   Resource            ../../_shared/stack.resource
+   Suite Setup         Setup OT Stack    <proto>
+   Suite Teardown      Teardown OT Stack
    ```
 
 5. **Packaging configs** — create `packaging/config/<proto>.toml` (sane
