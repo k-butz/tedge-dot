@@ -57,7 +57,7 @@ bacnet  = ["dep:connector-bacnet"]
 canbus  = ["dep:connector-canbus"]
 ```
 
-A build includes only the protocols it needs (`cargo build --features modbus,opcua`). The
+A build includes only the protocols it needs (`cargo build --manifest-path impl/rust/Cargo.toml --features modbus,opcua`). The
 binary selects the active module at runtime from `connector.protocol` in the config and
 fails fast if that protocol was not compiled in.
 

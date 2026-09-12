@@ -116,15 +116,32 @@ publish() {
     # Notes: Currently Cloudsmith does not support the following (this might change in the future)
     #  * distribution and distribution_version must be selected from values in the list. use `cloudsmith list distros` to get the list
     #  * The component can not be set and is currently fixed to 'main'
-    find "$sourcedir" -name "$pattern" -print0 | while read -r -d $'\0' file
+    # A failed upload must fail the step. The loop body runs in a subshell when fed by a pipe,
+    # so a `rc=1` set inside would be lost -- read from a process substitution instead, and
+    # return non-zero so the caller (and the release workflow) sees it. Without this, a
+    # rejected package leaves a green step and a release that is silently missing assets.
+    local rc=0
+    while read -r -d $'\0' file
     do
-        cloudsmith upload "$package_type" "${PUBLISH_OWNER}/${PUBLISH_REPO}/${distribution}/${distribution_version}" "$file" \
+        if ! cloudsmith upload "$package_type" "${PUBLISH_OWNER}/${PUBLISH_REPO}/${distribution}/${distribution_version}" "$file" \
             --no-wait-for-sync \
             --api-key "${PUBLISH_TOKEN}"
-    done
+        then
+            echo "ERROR: failed to upload $file" >&2
+            rc=1
+        fi
+    done < <(find "$sourcedir" -name "$pattern" -print0)
+    return "$rc"
 }
 
 
-publish "$SOURCE_PATH" "*.deb" deb "any-distro" "any-version"
-publish "$SOURCE_PATH" "*.rpm" rpm "any-distro" "any-version"
-publish "$SOURCE_PATH" "*.apk" alpine "alpine" "any-version"
+# Every format is attempted even if an earlier one failed, so one bad package does not hide
+# the state of the rest; the script then exits non-zero if anything failed.
+status=0
+publish "$SOURCE_PATH" "*.deb" deb "any-distro" "any-version" || status=1
+publish "$SOURCE_PATH" "*.rpm" rpm "any-distro" "any-version" || status=1
+publish "$SOURCE_PATH" "*.apk" alpine "alpine" "any-version" || status=1
+if [ "$status" != 0 ]; then
+    echo "ERROR: one or more packages failed to publish" >&2
+    exit 1
+fi

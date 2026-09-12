@@ -25,6 +25,10 @@ concurrency:
 # The suites generate their own device id per run (DeviceLibrary, "TST_*") and delete the
 # device and its user at teardown, so no DEVICE_ID is configured here and no cleanup step is
 # needed on the happy path — the one below only catches runs that crashed before teardown.
+#
+# NOTE: the `env:` key below is load-bearing. Without it these three lines parse as extra
+# members of `concurrency:` and the credentials never reach the job at all.
+env:
   C8Y_BASEURL: ${{ secrets.C8Y_BASEURL }}
   C8Y_USER: ${{ secrets.C8Y_USER }}
   C8Y_PASSWORD: ${{ secrets.C8Y_PASSWORD }}

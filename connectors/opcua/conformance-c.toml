@@ -6,7 +6,7 @@
 #
 # Run the full suite (layers 1-3, no external server or broker):
 #
-#   cargo run -p ot-conformance -- check --spec connectors/opcua/conformance-c.toml
+#   cargo run --manifest-path impl/rust/Cargo.toml -p ot-conformance -- check --spec connectors/opcua/conformance-c.toml
 #
 # The behavioural layer runs against the harness's embedded async-opcua server (anonymous,
 # security "None"), fronted by a transport proxy for the link-drop checks. The behavioural

@@ -31,17 +31,25 @@ same decode semantics (validated against the Rust SDK's golden vectors).
 
 ## Parity with the Rust implementation
 
-This table is the **single source of truth for what differs**, and it is
-enforced rather than aspirational:
+This table is the **single source of truth for what differs**:
 
-- a system test covering a capability listed here is tagged
-  `requires:<capability>` and is reported as SKIPPED for the implementation
-  that lacks it (see `C_MISSING_CAPABILITIES` in the [justfile](../../justfile)
-  and the convention documented in
-  [connectors/_shared/stack.resource](../../connectors/_shared/stack.resource));
 - everything NOT listed here runs the same suites against both builds — the
   e2e Robot suites, the cloud Cumulocity suites, the contract conformance
-  suite, the shared golden decode vectors and `describe` parity.
+  suite, the shared golden decode vectors and `describe` parity;
+- a capability listed here is declared in `C_MISSING_CAPABILITIES` in the
+  [justfile](../../justfile), and a test covering it is tagged
+  `requires:<capability>` and reported as SKIPPED for the build that lacks it
+  (the convention is documented in
+  [connectors/_shared/stack.resource](../../connectors/_shared/stack.resource)).
+
+**A gap is only *enforced* once a test carries its tag.** Three of the entries
+below are documented but not yet tested — nothing exercises OPC UA security,
+CAN FD or a PROFIBUS serial PHY in *either* implementation, so skipping them for
+the C build is currently a no-op. That is a real hole, and it is kept visible
+rather than implied away: `just check-capability-tags` cross-checks the tags
+against the declared lists, fails on a tag no list declares (a typo would
+otherwise silently run the test everywhere), and prints the capabilities that
+are still inert. CI runs it.
 
 | Capability | Rust | C | Notes |
 |---|---|---|---|
@@ -50,9 +58,9 @@ enforced rather than aspirational:
 | Push delivery (`subscribe`) | ✅ | ✅ | OPC UA monitored items. See "Push delivery" below for the CAN bus difference. |
 | `operation_timeout` | ✅ cancels the call | ✅ bounds the library | See "Liveness" below. |
 | `stall_timeout` | ✅ restarts the connector | ⚠️ restarts the process | See "Liveness" below. |
-| `opcua-security` | ✅ `Basic256Sha256`, … | ❌ `None` only | open62541 supports the policies; wiring them up is config + certificate plumbing that has not been done. Tests tagged `requires:opcua-security`. |
-| `canbus-fd` | ✅ | ❌ | Classic CAN frames only. Tests tagged `requires:canbus-fd`. |
-| `profibus-serial` | ✅ serial + `tcp://` | ❌ `tcp://` only | No serial PHY and no FDL token timing — fine against a device server or the simulator, not yet for a multi-master RS-485 bus. Tests tagged `requires:profibus-serial`. |
+| `opcua-security` | ✅ `Basic256Sha256`, … | ❌ `None` only | open62541 supports the policies; wiring them up is config + certificate plumbing that has not been done. **No test yet** (needs a secured endpoint in the e2e stack). |
+| `canbus-fd` | ✅ | ❌ | Classic CAN frames only. **No test yet.** |
+| `profibus-serial` | ✅ serial + `tcp://` | ❌ `tcp://` only | No serial PHY and no FDL token timing — fine against a device server or the simulator, not yet for a multi-master RS-485 bus. **No test yet.** |
 | CANopen segmented SDO | ❌ | ❌ | Neither implements it; expedited transfers (≤ 4 bytes) only. Not a parity gap. |
 | `stale` quality | ❌ | ❌ | Neither emits it; the contract allows it, no last-good cache exists. Not a parity gap. |
 | String / raw value length | unbounded | 64 bytes | Fixed buffers (`TDOT_RAW_MAX`). |
@@ -70,6 +78,24 @@ returns a stream the runtime selects on, the C vtable splits the job in two:
 `subscribe_device()` arms the subscription and `drain_subscriptions()` is called
 once per loop tick to hand over what arrived. The samples are published from the
 runtime loop either way, so a module never touches MQTT.
+
+Push delivery has a failure mode worth naming, because it is invisible by
+construction: a subscribed point is off the polling schedule, so if push stops
+the device simply goes quiet behind a retained `connected` link. open62541 does
+not surface every way that can happen through `UA_Client_run_iterate`, which
+keeps returning `GOOD` when a subscription is deleted server-side or dies with
+the session. The connector therefore also watches the subscription's
+delete/status-change/inactivity callbacks and the session state, and treats any
+of them as a dead link so the ordinary reconnect-and-re-subscribe path runs.
+
+Two of the three paths are covered end to end (`Push Delivery Recovers After
+The Server Restarts` and `... From A Silent Server` in the OPC UA suite). The
+third — a subscription deleted while the session stays healthy — **cannot be
+provoked with the suite's simulator**, so it is guarded by the checks above and
+by reading open62541's source, not by a test. Freezing the server, the obvious
+candidate, trips the client's request timeout instead and is caught by the
+transport check that was already there (verified by removing the new checks: the
+test still passes).
 
 The **CAN bus** module is the one place the two still differ in delivery: the
 Rust module pushes frames as they arrive, while this one renders the push-based

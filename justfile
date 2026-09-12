@@ -22,9 +22,17 @@ MANIFEST := "--manifest-path impl/rust/Cargo.toml"
 # `requires:<capability>` and is SKIPPED for that implementation -- reported as a skip, with a
 # reason, rather than quietly dropped or (worse) passing for the wrong reason.
 #
+# Every capability name a `requires:<capability>` tag may use. Declaring the vocabulary in one
+# place is what turns a mistyped tag into an error instead of a test that quietly runs against
+# a build that cannot pass it (see `just check-capability-tags`).
+KNOWN_CAPABILITIES := "subscribe opcua-security canbus-fd profibus-serial"
+
 # This list is the single source of truth for what the C build still lacks. Keep it in sync
 # with the parity table in impl/c/README.md. Adding a capability here is a deliberate act:
 # prefer implementing the feature.
+#
+# NOTE: a capability listed here only becomes ENFORCED once a test is tagged with it;
+# `just check-capability-tags` reports the ones that are still inert.
 C_MISSING_CAPABILITIES := "opcua-security canbus-fd profibus-serial"
 
 # Create/refresh the single Python virtualenv used by every system test (and by the editor,
@@ -93,6 +101,10 @@ fuzz target="decode_primitive" seconds="60":
 fuzz-all seconds="30":
     cd impl/rust/crates/sdk && for t in decode_primitive config_toml transform sample_envelope; do \
         cargo +nightly fuzz run $t -- -max_total_time={{seconds}} || exit 1; done
+
+# Cross-check the `requires:<capability>` test tags against the declared capability lists.
+check-capability-tags:
+    ./connectors/_shared/check-capability-tags.sh
 
 # Validate the thin-edge flows offline with `tedge flows test` (no broker/device/cloud).
 test-flows:
@@ -180,18 +192,26 @@ _missing-capabilities impl:
 _e2e proto impl args:
     #!/usr/bin/env bash
     set -euo pipefail
-    outdir=connectors/{{proto}}/output
+    case "{{impl}}" in
+        rust) outdir=connectors/{{proto}}/output ;;
+        c)    outdir=connectors/{{proto}}/output-c
+              export CONNECTOR_DOCKERFILE=connectors/_shared/Dockerfile.connector-c ;;
+        # Without this the stack would fall through to the Rust Dockerfile and report a
+        # fully green run as coverage of the OTHER implementation.
+        *)    echo "unknown implementation '{{impl}}' (expected rust or c)" >&2; exit 1 ;;
+    esac
     export IMPL={{impl}}
-    if [ "{{impl}}" = "c" ]; then
-        outdir=connectors/{{proto}}/output-c
-        export CONNECTOR_DOCKERFILE=connectors/_shared/Dockerfile.connector-c
-    fi
     # Tests covering a capability this implementation lacks are skipped, not dropped: they
     # show up in the report as skips so the parity gap stays visible.
+    #
+    # Assign first, THEN loop: a `while read < <(cmd)` swallows cmd's exit status entirely --
+    # neither `set -e` nor `pipefail` sees it -- so a failing lookup would silently produce an
+    # empty skip list instead of stopping the run.
+    caps=$(just _missing-capabilities {{impl}})
     skips=()
     while read -r cap; do
         [ -n "$cap" ] && skips+=(--skip "requires:$cap")
-    done < <(just _missing-capabilities {{impl}})
+    done <<< "$caps"
     just venv
     just _pull-stack-images connectors/{{proto}}/docker-compose.yaml
     ./.venv/bin/python -m robot \
@@ -286,14 +306,19 @@ test-cloud-c proto *args="":
 _cloud proto impl args:
     #!/usr/bin/env bash
     set -euo pipefail
-    outdir=cloud/{{proto}}/output
+    case "{{impl}}" in
+        rust) outdir=cloud/{{proto}}/output ;;
+        c)    outdir=cloud/{{proto}}/output-c ;;
+        *)    echo "unknown implementation '{{impl}}' (expected rust or c)" >&2; exit 1 ;;
+    esac
     export IMPL={{impl}}
-    if [ "{{impl}}" != "rust" ]; then outdir=cloud/{{proto}}/output-{{impl}}; fi
-    # Same capability skipping as the connector suites (see _missing-capabilities).
+    # Same capability skipping as the connector suites, and the same reason for assigning
+    # before looping (see _e2e).
+    caps=$(just _missing-capabilities {{impl}})
     skips=()
     while read -r cap; do
         [ -n "$cap" ] && skips+=(--skip "requires:$cap")
-    done < <(just _missing-capabilities {{impl}})
+    done <<< "$caps"
     just venv
     ./.venv/bin/python -m robot \
         --outputdir "$outdir" --variable IMPL:{{impl}} "${skips[@]+"${skips[@]}"}" {{args}} \

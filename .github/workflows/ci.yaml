@@ -34,6 +34,16 @@ jobs:
       - name: Clippy
         run: just lint
 
+  # Cheap guard on the parity mechanism itself: a mistyped `requires:` tag is never skipped,
+  # and a capability nothing is tagged with makes the skip a no-op.
+  capability-tags:
+    name: Capability tag consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - run: just check-capability-tags
+
   flows:
     name: Flow tests (tedge flows test)
     runs-on: ubuntu-latest

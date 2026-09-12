@@ -9,9 +9,9 @@
 # Two ways to use it:
 #
 #   * Local exploration, no broker needed — the read/write CLI ignores [mqtt]:
-#       cargo run -- read  -c demo/config/opcua.toml -d opc1 -p temperature -p count_u32 --json
-#       cargo run -- write -c demo/config/opcua.toml -d opc1 -p setpoint --value 42
-#       cargo run -- read  -c demo/config/opcua.toml -d opc1 -p bad_point  # exits 1 (bad quality)
+#       cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/opcua.toml -d opc1 -p temperature -p count_u32 --json
+#       cargo run --manifest-path impl/rust/Cargo.toml -- write -c demo/config/opcua.toml -d opc1 -p setpoint --value 42
+#       cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/opcua.toml -d opc1 -p bad_point  # exits 1 (bad quality)
 #
 #   * Installed demo — ships with the tedge-dot package in /usr/share/tedge-dot/demo/.
 #     Copy it to /etc/tedge/plugins/ot/ and restart tedge-dot.service to run it

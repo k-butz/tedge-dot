@@ -52,7 +52,7 @@ every connector that advertises a datatype must pass the vectors for it.
 
 Vectors are stored as data (JSON), not code, so they are language-neutral and AI-auditable.
 The file lives at [`impl/rust/crates/sdk/conformance/vectors.json`](../../impl/rust/crates/sdk/conformance/vectors.json)
-and is enforced on every `cargo test` via `tedge_dot_sdk::conformance`:
+and is enforced on every `cargo test --manifest-path impl/rust/Cargo.toml` via `tedge_dot_sdk::conformance`:
 
 ```json
 {
@@ -174,16 +174,16 @@ agree.
 
 ```sh
 # Everything (layers 1-3; no external broker, simulator or hardware needed):
-cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml
+cargo run --manifest-path impl/rust/Cargo.toml -p ot-conformance -- check --spec connectors/modbus/conformance.toml
 
 # Layers 1 & 2 only — fast, static:
-cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml --static
+cargo run --manifest-path impl/rust/Cargo.toml -p ot-conformance -- check --spec connectors/modbus/conformance.toml --static
 
 # Layer 3 only — behavioural (connector ⇄ simulator ⇄ test broker):
-cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml --behavioural
+cargo run --manifest-path impl/rust/Cargo.toml -p ot-conformance -- check --spec connectors/modbus/conformance.toml --behavioural
 
 # Machine-readable reports for CI / agents:
-cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml \
+cargo run --manifest-path impl/rust/Cargo.toml -p ot-conformance -- check --spec connectors/modbus/conformance.toml \
     --junit conformance-report.xml --json conformance-report.json
 ```
 
@@ -191,7 +191,7 @@ cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml \
 [`impl/rust/crates/ot-conformance`](../../impl/rust/crates/ot-conformance/)). It exits non-zero on any failure and
 emits a machine-readable report (JUnit + JSON) suitable for CI and for an AI agent to consume
 and self-correct against. The full suite also runs as a workspace integration test
-(`cargo test -p ot-conformance`), so a connector PR cannot silently break conformance.
+(`cargo test --manifest-path impl/rust/Cargo.toml -p ot-conformance`), so a connector PR cannot silently break conformance.
 
 ## 7. Definition of "conformant"
 

@@ -210,6 +210,13 @@ nfpms:
           mode: 0644
           owner: root
 
+# Snapshot builds must carry the SAME version string as the C build's, or one `snapshot`
+# pre-release ends up holding tedge-dot-rs and tedge-dot-c at what look like two different
+# versions. The C side computes this in .github/workflows/release.yaml (`version` job); keep
+# the two in step.
+snapshot:
+  version_template: "0.0.0-pre.{{ .ShortCommit }}"
+
 changelog:
   sort: asc
   filters:

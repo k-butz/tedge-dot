@@ -94,9 +94,9 @@ permanent `#[test]` so the fuzz corpus is not the only memory of the bug.
 ## Platform-gated code
 
 The SocketCAN connectors (`canbus`, `canopen`) hide their transport behind
-`#[cfg(target_os = "linux")]`, so a macOS `cargo build` silently skips them — Linux-only
+`#[cfg(target_os = "linux")]`, so a macOS `cargo build --manifest-path impl/rust/Cargo.toml` silently skips them — Linux-only
 compile errors then surface only inside the Docker e2e build. Run `just check-linux` (cross
-`cargo check`) after touching cfg-gated code; it caught the canopen Linux path failing to
+`cargo check --manifest-path impl/rust/Cargo.toml`) after touching cfg-gated code; it caught the canopen Linux path failing to
 compile while the host build was green.
 
 ## What a new connector must ship with

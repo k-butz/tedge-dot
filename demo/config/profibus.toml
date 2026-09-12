@@ -3,7 +3,7 @@
 #
 # Not shipped in the released package: the packaged binary is built without the
 # profibus cargo feature (its serial dependency does not cross-compile yet), so
-# this config needs a source-built binary: cargo build --features profibus
+# this config needs a source-built binary: cargo build --manifest-path impl/rust/Cargo.toml --features profibus
 # (Linux only). Copy it to /etc/tedge/plugins/ot/ to run it.
 #
 # The connector speaks serial-over-TCP to the simulator directly (the sim

@@ -34,6 +34,12 @@ ${FLOWS_TIMEOUT}        120
 # Generous timeout: the connector waits for the simulator/broker before it starts.
 ${READY_TIMEOUT}        90
 ${SAMPLE_TIMEOUT}       15
+# Reconnect uses a 1s->60s exponential backoff, and re-subscribing needs a fresh session.
+${RECOVERY_TIMEOUT}     90
+# How long a frozen server must stay frozen for the connector to conclude the subscription is
+# no longer delivering: operation_timeout (5s, see connector.toml) plus the subscription's
+# publishing_interval x max_keep_alive_count (1s x 20), with margin.
+${SUBSCRIPTION_INACTIVITY_WAIT}     35s
 
 
 *** Test Cases ***
@@ -156,6 +162,41 @@ Subscribed Static Node Falls Silent After Its First Value
     Should Be True    abs(${value} - 21.5) < 0.05
     # ...and then nothing more, because the node never changes.
     No New Messages On Topic    ${SAMPLE_PREFIX}/temperature_pushed    timeout=5
+
+Push Delivery Recovers After The Server Restarts
+    [Documentation]    A subscribed point is OFF the polling schedule, so if push stops the
+    ...                device goes silent and nothing else notices. When the server restarts,
+    ...                the connector must drop the link, reconnect and re-arm the subscription
+    ...                — otherwise samples never come back.
+    [Tags]    requires:subscribe
+    Wait For Message Containing    ${SAMPLE_PREFIX}/ticks    "quality"    timeout=${SAMPLE_TIMEOUT}
+    Restart Stack Service    simulator
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${RECOVERY_TIMEOUT}
+    Sample Should Be Good    ${payload}
+
+Push Delivery Recovers From A Silent Server
+    [Documentation]    Freezing the server leaves the TCP connection ESTABLISHED and simply
+    ...                stops every answer — the contract's silent-peer case (§8.1), but on the
+    ...                PUSH path, where the conformance suite's B5 checks do not reach: every
+    ...                point in the conformance config is `subscribe = false`. A subscribed
+    ...                point is off the polling schedule, so if push stalls there is nothing
+    ...                else to notice it.
+    ...
+    ...                Measured: this trips the client's request timeout
+    ...                (connector.operation_timeout), which the connector reports as a dead
+    ...                transport. It does NOT cover a subscription that dies while the session
+    ...                stays healthy — see the note in impl/c/README.md; that path is guarded
+    ...                by explicit checks but cannot be provoked with this simulator.
+    [Tags]    requires:subscribe
+    Wait For Message Containing    ${SAMPLE_PREFIX}/ticks    "quality"    timeout=${SAMPLE_TIMEOUT}
+    Freeze Stack Service    simulator
+    # Long enough for the keep-alive window to lapse: the connector's operation_timeout plus
+    # publishing_interval x max_keep_alive_count (see connector.toml).
+    Sleep    ${SUBSCRIPTION_INACTIVITY_WAIT}
+    Thaw Stack Service    simulator
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/ticks    timeout=${RECOVERY_TIMEOUT}
+    Sample Should Be Good    ${payload}
+    [Teardown]    Run Keyword And Ignore Error    Thaw Stack Service    simulator
 
 Pushed Sample Echoes Point Meta
     [Documentation]    The point's free-form meta table (connector config) is echoed verbatim

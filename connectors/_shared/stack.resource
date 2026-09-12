@@ -97,6 +97,34 @@ Teardown OT Stack
     Run Keyword And Ignore Error    Collect Stack Logs
     Run Keyword And Ignore Error    Disconnect Broker
 
+Run Compose
+    [Documentation]    Run a docker compose subcommand against THIS suite's stack (the project
+    ...    name is random per suite, so it has to be resolved at runtime).
+    [Arguments]    ${args}
+    ${project}=    DeviceLibrary.Get Compose Project Name
+    ${rc}=    Run And Return Rc    docker compose -p ${project} ${args}
+    Should Be Equal As Integers    ${rc}    ${0}
+    ...    msg=`docker compose -p ${project} ${args}` failed
+    RETURN    ${project}
+
+Restart Stack Service
+    [Documentation]    Restart one service of the stack — the peer goes away and comes back,
+    ...    dropping the transport with it. Use it to exercise the connector's reconnect path.
+    [Arguments]    ${service}
+    Run Compose    restart ${service}
+
+Freeze Stack Service
+    [Documentation]    SIGSTOP one service of the stack. Unlike a restart this leaves the TCP
+    ...    connection ESTABLISHED and simply stops all answers, which is the harder failure to
+    ...    detect: nothing tells the client the peer is gone. Thaw it with `Thaw Stack Service`.
+    [Arguments]    ${service}
+    Run Compose    pause ${service}
+
+Thaw Stack Service
+    [Documentation]    Resume a service frozen with `Freeze Stack Service`.
+    [Arguments]    ${service}
+    Run Compose    unpause ${service}
+
 Collect Stack Logs
     [Documentation]    Container logs of every service of the stack (docker compose logs).
     DeviceLibrary.Get Service Logs

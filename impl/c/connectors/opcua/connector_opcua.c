@@ -47,6 +47,15 @@ typedef struct {
     /* Push delivery state, all reset on (re)connect. */
     UA_UInt32 sub_id;
     bool subscribed;
+    /* Set from open62541's callbacks when the subscription stops existing --
+     * deleted by the server, killed with the session, or gone quiet past its
+     * keep-alive. open62541 does NOT surface any of these through
+     * UA_Client_run_iterate's return code (it keeps returning GOOD), so
+     * without this flag a dead subscription would look exactly like a device
+     * that simply has nothing new to report: the points stay off the polling
+     * schedule and the device goes silent for good behind a healthy-looking
+     * `connected` link. */
+    bool sub_lost;
     ua_pending_t queue[UA_PUSH_QUEUE_LEN];
     size_t head; /* next slot to write */
     size_t tail; /* next slot to read */
@@ -189,6 +198,7 @@ static void disconnect_device(tdot_connector_t *self, tdot_device_t *dev) {
          * already cleared pt->subscribed for every point. */
         ua->sub_id = 0;
         ua->subscribed = false;
+        ua->sub_lost = false;
         ua->head = ua->tail = 0;
         ua->dropped = 0;
     }
@@ -557,6 +567,46 @@ static void on_data_change(UA_Client *client, UA_UInt32 sub_id,
     ua->head = next;
 }
 
+/* The subscription is gone. All three hooks below mean the same thing to us --
+ * push delivery has stopped -- and are handled by dropping the link so the
+ * runtime's existing reconnect/re-subscribe path runs. */
+static void mark_subscription_lost(tdot_device_t *dev) {
+    if (!dev)
+        return;
+    ua_device_t *ua = dev->proto;
+    if (!ua)
+        return;
+    ua->subscribed = false;
+    ua->sub_lost = true;
+}
+
+/* Server deleted the subscription, or it died with the session. */
+static void on_subscription_deleted(UA_Client *client, UA_UInt32 sub_id,
+                                    void *sub_ctx) {
+    (void)client;
+    (void)sub_id;
+    mark_subscription_lost(sub_ctx);
+}
+
+/* Server reported a status change on the subscription (e.g. BadTimeout). */
+static void on_subscription_status_change(UA_Client *client, UA_UInt32 sub_id,
+                                          void *sub_ctx,
+                                          UA_StatusChangeNotification *n) {
+    (void)client;
+    (void)sub_id;
+    (void)n;
+    mark_subscription_lost(sub_ctx);
+}
+
+/* No PublishResponse within the keep-alive window: the path is up but the
+ * subscription is not delivering. */
+static void on_subscription_inactivity(UA_Client *client, UA_UInt32 sub_id,
+                                       void *sub_ctx) {
+    (void)client;
+    (void)sub_id;
+    mark_subscription_lost(sub_ctx);
+}
+
 static int subscribe_device(tdot_connector_t *self, tdot_device_t *dev,
                             char *err, size_t errlen) {
     (void)self;
@@ -568,6 +618,7 @@ static int subscribe_device(tdot_connector_t *self, tdot_device_t *dev,
 
     ua->sub_id = 0;
     ua->subscribed = false;
+    ua->sub_lost = false;
     ua->head = ua->tail = 0;
     ua->dropped = 0;
 
@@ -593,15 +644,22 @@ static int subscribe_device(tdot_connector_t *self, tdot_device_t *dev,
     req.requestedPublishingInterval = fastest;
     req.requestedLifetimeCount = 60;
     req.requestedMaxKeepAliveCount = 20;
+    UA_Client_getConfig(ua->client)->subscriptionInactivityCallback =
+        on_subscription_inactivity;
     UA_CreateSubscriptionResponse resp = UA_Client_Subscriptions_create(
-        ua->client, req, dev /*subContext*/, NULL, NULL);
+        ua->client, req, dev /*subContext*/, on_subscription_status_change,
+        on_subscription_deleted);
     if (resp.responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
         snprintf(err, errlen, "create_subscription failed: %s",
                  UA_StatusCode_name(resp.responseHeader.serviceResult));
+        UA_CreateSubscriptionResponse_clear(&resp);
         return -1;
     }
     ua->sub_id = resp.subscriptionId;
     ua->subscribed = true;
+    /* The response header can carry a heap-allocated diagnostics/string table;
+     * a flapping link re-subscribes often enough for that to add up. */
+    UA_CreateSubscriptionResponse_clear(&resp);
 
     size_t armed = 0;
     for (size_t j = 0; j < dev->npoints; j++) {
@@ -611,8 +669,10 @@ static int subscribe_device(tdot_connector_t *self, tdot_device_t *dev,
         ua_point_t *up = pt->proto;
         UA_NodeId node;
         if (UA_NodeId_parse(&node, UA_STRING(up->node_id)) !=
-            UA_STATUSCODE_GOOD)
+            UA_STATUSCODE_GOOD) {
+            UA_NodeId_clear(&node);
             continue; /* the polling path reports this as a bad sample */
+        }
 
         UA_MonitoredItemCreateRequest mreq =
             UA_MonitoredItemCreateRequest_default(node);
@@ -631,6 +691,7 @@ static int subscribe_device(tdot_connector_t *self, tdot_device_t *dev,
             pt->subscribed = true;
             armed++;
         }
+        UA_MonitoredItemCreateResult_clear(&mres); /* filterResult may be heap */
     }
     if (armed == 0) {
         /* The subscription exists but carries nothing: tear it down rather than
@@ -650,15 +711,38 @@ static int drain_subscriptions(tdot_connector_t *self, tdot_device_t *dev,
                                tdot_sample_sink_t sink, void *sink_ctx) {
     (void)self;
     ua_device_t *ua = dev->proto;
-    if (!ua || !ua->client || !ua->subscribed)
+    if (!ua || !ua->client)
+        return 0;
+    if (ua->sub_lost)
+        return -1; /* reported below; drop the link so we re-subscribe */
+    if (!ua->subscribed)
         return 0;
 
     /* Non-blocking: services whatever publish responses have arrived, firing
      * on_data_change() for each notification, and keeps publish requests in
-     * flight. */
+     * flight. It can also fire the subscription callbacks above, so re-check
+     * sub_lost afterwards. */
     UA_StatusCode rc = UA_Client_run_iterate(ua->client, 0);
     if (rc != UA_STATUSCODE_GOOD)
         return -1; /* session gone: the runtime reconnects and re-subscribes */
+    if (ua->sub_lost) {
+        fprintf(stderr,
+                "warn  device %s: OPC UA subscription lost; reconnecting\n",
+                dev->name);
+        return -1;
+    }
+
+    /* The session can also go down without run_iterate saying so. Points
+     * delivered by push are off the polling schedule, so nothing else would
+     * notice. */
+    UA_SecureChannelState channel_state;
+    UA_SessionState session_state;
+    UA_StatusCode connect_status;
+    UA_Client_getState(ua->client, &channel_state, &session_state,
+                       &connect_status);
+    if (session_state != UA_SESSIONSTATE_ACTIVATED ||
+        connect_status != UA_STATUSCODE_GOOD)
+        return -1;
 
     while (ua->tail != ua->head) {
         ua_pending_t *slot = &ua->queue[ua->tail];

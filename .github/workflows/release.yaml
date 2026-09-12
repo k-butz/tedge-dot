@@ -21,7 +21,11 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    # Both conventions: this repository's existing release tags carry no prefix
+    # (0.0.1-alpha.1, 0.0.1-alpha.2) and a `v*` pattern alone would turn a tag push into a
+    # silent no-op -- no release, no publish, no error anywhere. `c-v*` is gone with
+    # release-c.yaml; a stray one must not trigger a full release.
+    tags: ["v*", "[0-9]*", "!c-v*"]
   workflow_dispatch:
     inputs:
       publish_snapshot:
@@ -31,6 +35,12 @@ on:
 
 permissions:
   contents: write
+
+# Two tags pushed close together would otherwise race over the rolling `snapshot` release and
+# over ci/publish.sh. Releases are cheap to redo and expensive to corrupt, so queue them.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
   # Debian architectures the C build targets, and the oldest glibc its binaries must run on.
@@ -52,7 +62,9 @@ jobs:
           if [ "${{ github.ref_type }}" = "tag" ]; then
             v="${{ github.ref_name }}"; v="${v#v}"
           else
-            v="0.0.0-dev.$(git rev-parse --short HEAD)"
+            # Must match .goreleaser.yaml's `snapshot.version_template`, or one `snapshot`
+            # pre-release carries the two packages at what look like different versions.
+            v="0.0.0-pre.$(git rev-parse --short HEAD)"
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Releasing version $v"
@@ -94,7 +106,7 @@ jobs:
           version: "~> v2"
           args: >-
             release --clean --skip=publish,announce
-            ${{ github.ref_type != 'tag' && '--snapshot' || '' }}
+            ${{ (github.event_name == 'push' && github.ref_type == 'tag') && '' || '--snapshot' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -203,7 +215,12 @@ jobs:
             mkdir -p "pkgroot/$staging"
             cp "impl/c/dist/$arch/tedge-dot" "pkgroot/$staging/"
             cp impl/c/README.md "pkgroot/$staging/"
-            cp -r impl/c/packaging/config "pkgroot/$staging/config-defaults"
+            # Both halves of the default config set, as the .deb installs them: the shared
+            # ones and the C-only profibus. Copying impl/c/packaging/config alone would ship a
+            # config-defaults/ containing nothing but profibus.toml.
+            mkdir -p "pkgroot/$staging/config-defaults"
+            cp packaging/config/*.toml impl/c/packaging/config/*.toml \
+               "pkgroot/$staging/config-defaults/"
             # The device-side flows, as the packages ship them (see flows/README.md):
             # a tarball install is manual, so the whole set travels with the binary.
             mkdir -p "pkgroot/$staging/flows"
@@ -252,7 +269,9 @@ jobs:
   publish:
     name: Publish release
     needs: [version, rust, c]
-    if: github.ref_type == 'tag' || inputs.publish_snapshot
+    # `github.ref_type` is 'tag' for a MANUAL run started from a tag too, which would turn
+    # "Run workflow" into a full production release + Cloudsmith push. Only a tag PUSH counts.
+    if: (github.event_name == 'push' && github.ref_type == 'tag') || inputs.publish_snapshot
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -281,7 +300,7 @@ jobs:
       - name: Resolve release tag
         id: rel
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "tag" ]; then
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
             echo "title=tedge-dot ${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
             echo "prerelease=" >> "$GITHUB_OUTPUT"
@@ -320,15 +339,19 @@ jobs:
           if [ "$TAG" = "snapshot" ]; then
             gh release delete "$TAG" --yes --cleanup-tag || true
           fi
+          # Re-runnable: if a previous attempt created the release and then failed (a flaky
+          # asset upload, the Cloudsmith step below), `create` would die with "already exists"
+          # and need a manual cleanup. Fall back to replacing the assets on the existing one.
           gh release create "$TAG" dist/* \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "$TITLE" \
             --notes-file notes.md \
-            $PRERELEASE
+            $PRERELEASE \
+          || gh release upload "$TAG" dist/* --repo "${{ github.repository }}" --clobber
 
       - name: Publish packages to Cloudsmith
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
           PUBLISH_OWNER: thinedge

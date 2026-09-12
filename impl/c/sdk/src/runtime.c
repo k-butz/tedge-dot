@@ -42,11 +42,16 @@ typedef struct {
     const char *name; /* config path, for the log line */
 } progress_t;
 
+/* Written by the signal handler AND by the main thread (to wake the watchdog), read by every
+ * worker and by the watchdog thread. sig_atomic_t alone covers the signal handler but not the
+ * cross-thread reads, so make it atomic outright; it is touched once per tick. */
 static volatile sig_atomic_t g_stop = 0;
+static _Atomic int g_stop_threads = 0;
 
 static void on_signal(int sig) {
     (void)sig;
     g_stop = 1;
+    atomic_store(&g_stop_threads, 1);
 }
 
 typedef struct {
@@ -1079,18 +1084,18 @@ static void *watchdog_main(void *arg) {
     if (period <= 0)
         return NULL; /* nothing armed; start_watchdog should have caught this */
 
-    while (!g_stop) {
+    while (!atomic_load(&g_stop_threads)) {
         /* Sleep in short slices rather than one long nap: the check only needs
          * to happen every `period`, but shutdown must not wait for it. A single
          * nanosleep(period) would hold the process open for up to 10s after the
          * workers have finished. */
         double slept = 0;
-        while (slept < period && !g_stop) {
+        while (slept < period && !atomic_load(&g_stop_threads)) {
             struct timespec ts = {.tv_sec = 0, .tv_nsec = TICK_MS * 1000000L};
             nanosleep(&ts, NULL);
             slept += TICK_MS / 1000.0;
         }
-        if (g_stop)
+        if (atomic_load(&g_stop_threads))
             break;
         long long now_ms = (long long)(tdot_mono() * 1000.0);
         for (size_t i = 0; i < wd->n; i++) {
@@ -1153,7 +1158,7 @@ int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
     int rc = run_connector(conn, cfg, opts, &slot);
 
     if (watching) {
-        g_stop = 1; /* wake the watchdog out of its sleep loop */
+        atomic_store(&g_stop_threads, 1); /* wake the watchdog out of its sleep loop */
         pthread_join(wd_thread, NULL);
     }
     if (opts->output == TDOT_OUTPUT_MQTT)
@@ -1244,7 +1249,7 @@ int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
     for (size_t i = 0; i < started; i++)
         pthread_join(threads[i], NULL);
     if (watching) {
-        g_stop = 1; /* wake the watchdog out of its sleep loop */
+        atomic_store(&g_stop_threads, 1); /* wake the watchdog out of its sleep loop */
         pthread_join(wd_thread, NULL);
     }
 

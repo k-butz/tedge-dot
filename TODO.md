@@ -22,6 +22,21 @@
       polling — same samples, worse latency, so it is not tagged), and the 64-byte cap on
       string/raw values (`TDOT_RAW_MAX`).
 
+* [ ] The `.apk` packages carry versions apk-tools rejects, for BOTH implementations and for
+      real releases, not just snapshots: `apk version -c` reports `0.0.1-alpha.2` (this
+      repository's existing tag format) and `0.0.0_pre.<sha>` (what nfpm derives from the
+      snapshot version) as invalid, because apk's grammar allows `_pre1` but not `_pre.<hash>`
+      and no bare `-alpha.2`. Valid forms are e.g. `0.0.1_alpha2` or `0.0.0~<sha>`. Fixing it
+      means either an apk-specific version override in both packaging configs or a change to
+      the tag convention. Nothing in CI installs an apk, which is why it has gone unnoticed —
+      a `apk add --allow-untrusted` smoke on the built package would catch it.
+
+* [ ] A simulator hook to delete an OPC UA subscription server-side while leaving the session
+      up. It is the one push-failure path neither implementation can be tested against today
+      (see the note in `impl/c/README.md`): open62541 reports the client as healthy throughout,
+      so a regression there would be silent. `connectors/opcua/sim/` would need an endpoint or
+      a method the suite can call.
+
 * [ ] Fuzz the C parsers. The validation policy below requires a fuzz target for anything
       parsing external input; the Rust SDK has four (`just fuzz-all`), the C build has none,
       so its TOML loader (tomlc99) and DBC parser are only covered by the shared golden

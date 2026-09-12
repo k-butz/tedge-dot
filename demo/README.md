@@ -17,7 +17,7 @@ configs ([config/](config/)) supports two workflows:
 Build the connector once:
 
 ```sh
-cargo build
+cargo build --manifest-path impl/rust/Cargo.toml
 ```
 
 ### Modbus
@@ -29,25 +29,25 @@ The Modbus simulator (pymodbus) runs in Docker and exposes port 502 as host
 just sim modbus     # docker compose up the simulator on 127.0.0.1:5020
 
 # read typed values (uint16 / float32 / bool)
-cargo run -- read  -c demo/config/modbus.toml -d plc1 -p temp_u16 -p level_f32 -p coil_rw
+cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/modbus.toml -d plc1 -p temp_u16 -p level_f32 -p coil_rw
 
 # read everything: -d/-p default to '*' (all devices, all readable points)
-cargo run -- read  -c demo/config/modbus.toml
+cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/modbus.toml
 
 # keep polling matching points (config interval; --interval/--count override)
-cargo run -- read  -c demo/config/modbus.toml -p 'temp_*' --poll
-cargo run -- read  -c demo/config/modbus.toml --interval 500ms --count 5
+cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/modbus.toml -p 'temp_*' --poll
+cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/modbus.toml --interval 500ms --count 5
 
 # write and read back (a wildcard -p writes the value to every matching writable point)
-cargo run -- write -c demo/config/modbus.toml -d plc1 -p coil_rw  --value true
-cargo run -- write -c demo/config/modbus.toml -d plc1 -p temp_u16 --value 1234
-cargo run -- read  -c demo/config/modbus.toml -d plc1 -p temp_u16 --json
+cargo run --manifest-path impl/rust/Cargo.toml -- write -c demo/config/modbus.toml -d plc1 -p coil_rw  --value true
+cargo run --manifest-path impl/rust/Cargo.toml -- write -c demo/config/modbus.toml -d plc1 -p temp_u16 --value 1234
+cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/modbus.toml -d plc1 -p temp_u16 --json
 
 # a point that returns a Modbus exception -> bad quality, exit code 1
-cargo run -- read  -c demo/config/modbus.toml -d plc1 -p bad_point
+cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/modbus.toml -d plc1 -p bad_point
 
 # run the connector without a broker: sample envelopes as JSON lines on stdout
-cargo run -- run   -c demo/config/modbus.toml --output stdout --duration 10s
+cargo run --manifest-path impl/rust/Cargo.toml -- run   -c demo/config/modbus.toml --output stdout --duration 10s
 
 just sim-down modbus
 ```
@@ -61,15 +61,15 @@ The OPC-UA simulator (python-asyncua) runs in Docker and advertises
 just sim opcua      # docker compose up the simulator on 127.0.0.1:4840
 
 # read typed values (float64 / uint32 / int32 / bool)
-cargo run -- read  -c demo/config/opcua.toml -d opc1 -p temperature -p count_u32 -p setpoint -p running --json
+cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/opcua.toml -d opc1 -p temperature -p count_u32 -p setpoint -p running --json
 
 # write and read back
-cargo run -- write -c demo/config/opcua.toml -d opc1 -p setpoint --value 42
-cargo run -- write -c demo/config/opcua.toml -d opc1 -p running  --value true
-cargo run -- read  -c demo/config/opcua.toml -d opc1 -p setpoint
+cargo run --manifest-path impl/rust/Cargo.toml -- write -c demo/config/opcua.toml -d opc1 -p setpoint --value 42
+cargo run --manifest-path impl/rust/Cargo.toml -- write -c demo/config/opcua.toml -d opc1 -p running  --value true
+cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/opcua.toml -d opc1 -p setpoint
 
 # a node that returns a Bad status -> bad quality, exit code 1
-cargo run -- read  -c demo/config/opcua.toml -d opc1 -p bad_point
+cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/opcua.toml -d opc1 -p bad_point
 
 just sim-down opcua
 ```
@@ -121,7 +121,7 @@ The connectors publish samples to the thin-edge.io MQTT broker
 > **PROFIBUS caveat:** the released package is built without the `profibus`
 > cargo feature (its serial dependency does not cross-compile yet). To include
 > the PROFIBUS connector in the demo, build the binary from source on the
-> device (`cargo build --release --features profibus`) and copy
+> device (`cargo build --manifest-path impl/rust/Cargo.toml --release --features profibus`) and copy
 > [config/profibus.toml](config/profibus.toml) into `/etc/tedge/plugins/ot/` —
 > the connector speaks serial-over-TCP to the simulator directly
 > (`port = "tcp://127.0.0.1:9200"`). The other four protocols work out of the

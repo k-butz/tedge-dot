@@ -16,24 +16,43 @@ Download the package for your architecture from the assets below, then:
 
 ```sh
 # Debian / Ubuntu
-sudo apt-get install -y ./tedge-dot-rs_*_linux_amd64.deb   # or ./tedge-dot-c_*_amd64.deb
+sudo apt-get install -y ./tedge-dot-rs_*_linux_amd64.deb    # or ./tedge-dot-c_*_amd64.deb
 sudo systemctl status tedge-dot
 
 # RPM distros
-sudo dnf install ./tedge-dot-rs-*.x86_64.rpm
+sudo dnf install ./tedge-dot-rs_*_linux_amd64.rpm           # or ./tedge-dot-c_*_amd64.rpm
 
 # Alpine
-sudo apk add --allow-untrusted ./tedge-dot-rs_*_x86_64.apk
+sudo apk add --allow-untrusted ./tedge-dot-rs_*_linux_amd64.apk
 ```
 
 Or grab a tarball and run the binary directly — it doubles as a one-shot
-read/write CLI:
+read/write CLI. The `tedge-dot-c` tarball carries the default configs to start from:
 
 ```sh
 ./tedge-dot read -c config-defaults/modbus.toml --json
 ```
 
 `SHA256SUMS` covers every asset in this release.
+
+### Upgrading from a release before the split
+
+The package formerly called `tedge-dot` is now **`tedge-dot-rs`**. Both packages
+`Replaces:` the old name, so installing either over an existing `tedge-dot`
+works and keeps your `/etc/tedge/plugins/ot/` configuration:
+
+```sh
+sudo apt-get install -y ./tedge-dot-rs_*_linux_amd64.deb
+```
+
+Two caveats:
+
+- `apt install tedge-dot` no longer resolves — `tedge-dot` is now a *virtual*
+  package provided by both, so apt cannot choose. Install by the real name.
+  Scripts and runbooks using the old name need updating.
+- A plain `apt upgrade` will **not** migrate an existing `tedge-dot` install; it
+  stays on the old package name and receives no further updates until you
+  install one of the new ones explicitly.
 
 ### Notes
 
@@ -49,6 +68,11 @@ read/write CLI:
   cross-compiled with zig against the glibc 2.17 floor.
 - `tedge-dot-rs` omits the PROFIBUS connector: its serial dependency has a
   native libudev build script that does not cross-compile. Build from source on
-  Linux with `cargo build --features profibus`, or use `tedge-dot-c`.
+  Linux with `cargo build --manifest-path impl/rust/Cargo.toml --features profibus`, or use `tedge-dot-c`.
 - Where the two implementations differ in behaviour, see the parity table in
   `impl/c/README.md`.
+- On **Alpine**, the two packages are not mutually exclusive by metadata: apk
+  expresses conflicts differently and the `conflicts` field is not carried into
+  the `.apk`. Installing one over the other will collide on
+  `/usr/bin/tedge-dot` — remove the first with `apk del` before installing the
+  second, rather than forcing the overwrite.

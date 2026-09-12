@@ -1,6 +1,6 @@
 # Conformance manifest for the CANopen connector.
 #
-#   cargo run -p ot-conformance -- check --spec connectors/canopen/conformance.toml
+#   cargo run --manifest-path impl/rust/Cargo.toml -p ot-conformance -- check --spec connectors/canopen/conformance.toml
 #
 # Runs the static layers (schema examples, golden decode vectors, manifest ↔ compiled
 # capability agreement). The declared simulator is the Dockerised vcan stack (python-canopen
