@@ -197,6 +197,29 @@ impl LinkTracker {
             warn!(%device, "failed to publish link transition: {e}");
         }
     }
+
+    /// Publish every recorded status again, unchanged, for a broker that lost its retained
+    /// messages. Devices a management command removed are skipped, and the failure `reason`
+    /// is not recorded, so a republished status carries none.
+    async fn republish(
+        &self,
+        client: &AsyncClient,
+        config: &ConnectorConfig,
+    ) -> Result<(), BoxError> {
+        let mut reports: Vec<LinkReport> = self
+            .states
+            .iter()
+            .filter(|(device, _)| config.devices.iter().any(|d| &d.name == *device))
+            .map(|(device, status)| LinkReport {
+                device: device.clone(),
+                status: *status,
+                reason: None,
+                info: self.infos.get(device).cloned(),
+            })
+            .collect();
+        reports.sort_by(|a, b| a.device.cmp(&b.device));
+        publish_links(client, &self.protocol, &reports, config).await
+    }
 }
 
 /// Reconnect backoff bounds: first retry after one second, doubling to a one-minute cap.
@@ -420,12 +443,26 @@ pub async fn run_until_watched(
     // after the broker comes back. (Observed when the connector service started before the
     // broker.) A dedicated task keeps draining the queue no matter what the main loop awaits.
     let (incoming_tx, mut incoming_rx) = tokio::sync::mpsc::channel::<rumqttc::Publish>(32);
+    // Every CONNACK after the first is a reconnect. The session is clean, so the broker has
+    // forgotten the command subscriptions (commands would silently never arrive again), and a
+    // broker that restarted without persistence every retained message too. The main loop owns
+    // what must be restored — the live config and link states — so this task only signals it.
+    let reconnected = Arc::new(tokio::sync::Notify::new());
+    let reconnected_tx = reconnected.clone();
     tokio::spawn(async move {
+        let mut sessions = 0u64;
         loop {
             match eventloop.poll().await {
                 Ok(Event::Incoming(Packet::Publish(p))) => {
                     if incoming_tx.send(p).await.is_err() {
                         break; // runtime shut down
+                    }
+                }
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    sessions += 1;
+                    if sessions > 1 {
+                        info!("reconnected to MQTT broker");
+                        reconnected_tx.notify_one();
                     }
                 }
                 Ok(_) => {}
@@ -575,6 +612,15 @@ pub async fn run_until_watched(
             Some(mut sample) = sample_rx.recv() => {
                 publish_sample(&client, &protocol, &mut sample, &mut seq_counters, &meta_index)
                     .await;
+                progress.mark();
+            }
+            _ = reconnected.notified() => {
+                if let Err(e) = restore_mqtt_session(
+                    &client, &[&device_cmd_sub, &service_cmd_sub], &health_topic, &cap_topic,
+                    &caps, &config, &links,
+                ).await {
+                    warn!("failed to restore the MQTT session after reconnecting: {e}");
+                }
                 progress.mark();
             }
             Some(p) = incoming_rx.recv() => {
@@ -1741,6 +1787,25 @@ fn link_payload(
         obj.insert("info".into(), info.clone());
     }
     serde_json::Value::Object(obj)
+}
+
+/// Restore what a clean MQTT session loses when the broker drops the connection: the command
+/// subscriptions, and the retained service health, capability descriptor and link statuses.
+async fn restore_mqtt_session(
+    client: &AsyncClient,
+    subscriptions: &[&str],
+    health_topic: &str,
+    cap_topic: &str,
+    caps: &Capabilities,
+    config: &ConnectorConfig,
+    links: &LinkTracker,
+) -> Result<(), BoxError> {
+    for filter in subscriptions {
+        client.subscribe(*filter, QoS::AtLeastOnce).await?;
+    }
+    publish_health(client, health_topic, "up").await?;
+    publish_retained(client, cap_topic, capability_payload(caps, config)).await?;
+    links.republish(client, config).await
 }
 
 async fn publish_health(client: &AsyncClient, topic: &str, status: &str) -> Result<(), BoxError> {

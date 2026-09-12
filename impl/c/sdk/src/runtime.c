@@ -17,6 +17,8 @@
 #define TICK_MS 200
 #define BACKOFF_INITIAL_S 1.0
 #define BACKOFF_MAX_S 60.0
+/* Retry interval while the MQTT broker is unreachable (the Rust runtime's too). */
+#define MQTT_RETRY_S 1.0
 
 /* ---- liveness ------------------------------------------------------------
  *
@@ -66,6 +68,9 @@ typedef struct {
     struct mosquitto *mosq; /* NULL in stdout mode */
     tdot_output_t output;
     progress_t *progress; /* NULL when no watchdog is armed */
+    bool mqtt_up;         /* false from a failed loop until the next CONNACK */
+    bool mqtt_resume;     /* the next CONNACK is a reconnect: restore the session */
+    double mqtt_retry_at; /* tdot_mono() of the next reconnect attempt */
 } rt_t;
 
 static void logmsg(const char *level, const char *fmt, ...) {
@@ -108,14 +113,12 @@ static void emit_sample(rt_t *rt, tdot_device_t *dev, tdot_point_t *pt,
     free(json);
 }
 
-static void publish_link(rt_t *rt, tdot_device_t *dev, tdot_link_t status) {
-    if (dev->link == status)
-        return;
-    dev->link = status;
-    const char *name = status == TDOT_LINK_CONNECTED      ? "connected"
-                       : status == TDOT_LINK_DEGRADED     ? "degraded"
+/* Publish the device's current link status (retained), whether or not it
+ * changed: also used to restore it on a broker that lost its retained messages. */
+static void publish_link_status(rt_t *rt, tdot_device_t *dev) {
+    const char *name = dev->link == TDOT_LINK_CONNECTED   ? "connected"
+                       : dev->link == TDOT_LINK_DEGRADED  ? "degraded"
                                                           : "disconnected";
-    logmsg("info", "device %s: link %s", dev->name, name);
     char ts[40];
     tdot_now_rfc3339(ts, sizeof ts);
     char topic[256];
@@ -146,6 +149,17 @@ static void publish_link(rt_t *rt, tdot_device_t *dev, tdot_link_t status) {
     publish(rt, topic, payload, true);
     free(payload);
     cJSON_Delete(obj);
+}
+
+static void publish_link(rt_t *rt, tdot_device_t *dev, tdot_link_t status) {
+    if (dev->link == status)
+        return;
+    dev->link = status;
+    logmsg("info", "device %s: link %s", dev->name,
+           status == TDOT_LINK_CONNECTED  ? "connected"
+           : status == TDOT_LINK_DEGRADED ? "degraded"
+                                          : "disconnected");
+    publish_link_status(rt, dev);
 }
 
 static void publish_health(rt_t *rt, const char *status) {
@@ -599,6 +613,74 @@ static void publish_capabilities(rt_t *rt) {
     char *caps = augmented_capabilities(rt->conn->capabilities_json, rt->cfg);
     publish(rt, cap_topic, caps ? caps : rt->conn->capabilities_json, true);
     free(caps);
+}
+
+/* ---- MQTT session ----------------------------------------------------------
+ * The client uses a clean session, so a broker that drops the connection
+ * forgets the command subscriptions, and one restarted without persistence
+ * forgets every retained message too. Both have to be restored on reconnect:
+ * without that, a connector that lost the broker kept polling its devices but
+ * never received another command (a cloud parameter update stayed pending for
+ * good) and its service health stayed "down". */
+
+static void subscribe_commands(rt_t *rt) {
+    /* Device commands for the whole protocol (on_message keeps the ones for
+     * devices this config defines), and management commands for this service
+     * (contract §6.3, §6.5). */
+    char topic[256];
+    snprintf(topic, sizeof topic, "te/device/+/ot/%s/cmd/+/+",
+             rt->cfg->protocol);
+    mosquitto_subscribe(rt->mosq, NULL, topic, 0);
+    snprintf(topic, sizeof topic, "te/device/main/service/%s/ot/cmd/+/+",
+             rt->cfg->service_name);
+    mosquitto_subscribe(rt->mosq, NULL, topic, 0);
+}
+
+static void on_connect(struct mosquitto *mosq, void *ud, int rc) {
+    (void)mosq;
+    rt_t *rt = ud;
+    if (rc != 0)
+        return;
+    rt->mqtt_up = true;
+    /* The first session is set up by run_connector right after connecting,
+     * so commands do not wait for every device's initial connect. */
+    if (!rt->mqtt_resume)
+        return;
+    rt->mqtt_resume = false;
+    logmsg("info", "reconnected to MQTT broker %s:%d", rt->cfg->mqtt_host,
+           rt->cfg->mqtt_port);
+    subscribe_commands(rt);
+    publish_health(rt, "up");
+    publish_capabilities(rt);
+    for (size_t i = 0; i < rt->cfg->ndevices; i++)
+        if (rt->cfg->devices[i].link != TDOT_LINK_UNKNOWN)
+            publish_link_status(rt, &rt->cfg->devices[i]);
+}
+
+/* Drive the MQTT client for one tick, reconnecting while the broker is gone. */
+static void mqtt_service(rt_t *rt) {
+    int rc = mosquitto_loop(rt->mosq, TICK_MS, 1);
+    if (rc == MOSQ_ERR_SUCCESS)
+        return;
+    if (rt->mqtt_up) {
+        rt->mqtt_up = false;
+        logmsg("warn", "lost connection to MQTT broker %s:%d (%s); reconnecting",
+               rt->cfg->mqtt_host, rt->cfg->mqtt_port, mosquitto_strerror(rc));
+    }
+    double now = tdot_mono();
+    if (now >= rt->mqtt_retry_at) {
+        rt->mqtt_retry_at = now + MQTT_RETRY_S;
+        rt->mqtt_resume = true;
+        /* Asynchronous, so an unreachable broker address cannot hold the poll
+         * loop for the OS TCP timeout: the following loops finish the
+         * handshake and on_connect restores the session. */
+        mosquitto_reconnect_async(rt->mosq);
+    }
+    /* Without a connection mosquitto_loop returns at once instead of waiting
+     * out its timeout, so sleep the tick here: otherwise the poll loop spins a
+     * core for as long as the broker is away. */
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = TICK_MS * 1000000L};
+    nanosleep(&ts, NULL);
 }
 
 /* ---- TOML emitter (cJSON document -> TOML text) ---------------------------
@@ -1129,6 +1211,7 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
                  cfg->protocol);
         rt.mosq = mosquitto_new(client_id, true, &rt);
         mosquitto_message_callback_set(rt.mosq, on_message);
+        mosquitto_connect_callback_set(rt.mosq, on_connect);
         /* last will: health "down" */
         char will_topic[256];
         snprintf(will_topic, sizeof will_topic,
@@ -1142,16 +1225,8 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
             mosquitto_destroy(rt.mosq);
             return -1;
         }
-        /* Device commands for the whole protocol (on_message keeps the ones
-         * for devices this config defines), and management commands for this
-         * service (contract §6.3, §6.5). */
-        char cmd_topic[256];
-        snprintf(cmd_topic, sizeof cmd_topic, "te/device/+/ot/%s/cmd/+/+",
-                 cfg->protocol);
-        mosquitto_subscribe(rt.mosq, NULL, cmd_topic, 0);
-        snprintf(cmd_topic, sizeof cmd_topic,
-                 "te/device/main/service/%s/ot/cmd/+/+", cfg->service_name);
-        mosquitto_subscribe(rt.mosq, NULL, cmd_topic, 0);
+        rt.mqtt_up = true;
+        subscribe_commands(&rt);
         logmsg("info", "connected to MQTT broker %s:%d", cfg->mqtt_host,
                cfg->mqtt_port);
 
@@ -1248,7 +1323,7 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
         }
 
         if (rt.output == TDOT_OUTPUT_MQTT)
-            mosquitto_loop(rt.mosq, TICK_MS, 1);
+            mqtt_service(&rt);
         else {
             struct timespec ts = {.tv_sec = 0, .tv_nsec = TICK_MS * 1000000L};
             nanosleep(&ts, NULL);
