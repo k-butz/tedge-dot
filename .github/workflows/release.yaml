@@ -172,13 +172,16 @@ jobs:
           sudo apt-get install -y nfpm
 
       - name: Cross-build every architecture
+        env:
+          # Stamped into the binary so `tedge-dot --version` matches the package version.
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -eux
           for arch in $C_ARCHS; do
             mkdir -p "impl/c/dist/$arch"
             docker run --rm \
               -v "$PWD:/src:ro" -v "$PWD/impl/c/dist/$arch:/out" \
-              -e ARCH="$arch" -e GLIBC_MIN="$GLIBC_MIN" \
+              -e ARCH="$arch" -e GLIBC_MIN="$GLIBC_MIN" -e VERSION="$VERSION" \
               tedge-dot-cross
           done
 

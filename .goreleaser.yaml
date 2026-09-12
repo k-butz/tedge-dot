@@ -26,6 +26,10 @@ builds:
     # Only the build runs there: goreleaser itself, and every nfpms `contents.src`
     # below, stay relative to the repository root where the shared trees live.
     dir: impl/rust
+    # `tedge-dot --version` reports the release version, not the workspace crate version
+    # (impl/rust/src/main.rs). The C build gets the same string via cross/build.sh.
+    env:
+      - TEDGE_DOT_VERSION={{ .Version }}
     flags:
       - --release
       - --package=tedge-dot

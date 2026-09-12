@@ -35,7 +35,8 @@ static void usage(void) {
         "[--duration <dur>]\n"
         "  tedge-dot describe [-c <config>] [-d <device>] [--set <name>] "
         "[--format c8y-dtm] [--compact]\n"
-        "  tedge-dot <config-or-dir> [run options]      (same as run)\n",
+        "  tedge-dot <config-or-dir> [run options]      (same as run)\n"
+        "  tedge-dot --version\n",
         stderr);
 }
 
@@ -509,6 +510,12 @@ int main(int argc, char **argv) {
     if (argc < 2) {
         usage();
         return 2;
+    }
+    /* Same output as the Rust binary's clap `--version`. TDOT_BUILD_VERSION is the
+     * release version (stamped from the tag), not the contract TDOT_VERSION. */
+    if (!strcmp(argv[1], "-V") || !strcmp(argv[1], "--version")) {
+        printf("tedge-dot %s\n", TDOT_BUILD_VERSION);
+        return 0;
     }
     /* Like the Rust binary: invoked with just config paths/options and no
      * subcommand (`tedge-dot /etc/connector.toml`, the systemd unit and the e2e

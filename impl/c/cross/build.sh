@@ -7,6 +7,7 @@
 #             cannot, which is why an ubuntu-24.04 build needs glibc >= 2.39.
 #   SRC       Repository root, read-only (default /src)
 #   OUT       Build directory (default /out)
+#   VERSION   Version `tedge-dot --version` reports (default: the CMake project version)
 #
 # Extra arguments are passed through to the configure step, e.g. -DTDOT_OPCUA=OFF.
 set -eu
@@ -47,6 +48,7 @@ cmake -B "$OUT" -S "$SRC/impl/c" -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=/opt/tdot-cross/toolchain.cmake \
   -DCMAKE_BUILD_TYPE=MinSizeRel \
   -DTDOT_OPCUA_VENDORED=ON \
+  ${VERSION:+"-DTDOT_BUILD_VERSION=$VERSION"} \
   "$@"
 cmake --build "$OUT"
 

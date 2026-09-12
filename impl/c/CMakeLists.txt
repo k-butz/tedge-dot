@@ -48,6 +48,10 @@ add_library(tedge_dot_sdk STATIC
 target_include_directories(tedge_dot_sdk PUBLIC sdk/include)
 # The version every module reports in its capability descriptor (contract §7).
 target_compile_definitions(tedge_dot_sdk PUBLIC TDOT_VERSION="${PROJECT_VERSION}")
+# The release version `tedge-dot --version` reports. The release build stamps it from the tag
+# (cross/build.sh, VERSION); it is independent of the contract version above.
+set(TDOT_BUILD_VERSION "${PROJECT_VERSION}" CACHE STRING "Version reported by --version")
+target_compile_definitions(tedge_dot_sdk PUBLIC TDOT_BUILD_VERSION="${TDOT_BUILD_VERSION}")
 target_link_libraries(tedge_dot_sdk PUBLIC tomlc99 PkgConfig::CJSON
                       PkgConfig::MOSQUITTO m Threads::Threads)
 
