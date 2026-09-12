@@ -297,10 +297,12 @@ static const char *LIBRARY =
     "protocol = \"modbus\"\n"
     "\n"
     "[[point]]\n"
-    "id       = \"boiler_temp\"\n"
-    "datatype = \"float32\"\n"
-    "unit     = \"C\"\n"
-    "address  = { table = \"holding\", address = 7, count = 2 }\n"
+    "id          = \"boiler_temp\"\n"
+    "datatype    = \"float32\"\n"
+    "unit        = \"C\"\n"
+    "name        = \"Boiler temp\"\n"
+    "description = \"Outlet temperature after the heat exchanger\"\n"
+    "address     = { table = \"holding\", address = 7, count = 2 }\n"
     "\n"
     "[[point]]\n"
     "id       = \"pump_run\"\n"
@@ -785,6 +787,55 @@ static void check_library_with_empty_point_list_is_rejected(void) {
  * one package and failed under the other. */
 /* §3.3: unique within a connector -- see the Rust counterpart
  * (library.rs, a_repeated_device_name_is_rejected). */
+/* `name` and `description` (§3.1) are ordinary scalars, so they patch like
+ * `unit` does: a site can relabel an inherited point without restating its
+ * address or its other label. Mirrors the Rust counterpart
+ * (library.rs, labels_are_inherited_and_patch_one_at_a_time). */
+static void check_labels_are_inherited_and_patch_one_at_a_time(void) {
+    scratch_t s;
+    scratch_init(&s);
+    write_file(&s, "modbus/acme-meter.toml", LIBRARY);
+
+    char err[256] = "";
+    tdot_config_t *cfg = load_with_libs(&s, "\"acme-meter\"", "", err, sizeof err);
+    if (!cfg) {
+        printf("FAIL labels did not load: %s\n", err);
+        failures++;
+        scratch_free(&s);
+        return;
+    }
+    tdot_point_t *pt = &cfg->devices[0].points[0];
+    CHECK(pt->name && strcmp(pt->name, "Boiler temp") == 0,
+          "inherited name = %s", pt->name ? pt->name : "(null)");
+    CHECK(pt->description &&
+              strcmp(pt->description, "Outlet temperature after the heat exchanger") == 0,
+          "inherited description = %s", pt->description ? pt->description : "(null)");
+    tdot_config_free(cfg);
+
+    /* A site relabels just the short name; the description and the rest stay. */
+    cfg = load_with_libs(&s, "\"acme-meter\"",
+                         "\n  [[device.point]]\n"
+                         "  id = \"boiler_temp\"\n"
+                         "  name = \"Flow temp (site label)\"\n",
+                         err, sizeof err);
+    if (cfg) {
+        pt = &cfg->devices[0].points[0];
+        CHECK(pt->name && strcmp(pt->name, "Flow temp (site label)") == 0,
+              "patched name = %s", pt->name ? pt->name : "(null)");
+        CHECK(pt->description &&
+                  strcmp(pt->description, "Outlet temperature after the heat exchanger") == 0,
+              "patching the name must not drop the inherited description, got %s",
+              pt->description ? pt->description : "(null)");
+        CHECK(pt->unit && strcmp(pt->unit, "C") == 0, "inherited unit survived");
+        CHECK(pt->datatype == TDOT_DT_FLOAT32, "inherited datatype survived");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL label patch did not load: %s\n", err);
+        failures++;
+    }
+    scratch_free(&s);
+}
+
 static void check_repeated_device_name_is_rejected(void) {
     scratch_t s;
     scratch_init(&s);
@@ -952,6 +1003,7 @@ int main(void) {
     check_explicit_search_path_must_name_somewhere();
     check_search_path_validated_without_any_reference();
     check_repeated_device_name_is_rejected();
+    check_labels_are_inherited_and_patch_one_at_a_time();
     check_library_with_empty_point_list_is_rejected();
     check_stall_decision();
     check_watchdog_period();

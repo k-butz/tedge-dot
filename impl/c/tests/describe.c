@@ -25,6 +25,8 @@ static const char *CONFIG =
     "  datatype = \"uint16\"\n"
     "  access = \"read_write\"\n"
     "  unit = \"°C\"\n"
+    "  name = \"Boiler temp\"\n"
+    "  description = \"Outlet temperature after the heat exchanger\"\n"
     "  address = { table = \"holding\", address = 3, count = 1 }\n"
     "  meta = { parameter = { title = \"Temperature setpoint\", min = 0, max = 100, order = 7 } }\n"
     "\n"
@@ -32,6 +34,7 @@ static const char *CONFIG =
     "  id = \"coil_rw\"\n"
     "  datatype = \"bool\"\n"
     "  access = \"read_write\"\n"
+    "  name = \"Pump enable\"\n"
     "  address = { table = \"coil\", address = 48, count = 1 }\n"
     "\n"
     "  [[device.point]]\n"
@@ -44,6 +47,7 @@ static const char *CONFIG =
     "  [[device.point]]\n"
     "  id = \"level_f32\"\n"
     "  datatype = \"float32\"\n"
+    "  description = \"Level in the buffer tank\"\n"
     "  address = { table = \"holding\", address = 6, count = 2 }\n"
     "\n"
     "  [[device.point]]\n"
@@ -197,10 +201,17 @@ int main(void) {
           num_of(temp, "maximum"));
     CHECK(num_of(temp, "order") == 7, "temp_u16 order = %g",
           num_of(temp, "order"));
-    CHECK(strcmp(str_of(temp, "description"), "[°C]") == 0,
+    /* meta.parameter.title wins over the point's `name` (asserted above), while
+     * the point's own `description` is used -- there is no
+     * meta.parameter.description here -- and still composes with the unit. */
+    CHECK(strcmp(str_of(temp, "description"),
+                 "Outlet temperature after the heat exchanger [°C]") == 0,
           "temp_u16 description = %s", str_of(temp, "description"));
 
     const cJSON *coil = prop(main_def, "coil_rw");
+    /* With no meta at all, the point's `name` becomes the title. */
+    CHECK(strcmp(str_of(coil, "title"), "Pump enable") == 0, "coil_rw title = %s",
+          str_of(coil, "title"));
     CHECK(strcmp(str_of(coil, "type"), "boolean") == 0, "coil_rw type = %s",
           str_of(coil, "type"));
     CHECK(num_of(coil, "order") == 2, "coil_rw order = %g",

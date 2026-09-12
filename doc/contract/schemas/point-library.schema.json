@@ -58,7 +58,9 @@
             "address": 7,
             "count": 2
           },
-          "unit": "°C"
+          "unit": "°C",
+          "name": "Boiler temp",
+          "description": "Outlet temperature after the heat exchanger"
         },
         {
           "id": "run_command",

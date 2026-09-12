@@ -516,10 +516,12 @@ mod tests {
 protocol = "modbus"
 
 [[point]]
-id       = "boiler_temp"
-datatype = "float32"
-address  = { table = "holding", address = 7, count = 2 }
-unit     = "°C"
+id          = "boiler_temp"
+datatype    = "float32"
+address     = { table = "holding", address = 7, count = 2 }
+unit        = "°C"
+name        = "Boiler temp"
+description = "Outlet temperature after the heat exchanger"
 
 [[point]]
 id       = "pump_run"
@@ -971,6 +973,41 @@ point            = {value}
     /// §3.3: unique within a connector. Two same-named devices would publish over each other
     /// on one entity's topics, and they make "was this reference already here" ambiguous for
     /// the management guard — which is where the two implementations drifted apart.
+    /// `name` and `description` (§3.1) are ordinary scalars, so they patch like `unit` does:
+    /// a site can relabel a point it inherited without restating its address or its other
+    /// label. This is the whole point of putting a description in a shared list.
+    #[test]
+    fn labels_are_inherited_and_patch_one_at_a_time() {
+        let dir = Dir::new("labels");
+        dir.write("modbus/acme-meter.toml", LIBRARY);
+
+        // Inherited as declared.
+        let cfg = resolve_in(dir.path(), "\"acme-meter\"", "").unwrap();
+        let point = &cfg.devices[0].points[0];
+        assert_eq!(point.name.as_deref(), Some("Boiler temp"));
+        assert_eq!(
+            point.description.as_deref(),
+            Some("Outlet temperature after the heat exchanger")
+        );
+
+        // A site relabels just the short name; the description and everything else stay.
+        let inline = r#"
+  [[device.point]]
+  id   = "boiler_temp"
+  name = "Flow temp (site label)"
+"#;
+        let cfg = resolve_in(dir.path(), "\"acme-meter\"", inline).unwrap();
+        let point = &cfg.devices[0].points[0];
+        assert_eq!(point.name.as_deref(), Some("Flow temp (site label)"));
+        assert_eq!(
+            point.description.as_deref(),
+            Some("Outlet temperature after the heat exchanger"),
+            "patching the name must not drop the inherited description"
+        );
+        assert_eq!(point.unit.as_deref(), Some("°C"));
+        assert_eq!(point.datatype, Some(crate::model::DataType::Float32));
+    }
+
     #[test]
     fn a_repeated_device_name_is_rejected() {
         let dir = Dir::new("dup-device");

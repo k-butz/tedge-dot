@@ -17,26 +17,37 @@ version     = "1"
 # uint16 holding register -> 17001. Writable, so it shows up as a Cumulocity
 # device parameter (see RFC 0003); meta.parameter enriches that schema.
 [[point]]
-id       = "temp_u16"
-datatype = "uint16"
-access   = "read_write"
-address  = { table = "holding", address = 3, count = 1 }
-meta     = { parameter = { title = "Temperature setpoint", min = 0, max = 30000 } }
+id          = "temp_u16"
+name        = "Temperature setpoint"
+description = "Target temperature for the boiler loop"
+datatype    = "uint16"
+access      = "read_write"
+address     = { table = "holding", address = 3, count = 1 }
+meta        = { parameter = { min = 0, max = 30000 } }
 
 # The same register with the signal's own scaling applied: 17001 * 10^-3 = 17.001.
+#
+# `name` and `description` are what make a shared list self-documenting: they are
+# declared once here and every instance that references this library inherits
+# them, so nothing has to guess what "temp_scaled" means. They are published in
+# the connector's retained capability descriptor (§7), not in every sample.
 [[point]]
-id        = "temp_scaled"
-datatype  = "uint16"
-address   = { table = "holding", address = 3, count = 1 }
-transform = { decimal_shift = -3 }
-unit      = "°C"
-meta      = { on_change = true, deadband = 0.5, min_interval = "10s" }
+id          = "temp_scaled"
+name        = "Boiler temperature"
+description = "Measured boiler loop temperature, scaled to °C"
+datatype    = "uint16"
+address     = { table = "holding", address = 3, count = 1 }
+transform   = { decimal_shift = -3 }
+unit        = "°C"
+meta        = { on_change = true, deadband = 0.5, min_interval = "10s" }
 
 # uint32 across two registers -> 617001.
 [[point]]
-id       = "count_u32"
-datatype = "uint32"
-address  = { table = "holding", address = 4, count = 2 }
+id          = "count_u32"
+name        = "Cycle count"
+description = "Completed pump cycles since power-on"
+datatype    = "uint32"
+address     = { table = "holding", address = 4, count = 2 }
 
 # float32 across two registers -> 404.17.
 [[point]]

@@ -13,11 +13,15 @@
 protocol    = "modbus"
 description = "pymodbus simulator (connectors/modbus/sim/modbus.json)"
 
-# uint32 across two registers -> 617001
+# uint32 across two registers -> 617001. Carries the human-readable labels
+# (§3.1) the connector republishes in its capability descriptor (§7) — the
+# reason a shared list is worth documenting once, here, rather than per site.
 [[point]]
-id       = "count_u32"
-datatype = "uint32"
-address  = { table = "holding", address = 4, count = 2 }
+id          = "count_u32"
+name        = "Cycle count"
+description = "Completed pump cycles since power-on"
+datatype    = "uint32"
+address     = { table = "holding", address = 4, count = 2 }
 
 # float32 across two registers -> ~404.17. connector.toml overrides `unit` on
 # this point, which is what pins the override rule down end to end.

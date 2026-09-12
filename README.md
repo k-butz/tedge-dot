@@ -113,6 +113,10 @@ several and add or adjust points of its own — the later definition of a point 
 earlier one — which is how a packaged list gets extended without editing the file a package
 upgrade replaces.
 
+Points can also carry a `name` and `description`, so a shared list documents itself once for
+every instance that references it — they render into the Cumulocity parameter UI and into the
+connector's retained capability descriptor, rather than being echoed on every sample.
+
 Because only the *reference* is stored, `define-device` can add an instance at runtime from
 its address alone, which is what lets your own discovery (mDNS, a subnet scan, an asset
 inventory) onboard a known device type without shipping its point list. See

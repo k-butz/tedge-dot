@@ -55,6 +55,12 @@ points_from      = ["pymodbus-demo"]
   id   = "level_f32"
   unit = "m"
 
+  # Relabelling an inherited point takes one field: the library's description
+  # and everything else it declared stay as they are.
+  [[device.point]]
+  id   = "temp_scaled"
+  name = "Flow temperature (north wing)"
+
   [[device.point]]
   id       = "site_extra"
   datatype = "uint16"

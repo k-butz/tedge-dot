@@ -161,11 +161,18 @@ static cJSON *property_schema(const tdot_point_t *point, const cJSON *options) {
     cJSON_AddStringToObject(schema, "type",
                             schema_type(point->datatype, &has_range, &min, &max));
 
+    /* meta.parameter.title wins, then the point's own `name`, then the id: a
+     * point can carry a general-purpose label and still say something
+     * different in the parameter UI (mirrors descriptor.rs property_schema). */
     const char *title = opt_string(options, "title");
+    if (!title)
+        title = point->name;
     cJSON_AddStringToObject(schema, "title", title ? title : point->id);
 
     char description[320] = "";
     const char *d = opt_string(options, "description");
+    if (!d)
+        d = point->description;
     if (d)
         snprintf(description, sizeof description, "%s", d);
     if (point->unit) {

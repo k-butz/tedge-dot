@@ -117,6 +117,8 @@ points_from   = []              # optional; point libraries to inherit points fr
   address  = { } # protocol-specific: how to address this point. Shape per connector spec.
   access   = "read"             # "read" | "write" | "read_write" (default "read")
   unit     = "raw"              # optional free-form hint passed through in the sample
+  name     = "<short label>"    # optional human-readable label (§3.1); the id stays an identifier
+  description = "<what this signal is>"  # optional longer explanation (§3.1)
   transform = { multiplier = 1, divisor = 1, decimal_shift = 0, offset = 0 } # optional linear scale
 ```
 
@@ -163,10 +165,18 @@ points_from   = []              # optional; point libraries to inherit points fr
 | `poll_interval` | duration string | no | Overrides device/connector default. |
 | `access` | `"read"` \| `"write"` \| `"read_write"` | no | Default `"read"`. |
 | `unit` | string | no | Opaque hint echoed into the sample for flows. |
+| `name` | string | no | Short human-readable label, for wherever a name is displayed instead of the `id` — which is a topic segment and a parameter-set key, so it stays a plain identifier. Feeds a parameter's DTM title (§5.2) and the capability descriptor's `point_labels` (§7). |
+| `description` | string | no | Longer human-readable explanation of the signal. Feeds a parameter's DTM description and `point_labels` (§7). |
 | `transform` | object | no | Per-point linear scale `(value*multiplier*10^decimal_shift/divisor)+offset`; see §4.2. |
 | `meta` | object | no | Free-form signal metadata echoed verbatim as `meta` in every sample envelope. Never interpreted by the connector; flows and tooling read it for per-signal behaviour (e.g. `on_change`, `deadband`, `min_interval`, `debounce`) and for exposing the point as an operator-editable *parameter* (`meta.parameter`, see §5.2). |
 | `subscribe` | boolean | no | Default `true`. `false` keeps the point on the polling schedule even when the connector supports push delivery. |
 | `address` | object | yes | **Protocol-specific**; shape defined by the connector spec. |
+
+`name` and `description` are **not** echoed in the sample envelope: they are static per point,
+so the connector publishes them once in its retained capability descriptor (§7) instead of on
+every read. `meta.parameter.title` / `meta.parameter.description` override them for a
+parameter's cloud-facing labels, so a point can carry a general-purpose label and still say
+something different in the parameter UI.
 
 A device MAY inherit these same point fields from a **point library** instead of declaring
 them inline; see §3.4.
@@ -254,7 +264,9 @@ one collected so far rather than adding a second point:
 - `meta` and `transform` are merged key by key (recursively for `meta`), so one field can be
   adjusted without restating the rest;
 - every other field, `address` included, is **replaced** when the overriding definition
-  declares it (a partly-inherited protocol address is not a meaningful thing);
+  declares it (a partly-inherited protocol address is not a meaningful thing). `name` and
+  `description` (§3.1) are ordinary scalars under this rule, which is what lets a site relabel
+  an inherited point — one label at a time — without restating its address;
 - a field the override does not mention keeps its inherited value.
 
 Inline points are applied last, so a device always wins over the libraries it references.
@@ -645,7 +657,11 @@ same fields with its own values (and typically `"subscribe": true`):
   "point_kinds": ["coil", "discrete_input", "holding_register", "input_register"],
   "command_verbs": ["write", "set-config", "define-device", "remove-device"],
   "features": ["polling", "bitfield", "management"],
-  "subscribe": false
+  "subscribe": false,
+  "point_labels": [
+    { "device": "plc-1", "point": "boiler_temp",
+      "name": "Boiler temp", "description": "Outlet temperature after the heat exchanger" }
+  ]
 }
 ```
 
@@ -657,8 +673,18 @@ same fields with its own values (and typically `"subscribe": true`):
 | `command_verbs` | Verbs accepted on `cmd/<verb>`. MUST include `write` if any point is writable; SDK-based connectors also list `write-batch` (§6.4) and the management verbs (§6.3). |
 | `features` | Optional capability tags: `polling`, `subscribe`, `bitfield`, `string`, `bulk_read`, … |
 | `subscribe` | Whether the connector supports event-driven (push) reads in addition to polling. |
+| `point_labels` | The human-readable `name`/`description` of the configured points (§3.1), so a consumer can show something friendlier than the point id. Only points declaring one of them appear, and each entry carries only the fields it declares — **no entry means the id is the label**, so a configuration that labels nothing adds nothing here. Unlike the fields above, this describes the *configuration* rather than the connector's abilities; it lives here because it is static per point, which makes one retained message the right place for it and a per-sample echo the wrong one (§5 samples are a time series). |
 
 Tooling and the conformance suite use the descriptor to decide which tests apply.
+
+The descriptor is retained, so it MUST be republished whenever something it reports changes.
+Everything except `point_labels` is a property of the connector build and so is published once
+at startup; `point_labels` follows the configuration, and a connector MUST therefore republish
+the descriptor after a management command (§6.3) changes it — a retained message describing the
+configuration as it was at startup is worse than none. Note also that labelling every point of
+a large list has a size: two hundred fully labelled points add on the order of ten kilobytes to
+this one message. That is paid once per (re)publish, not per sample, which is the reason the
+labels live here rather than in the sample envelope.
 
 ## 8. Status and health
 

@@ -37,6 +37,13 @@ typedef struct tdot_point {
     int access;              /* TDOT_ACCESS_* bits; default read */
     tdot_mode_t mode;        /* point.mode ?? device.default_mode ?? typed */
     char *unit;              /* optional */
+    /* Human-readable labels (contract §3.1). `name` is a short display label,
+     * `description` a longer explanation; the `id` stays a plain identifier
+     * because it is a topic segment and a fragment key. They feed a
+     * parameter's DTM title/description and the capability descriptor's
+     * `point_labels` (§7) -- never a sample, since they are static. */
+    char *name;              /* optional */
+    char *description;       /* optional */
     tdot_transform_t transform;
     bool has_transform;
     char *meta_json; /* free-form [device.point.meta], serialized to JSON */

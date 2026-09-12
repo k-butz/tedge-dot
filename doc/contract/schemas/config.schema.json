@@ -216,6 +216,14 @@
         "unit": {
           "type": "string"
         },
+        "name": {
+          "type": "string",
+          "description": "Short human-readable label for this signal, for wherever a name is displayed instead of the id — which is a topic segment and a parameter-set key, so it stays a plain identifier. Feeds a parameter's DTM title and the capability descriptor's point_labels (§7). Not echoed per sample."
+        },
+        "description": {
+          "type": "string",
+          "description": "Longer human-readable explanation of the signal. Feeds a parameter's DTM description and the capability descriptor's point_labels (§7). Not echoed per sample; meta.parameter.description overrides it for the parameter UI."
+        },
         "address": {
           "type": "object",
           "description": "Protocol-specific point address. Shape defined by the connector spec."
@@ -329,7 +337,9 @@
                 "on_change": true,
                 "deadband": 0.5,
                 "min_interval": "10s"
-              }
+              },
+              "name": "Boiler temp",
+              "description": "Outlet temperature after the heat exchanger"
             },
             {
               "id": "run_command",

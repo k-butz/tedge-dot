@@ -43,6 +43,22 @@ Connector Publishes Capability Descriptor
     ${verbs}=    Get Json Field    ${payload}    command_verbs
     List Should Contain Value    ${verbs}    write
 
+Capability Descriptor Carries The Point Labels
+    [Documentation]    A point's `name`/`description` (§3.1) are static, so they are published
+    ...                once in the retained capability descriptor (§7) rather than echoed in
+    ...                every sample. Only labelled points appear — no entry means the id is the
+    ...                label — and here they come from the point library, which is where a
+    ...                shared list documents itself once for every instance that references it.
+    ${payload}=    Wait For Retained    ${CAPS_TOPIC}    timeout=${READY_TIMEOUT}
+    ${labels}=    Get Json Field    ${payload}    point_labels
+    ${by_point}=    Evaluate    {l["point"]: l for l in $labels}
+    Dictionary Should Contain Key    ${by_point}    count_u32
+    Should Be Equal    ${by_point}[count_u32][device]    ${DEVICE}
+    Should Be Equal    ${by_point}[count_u32][name]    Cycle count
+    Should Be Equal    ${by_point}[count_u32][description]    Completed pump cycles since power-on
+    # temp_u16 declares no labels, so it is absent rather than carrying an empty entry.
+    Dictionary Should Not Contain Key    ${by_point}    temp_u16
+
 Service Health Is Up
     [Documentation]    The connector publishes a retained service health status of "up".
     ${payload}=    Wait For Retained    ${HEALTH_TOPIC}    timeout=${READY_TIMEOUT}
@@ -303,6 +319,15 @@ Defines A Device From A Point Library Alone
     # so compare the settings only.
     # (chr(10) rather than a "\n" literal: Robot would turn that into a real newline inside
     # the Python expression.)
+    # The capability descriptor's point_labels come from the configuration, so the retained
+    # message must follow a reload — otherwise it keeps describing the config as it was at
+    # startup, with no labels for the device just defined.
+    ${payload}=    Wait For Message Containing    ${CAPS_TOPIC}    plc2    timeout=${SAMPLE_TIMEOUT}
+    ${labels}=    Get Json Field    ${payload}    point_labels
+    ${for_plc2}=    Evaluate    [l for l in $labels if l["device"] == "plc2"]
+    Should Not Be Empty    ${for_plc2}    the reload must republish the labels of the new device
+    Should Be Equal    ${for_plc2}[0][name]    Cycle count
+
     ${config}=    DeviceLibrary.Execute Command    cmd=cat /etc/connector.toml    strip=${True}
     ${settings}=    Evaluate
     ...    chr(10).join(l for l in $config.splitlines() if not l.lstrip().startswith("#"))

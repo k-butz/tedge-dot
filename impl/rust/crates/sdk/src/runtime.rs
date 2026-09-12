@@ -421,7 +421,7 @@ pub async fn run_until_watched(
     });
 
     // 3. Publish capability descriptor + service health (retained).
-    publish_retained(&client, &cap_topic, caps.to_json().to_string()).await?;
+    publish_retained(&client, &cap_topic, capability_payload(&caps, &config)).await?;
     publish_health(&client, &health_topic, "up").await?;
     client.subscribe(&cmd_sub, QoS::AtLeastOnce).await?;
     info!(%protocol, %service, "connector started");
@@ -553,7 +553,7 @@ pub async fn run_until_watched(
             Some(p) = incoming_rx.recv() => {
                 match handle_command(
                     &mut connector, &client, &protocol, &mut links,
-                    &mut config, &mut config_doc, &config_path,
+                    &mut config, &mut config_doc, &config_path, &cap_topic,
                     &p.topic, &p.payload, limits,
                 ).await {
                     // A management command changed the config: re-establish push
@@ -942,6 +942,7 @@ async fn handle_command(
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
     config_path: &Path,
+    cap_topic: &str,
     topic: &str,
     payload: &[u8],
     limits: Limits,
@@ -972,7 +973,8 @@ async fn handle_command(
     // the connector configuration, then live-reload the protocol module.
     if is_management_verb(verb) {
         return handle_management(
-            connector, client, links, config, config_doc, config_path, topic, verb, &json, limits,
+            connector, client, links, config, config_doc, config_path, cap_topic, topic, verb,
+            &json, limits,
         )
         .await;
     }
@@ -1193,6 +1195,21 @@ fn augment_management_caps(caps: &mut Capabilities) {
     }
 }
 
+/// The retained capability descriptor payload (§7): the module's declared capabilities plus
+/// the configured points' human-readable labels.
+///
+/// The labels are static per point, so they belong in this one retained message rather than in
+/// every sample — but they come from the *configuration*, unlike everything else here, so this
+/// has to be rebuilt and republished whenever a management command changes it.
+fn capability_payload(caps: &Capabilities, config: &ConnectorConfig) -> String {
+    let mut json = caps.to_json();
+    let labels = crate::descriptor::point_labels(config);
+    if !labels.is_empty() {
+        json["point_labels"] = serde_json::Value::Array(labels);
+    }
+    json.to_string()
+}
+
 /// Handle a management command: patch the config document, validate, persist, and live-reload.
 /// Returns `Ok(true)` when the configuration changed (so the caller rebuilds the schedule).
 #[allow(clippy::too_many_arguments)]
@@ -1203,6 +1220,7 @@ async fn handle_management(
     config: &mut ConnectorConfig,
     config_doc: &mut DocumentMut,
     config_path: &Path,
+    cap_topic: &str,
     topic: &str,
     verb: &str,
     json: &serde_json::Value,
@@ -1264,6 +1282,16 @@ async fn handle_management(
     }
     *config_doc = candidate;
     *config = new_config;
+
+    // Republish the capability descriptor: its `point_labels` (§7) are derived from the
+    // configuration, which this verb just changed, and the retained message would otherwise
+    // describe the configuration as it was at startup — labels for points that are gone, none
+    // for a device just defined. Everything else in it is a property of the build and
+    // unchanged, so this is cheap and idempotent.
+    let mut caps = connector.capabilities();
+    augment_management_caps(&mut caps);
+    augment_batch_caps(&mut caps);
+    publish_retained(client, cap_topic, capability_payload(&caps, config)).await?;
 
     // Reconnect with the new configuration and republish link status.
     let _ = bounded(limits, "disconnect", connector.disconnect()).await;

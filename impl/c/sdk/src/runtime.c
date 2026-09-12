@@ -246,7 +246,7 @@ static int json_to_value(const cJSON *jv, tdot_value_t *out) {
 static bool is_management_verb(const char *verb);
 static void handle_management(rt_t *rt, const char *topic, const char *verb,
                               const cJSON *req);
-static char *augmented_capabilities(const char *json);
+static char *augmented_capabilities(const char *json, const tdot_config_t *cfg);
 
 static void publish_retained(rt_t *rt, const char *topic, cJSON *obj) {
     char *payload = cJSON_PrintUnformatted(obj);
@@ -443,7 +443,37 @@ static void add_unique(cJSON *arr, const char *item) {
     cJSON_AddItemToArray(arr, cJSON_CreateString(item));
 }
 
-static char *augmented_capabilities(const char *json) {
+/* `point_labels` of the capability descriptor (contract §7): every configured
+ * point that declares a `name` or a `description`, so a consumer can show
+ * something friendlier than the point id.
+ *
+ * Points with neither are omitted -- their id IS their label -- so a
+ * configuration using none of this adds nothing to the descriptor. Published
+ * once, retained, rather than echoed in every sample: the labels are static and
+ * a sample is a time series. Mirrors descriptor.rs `point_labels`. */
+static void add_point_labels(cJSON *caps, const tdot_config_t *cfg) {
+    cJSON *labels = NULL;
+    for (size_t i = 0; i < cfg->ndevices; i++) {
+        const tdot_device_t *dev = &cfg->devices[i];
+        for (size_t j = 0; j < dev->npoints; j++) {
+            const tdot_point_t *pt = &dev->points[j];
+            if (!pt->name && !pt->description)
+                continue;
+            if (!labels)
+                labels = cJSON_AddArrayToObject(caps, "point_labels");
+            cJSON *entry = cJSON_CreateObject();
+            cJSON_AddStringToObject(entry, "device", dev->name);
+            cJSON_AddStringToObject(entry, "point", pt->id);
+            if (pt->name)
+                cJSON_AddStringToObject(entry, "name", pt->name);
+            if (pt->description)
+                cJSON_AddStringToObject(entry, "description", pt->description);
+            cJSON_AddItemToArray(labels, entry);
+        }
+    }
+}
+
+static char *augmented_capabilities(const char *json, const tdot_config_t *cfg) {
     cJSON *caps = cJSON_Parse(json);
     if (!caps)
         return NULL;
@@ -465,9 +495,28 @@ static char *augmented_capabilities(const char *json) {
     if (!cJSON_IsArray(features))
         features = cJSON_AddArrayToObject(caps, "features");
     add_unique(features, "management");
+    add_point_labels(caps, cfg);
     char *out = cJSON_PrintUnformatted(caps);
     cJSON_Delete(caps);
     return out;
+}
+
+/* Publish the retained capability descriptor (contract §7).
+ *
+ * Called at startup AND after a management command: its `point_labels` come
+ * from the CONFIGURATION, unlike everything else in it, and set-config /
+ * define-device / remove-device change the configuration. Left unpublished,
+ * the retained message would keep describing the configuration as it was at
+ * startup -- labels for points that are gone, none for a device just defined. */
+static void publish_capabilities(rt_t *rt) {
+    if (!rt->mosq || !rt->conn->capabilities_json)
+        return;
+    char cap_topic[256];
+    snprintf(cap_topic, sizeof cap_topic,
+             "te/device/main/service/%s/ot/capabilities", rt->cfg->service_name);
+    char *caps = augmented_capabilities(rt->conn->capabilities_json, rt->cfg);
+    publish(rt, cap_topic, caps ? caps : rt->conn->capabilities_json, true);
+    free(caps);
 }
 
 /* ---- TOML emitter (cJSON document -> TOML text) ---------------------------
@@ -911,6 +960,7 @@ static void handle_management(rt_t *rt, const char *topic, const char *verb,
     if (rename(tmp_path, cfg->path) != 0)
         logmsg("warn", "failed to persist config to %s: %s", cfg->path, strerror(errno));
     tdot_config_replace(cfg, candidate); /* cfg pointer stays valid */
+    publish_capabilities(rt); /* point_labels follow the configuration (§7) */
     for (size_t i = 0; i < cfg->ndevices; i++)
         connect_device(rt, &cfg->devices[i]);
     publish_status(rt, topic, "successful", NULL);
@@ -997,16 +1047,7 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
                cfg->mqtt_port);
 
         publish_health(&rt, "up");
-        if (conn->capabilities_json) {
-            char cap_topic[256];
-            snprintf(cap_topic, sizeof cap_topic,
-                     "te/device/main/service/%s/ot/capabilities",
-                     cfg->service_name);
-            char *caps = augmented_capabilities(conn->capabilities_json);
-            publish(&rt, cap_topic, caps ? caps : conn->capabilities_json,
-                    true);
-            free(caps);
-        }
+        publish_capabilities(&rt);
     }
 
     /* Arm the watchdog before the first protocol call, not at the top of the

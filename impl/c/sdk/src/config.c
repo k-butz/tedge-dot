@@ -236,6 +236,18 @@ static int apply_point_table(toml_table_t *pt, tdot_point_t *point, char *err,
         point->unit = d.u.s;
     }
 
+    d = toml_string_in(pt, "name");
+    if (d.ok) {
+        free(point->name);
+        point->name = d.u.s;
+    }
+
+    d = toml_string_in(pt, "description");
+    if (d.ok) {
+        free(point->description);
+        point->description = d.u.s;
+    }
+
     toml_table_t *tr = toml_table_in(pt, "transform");
     if (tr) {
         point->has_transform = true;
@@ -912,6 +924,8 @@ static void free_contents(tdot_config_t *cfg, bool keep_path) {
             tdot_point_t *p = &dev->points[j];
             free(p->id);
             free(p->unit);
+            free(p->name);
+            free(p->description);
             free(p->meta_json);
             free(p->addr_json);
             free(p->proto);

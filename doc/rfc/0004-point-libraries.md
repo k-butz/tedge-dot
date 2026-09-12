@@ -59,7 +59,7 @@ points_from      = ["acme-meter-v2"]
 
 The full rules are normative in [contract §3.4](../contract/ot-connector-contract.md#34-point-libraries)
 and machine-readable in [point-library.schema.json](../contract/schemas/point-library.schema.json).
-The four decisions worth arguing about are below.
+The decisions worth arguing about are below.
 
 ### 1. Libraries are protocol-scoped, and a name is a file
 
@@ -146,7 +146,30 @@ small command per instance and the device type's point list is already on the ga
 discovery mechanism itself is deliberately **out of scope**: it is site-specific, and every
 site already has an answer. What was missing was something for it to point at.
 
-### 4. Errors are loud, and a command may only name a library
+### 4. A shared list documents itself
+
+A point carries an optional `name` (short label) and `description` (§3.1). The `id` cannot do
+that job: it is a topic segment and a parameter-set key, so it stays a plain identifier — which
+is why a list of two hundred points reads like `temp_u16`, `count_u32`, `status_word` and
+nobody downstream can tell what they are.
+
+Putting the labels on the point means a library declares them **once** and every instance that
+references it inherits them, which is the same argument as the addresses themselves. A site can
+still relabel one point without restating anything else, because labels are ordinary scalars
+under the patch rule above.
+
+They surface in the two places that are free: a parameter's Cumulocity DTM title and
+description (rendered by `describe` from the same TOML, with `meta.parameter.title` /
+`.description` still winning so a parameter can read differently from the signal), and the
+connector's retained capability descriptor as `point_labels` (§7) — which is also the only
+place a *read-only* point's label can appear, since it has no parameter definition.
+
+They are deliberately **not** echoed in the sample envelope. A label is static and a sample is
+a time series: echoing a description on every read of every point would put the same bytes on
+the wire at the poll interval, forever, for information that changes when someone edits the
+config. One retained message per connector says it once.
+
+### 5. Errors are loud, and a command may only name a library
 
 An unresolvable reference fails the load, naming the reference and every path it looked in. A
 library for the wrong protocol, a file that is really a connector configuration, a library with
