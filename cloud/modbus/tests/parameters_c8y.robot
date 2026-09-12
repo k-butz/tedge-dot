@@ -44,10 +44,13 @@ Parameter Definitions Are Rendered From The Connector Config
 
 Parameter Definition Is Registered In The Tenant
     [Documentation]    The rendered definition is posted to the DTM service — the tenant admin's
-    ...                one-off step (the device never calls the DTM service); an existing
-    ...                definition is kept (replace=True re-creates it).
+    ...                one-off step (the device never calls the DTM service). An existing
+    ...                definition is reconciled rather than trusted: one left over from an
+    ...                earlier connector config (a renamed or removed point) is re-created, so
+    ...                the Parameters tab never shows stale properties.
     Ensure DTM Property Definition    ${DEFINITION}
     DTM Property Definitions Should Contain    ${SET}
+    DTM Property Definition Should Match    ${DEFINITION}
 
 Child Device Carries The Parameter Set Fragment
     [Documentation]    ot-parameter-state publishes the set as a twin fragment; the c8y mapper

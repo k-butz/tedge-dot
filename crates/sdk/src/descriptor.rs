@@ -155,7 +155,7 @@ pub fn c8y_dtm_definitions(config: &ConnectorConfig, default_set: Option<&str>) 
                     "type": "object",
                     "properties": properties,
                 },
-                "contexts": ["asset", "operation"],
+                "contexts": ["asset", "event", "operation"],
                 "tags": ["tedge-dot", config.connector.protocol],
             })
         })
@@ -340,7 +340,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
         assert_eq!(defs.len(), 2);
         let main = &defs[0];
         assert_eq!(main["identifier"], "modbus_parameters");
-        assert_eq!(main["contexts"], json!(["asset", "operation"]));
+        assert_eq!(main["contexts"], json!(["asset", "event", "operation"]));
         let props = &main["jsonSchema"]["properties"];
         assert_eq!(props["temp_u16"]["type"], "integer");
         assert_eq!(props["temp_u16"]["title"], "Temperature setpoint");
