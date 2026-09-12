@@ -71,7 +71,10 @@ PYEOF
 configs=("$@")
 if [ ${#configs[@]} -eq 0 ]; then
     configs=("$repo"/demo/config/*.toml "$repo"/connectors/*/connector.toml
-             "$repo"/cloud/modbus/modbus.toml)
+             "$repo"/cloud/modbus/modbus.toml
+             # Deliberately untyped, so the stderr comparison below actually compares a
+             # warning instead of two empty files (§5.2).
+             "$repo"/impl/c/ci/fixtures/untyped-modbus.toml)
 fi
 
 # stdout is the JSON and stderr carries diagnostics (a config with no device `type` is

@@ -218,8 +218,9 @@ Describe Renders The Parameter Set Definition
     ...                the same keys the parameter twin fragment carries. Runs against whichever
     ...                implementation the stack was built with (IMPL=rust|c).
     ${output}=    DeviceLibrary.Execute Command
-    ...    cmd=tedge-dot describe -c /etc/connector.toml --compact 2>/dev/null    strip=${True}
-    ${definition}=    Evaluate    json.loads($output.splitlines()[0])    modules=json
+    ...    cmd=tedge-dot describe -c /etc/connector.toml --compact    strip=${True}
+    # The first JSON line, not the first line: a warning on stderr (§5.2) can be interleaved.
+    ${definition}=    Evaluate    json.loads([l for l in $output.splitlines() if l.startswith("{")][0])    modules=json
     Should Be Equal    ${definition}[identifier]    ${PARAM_SET}
     ${properties}=    Set Variable    ${definition}[jsonSchema][properties]
     Dictionary Should Contain Key    ${properties}    temp_u16
@@ -266,6 +267,11 @@ Parameter Update Command Writes The Points And Completes
     ${results}=    Get Json Field    ${result}    results
     Length Should Be    ${results}    2
     ${batch}=    Wait For Message Containing    ${BATCH_PREFIX}/ot--c8y-mapper-1    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    # The connector echoes the request's `origin` into its result (§6.4). The command topic is
+    # retained and holds one message, so without this a mapper that restarts replays only this
+    # result and can no longer tell which parameter set the write belonged to.
+    ${origin_set}=    Get Json Field    ${batch}    origin.set
+    Should Be Equal    ${origin_set}    ${PARAM_SET}
     ${twin}=    Wait For Message Containing    ${PARAM_TWIN}    "temp_u16":1234    timeout=${FLOWS_TIMEOUT}
     ${coil}=    Get Json Field    ${twin}    coil_rw
     Should Be Equal    ${coil}    ${False}

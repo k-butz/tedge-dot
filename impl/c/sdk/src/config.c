@@ -568,6 +568,22 @@ static bool blank(const char *s) {
     return true;
 }
 
+/* Strip surrounding whitespace from `s` in place. A device type is rendered in
+ * three places -- the parameter set names, the sample envelope and the link
+ * status -- which must agree on its exact spelling, so it is normalised once
+ * here, at load, exactly as the Rust loader does. */
+static char *trim_in_place(char *s) {
+    size_t end = strlen(s);
+    while (end && isspace((unsigned char)s[end - 1]))
+        s[--end] = '\0';
+    size_t start = 0;
+    while (s[start] && isspace((unsigned char)s[start]))
+        start++;
+    if (start)
+        memmove(s, s + start, end - start + 1);
+    return s;
+}
+
 /* The device type a library names ([library] type, §3.4), or NULL when it names
  * none -- the file name is deliberately not used instead, because this ends up
  * as a tenant-wide identifier in the cloud (§5.2). Caller frees. */
@@ -585,7 +601,7 @@ static int library_type(toml_table_t *root, const char *path, char **out,
                  "point library '%s': [library] type must be a non-empty string", path);
         return -1;
     }
-    *out = d.u.s;
+    *out = trim_in_place(d.u.s);
     return 0;
 }
 
@@ -914,7 +930,7 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
                          path, dev->name);
                 goto fail;
             }
-            dev->type = d.u.s;
+            dev->type = trim_in_place(d.u.s);
         }
         dev->protocol_address = toml_table_in(dt, "protocol_address");
         if (!dev->protocol_address) {

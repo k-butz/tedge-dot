@@ -139,7 +139,7 @@
     },
     "origin": {
       "type": "object",
-      "description": "Opaque requester correlation data. Ignored by the connector; flows read it back from the retained init message."
+      "description": "Opaque requester correlation data. Never interpreted by the connector, but echoed verbatim into every transition it publishes for that command: the topic is retained and holds one message, so the result overwrites the request, and a consumer that restarts replays the terminal state alone."
     }
   },
   "allOf": [

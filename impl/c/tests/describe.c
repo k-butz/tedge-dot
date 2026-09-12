@@ -71,6 +71,14 @@ static const char *CONFIG =
     "  address = { table = \"holding\", address = 22, count = 1 }\n"
     "  meta = { parameter = { group = \"commissioning\" } }\n"
     "\n"
+    "  # In two groups at once: both fragments carry its value.\n"
+    "  [[device.point]]\n"
+    "  id = \"flow_limit\"\n"
+    "  datatype = \"uint16\"\n"
+    "  access = \"read_write\"\n"
+    "  address = { table = \"holding\", address = 23, count = 1 }\n"
+    "  meta = { parameter = { group = [\"control\", \"commissioning\"] } }\n"
+    "\n"
     "# A device of an undeclared type: its sets fall back to the protocol.\n"
     "[[device]]\n"
     "name = \"plc2\"\n"
@@ -178,6 +186,9 @@ int main(void) {
         {"pump_speed", "pump"}, /* meta.parameter = "<name>" is absolute */
         {"status_word", "acme_boiler_v2_control_parameters"},
         {"commission_code", "acme_boiler_v2_commissioning_parameters"},
+        /* One point, two groups -> one entry per set, in the declared order. */
+        {"flow_limit", "acme_boiler_v2_control_parameters"},
+        {"flow_limit", "acme_boiler_v2_commissioning_parameters"},
         /* plc2 declares no type: back to the protocol, which is what collides
          * across device types and is the reason `describe` warns about it. */
         {"spare_rw", "modbus_control_parameters"},
@@ -188,18 +199,21 @@ int main(void) {
             tdot_param_naming(&cfg->devices[i], cfg->protocol, NULL);
         for (size_t j = 0; j < cfg->devices[i].npoints; j++) {
             const tdot_point_t *pt = &cfg->devices[i].points[j];
-            char *set = NULL;
-            if (!tdot_param_of(pt, &naming, &set))
+            size_t nsets = 0;
+            char **sets = tdot_param_sets(pt, &naming, &nsets);
+            if (!sets)
                 continue;
-            if (found < nwant) {
+            for (size_t k = 0; k < nsets; k++, found++) {
+                if (found >= nwant)
+                    continue;
                 CHECK(strcmp(pt->id, want[found].point) == 0,
                       "parameter #%zu is %s, wanted %s", found, pt->id,
                       want[found].point);
-                CHECK(strcmp(set, want[found].set) == 0, "%s set is %s, wanted %s",
-                      pt->id, set, want[found].set);
+                CHECK(strcmp(sets[k], want[found].set) == 0,
+                      "%s set is %s, wanted %s", pt->id, sets[k],
+                      want[found].set);
             }
-            found++;
-            free(set);
+            tdot_param_sets_free(sets, nsets);
         }
     }
     CHECK(found == nwant, "%zu parameters derived, wanted %zu", found, nwant);
@@ -278,6 +292,9 @@ int main(void) {
     CHECK(num_of(status, "maximum") == 65535.0, "status_word maximum = %g",
           num_of(status, "maximum"));
 
+    /* The two-group point is a property of BOTH its sets, so either screen edits it. */
+    CHECK(prop(main_def, "flow_limit") != NULL,
+          "a two-group point must be in the control set");
     CHECK(!prop(main_def, "hidden_rw"), "meta.parameter = false must opt out");
     CHECK(!prop(main_def, "level_f32"), "a read-only point must not appear");
 
@@ -301,6 +318,8 @@ int main(void) {
                  "acme_boiler_v2_commissioning_parameters") == 0,
           "grouped identifier = %s",
           str_of(cJSON_GetArrayItem(docs, 2), "identifier"));
+    CHECK(prop(cJSON_GetArrayItem(docs, 2), "flow_limit") != NULL,
+          "a two-group point must be in the commissioning set too");
     CHECK(strcmp(str_of(cJSON_GetArrayItem(docs, 3), "identifier"),
                  "modbus_control_parameters") == 0,
           "untyped identifier = %s",

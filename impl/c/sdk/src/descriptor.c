@@ -87,30 +87,93 @@ static cJSON *parameter_options(const tdot_point_t *point) {
     return options;
 }
 
-/* `set` is absolute (used verbatim); `group` only names a set within the device
- * type. Mirrors descriptor.rs::parameter_of. */
-static char *set_name_of(const cJSON *options,
-                         const tdot_set_naming_t *naming) {
-    const cJSON *set = cJSON_GetObjectItemCaseSensitive(options, "set");
-    if (cJSON_IsString(set) && *set->valuestring)
-        return strdup(set->valuestring);
-    if (naming->forced)
-        return strdup(naming->forced);
-    const cJSON *group = cJSON_GetObjectItemCaseSensitive(options, "group");
-    return tdot_param_set_name(
-        naming->qualifier,
-        cJSON_IsString(group) ? group->valuestring : TDOT_PARAM_DEFAULT_GROUP);
+/* Append `name` to a growing string list unless it is empty or already there.
+ * Takes ownership of `name` (frees it when it is a duplicate). */
+static void push_name(char ***list, size_t *n, char *name) {
+    if (!name || !*name) {
+        free(name);
+        return;
+    }
+    for (size_t i = 0; i < *n; i++)
+        if (strcmp((*list)[i], name) == 0) {
+            free(name);
+            return;
+        }
+    *list = realloc(*list, (*n + 1) * sizeof **list);
+    (*list)[(*n)++] = name;
 }
 
-bool tdot_param_of(const tdot_point_t *point, const tdot_set_naming_t *naming,
-                   char **set_out) {
+/* The names a `set`/`group` option holds: one string, or an array of them.
+ * Empty and non-string entries are ignored, so a mistyped entry degrades to the
+ * default group rather than inventing a set name. Mirrors
+ * descriptor.rs::names_of. */
+static char **names_of(const cJSON *options, const char *key, size_t *n) {
+    char **names = NULL;
+    *n = 0;
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(options, key);
+    if (cJSON_IsString(value)) {
+        push_name(&names, n, strdup(value->valuestring));
+    } else if (cJSON_IsArray(value)) {
+        const cJSON *item;
+        cJSON_ArrayForEach(item, value) {
+            if (cJSON_IsString(item))
+                push_name(&names, n, strdup(item->valuestring));
+        }
+    }
+    return names;
+}
+
+/* Every set the options put the point in. `set` is absolute (used verbatim) and
+ * wins over `group`; each accepts a string or a list.
+ * Mirrors descriptor.rs::SetNaming::sets_of. */
+static char **sets_of(const cJSON *options, const tdot_set_naming_t *naming,
+                      size_t *n) {
+    char **sets = names_of(options, "set", n);
+    if (*n)
+        return sets; /* absolute */
+    if (naming->forced) {
+        push_name(&sets, n, strdup(naming->forced));
+        return sets;
+    }
+    size_t ngroups = 0;
+    char **groups = names_of(options, "group", &ngroups);
+    if (!ngroups) {
+        push_name(&sets, n,
+                  tdot_param_set_name(naming->qualifier,
+                                      TDOT_PARAM_DEFAULT_GROUP));
+    }
+    /* Deduped on the resulting names, not the group names: two groups can fold
+     * to one set ("a b" and "a-b") and a point must not appear twice in one
+     * definition. */
+    for (size_t i = 0; i < ngroups; i++)
+        push_name(&sets, n, tdot_param_set_name(naming->qualifier, groups[i]));
+    tdot_param_sets_free(groups, ngroups);
+    return sets;
+}
+
+char **tdot_param_sets(const tdot_point_t *point,
+                       const tdot_set_naming_t *naming, size_t *n) {
+    *n = 0;
     cJSON *options = parameter_options(point);
     if (!options)
-        return false;
-    if (set_out)
-        *set_out = set_name_of(options, naming);
+        return NULL;
+    char **sets = sets_of(options, naming, n);
     cJSON_Delete(options);
-    return true;
+    return sets;
+}
+
+void tdot_param_sets_free(char **sets, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        free(sets[i]);
+    free(sets);
+}
+
+bool tdot_param_is(const tdot_point_t *point, const tdot_set_naming_t *naming) {
+    size_t n = 0;
+    char **sets = tdot_param_sets(point, naming, &n);
+    bool is = sets != NULL;
+    tdot_param_sets_free(sets, n);
+    return is;
 }
 
 /* Append "sep"-joined text to a growing heap string. */
@@ -132,19 +195,21 @@ char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced) {
             tdot_param_naming(dev, cfg->protocol, forced);
         for (size_t j = 0; j < dev->npoints; j++) {
             const tdot_point_t *pt = &dev->points[j];
-            char *set = NULL;
-            if (!tdot_param_of(pt, &naming, &set))
+            size_t nsets = 0;
+            char **sets = tdot_param_sets(pt, &naming, &nsets);
+            if (!sets)
                 continue;
             char item[256];
             if (!tdot_param_key_valid(pt->id)) {
                 snprintf(item, sizeof item, "point id '%s'", pt->id);
                 append(&buf, &len, ", ", item);
             }
-            if (!tdot_param_key_valid(set)) {
-                snprintf(item, sizeof item, "parameter set '%s'", set);
-                append(&buf, &len, ", ", item);
-            }
-            free(set);
+            for (size_t k = 0; k < nsets; k++)
+                if (!tdot_param_key_valid(sets[k])) {
+                    snprintf(item, sizeof item, "parameter set '%s'", sets[k]);
+                    append(&buf, &len, ", ", item);
+                }
+            tdot_param_sets_free(sets, nsets);
         }
     }
     return buf;
@@ -159,7 +224,7 @@ char *tdot_param_untyped_devices(const tdot_config_t *cfg) {
             continue;
         tdot_set_naming_t naming = tdot_param_naming(dev, cfg->protocol, NULL);
         for (size_t j = 0; j < dev->npoints; j++) {
-            if (tdot_param_of(&dev->points[j], &naming, NULL)) {
+            if (tdot_param_is(&dev->points[j], &naming)) {
                 append(&buf, &len, ", ", dev->name);
                 break;
             }
@@ -310,14 +375,18 @@ cJSON *tdot_c8y_dtm_definitions(const tdot_config_t *cfg, const char *forced) {
             cJSON *options = parameter_options(pt);
             if (!options)
                 continue;
-            char *set = set_name_of(options, &naming);
-            cJSON *props = cJSON_GetObjectItemCaseSensitive(sets, set);
-            if (!props)
-                props = cJSON_AddObjectToObject(sets, set);
-            if (!cJSON_GetObjectItemCaseSensitive(props, pt->id)) /* first definition wins */
-                cJSON_AddItemToObject(props, pt->id,
-                                      property_schema(pt, options));
-            free(set);
+            size_t nsets = 0;
+            char **point_sets = sets_of(options, &naming, &nsets);
+            for (size_t k = 0; k < nsets; k++) {
+                cJSON *props =
+                    cJSON_GetObjectItemCaseSensitive(sets, point_sets[k]);
+                if (!props)
+                    props = cJSON_AddObjectToObject(sets, point_sets[k]);
+                if (!cJSON_GetObjectItemCaseSensitive(props, pt->id)) /* first definition wins */
+                    cJSON_AddItemToObject(props, pt->id,
+                                          property_schema(pt, options));
+            }
+            tdot_param_sets_free(point_sets, nsets);
             cJSON_Delete(options);
         }
     }

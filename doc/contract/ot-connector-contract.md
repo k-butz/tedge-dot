@@ -496,6 +496,19 @@ the default group gives `acme_meter_v2_control_parameters`. Two knobs refine it,
 | `group` | A second set *of the same device type* (`commissioning` → `acme_meter_v2_commissioning_parameters`). |
 | `set` | An absolute name, used verbatim — the escape hatch for an identifier that predates this rule, or for a set deliberately shared by several device types. A bare string (`meta.parameter = "pump"`) is this form. |
 
+Either key MAY be a **list**, and the point then belongs to every set it names — operators group
+signals by what they are *for*, and one setpoint can belong on the commissioning screen and the
+daily-operation one:
+
+```toml
+meta.parameter = { group = ["control", "commissioning"] }
+```
+
+Such a point is a property of *each* of those definitions, and its value is published to each of
+their fragments, so the groups never disagree about it. Empty lists and non-string entries are
+ignored (a list that names nothing usable behaves like no list at all), names that fold to the
+same set are not repeated, and an absolute `set` still wins over `group`.
+
 A device with no declared type falls back to `<protocol>_control_parameters`, which every other
 device type on that protocol also falls back to: fine for a fleet of one type, a collision for a
 fleet of several, and the reason `tedge-dot describe` warns about it. Consumers derive the same
@@ -664,8 +677,15 @@ Request (`status: "init"`):
 
 Each entry follows the `write` request rules (`value` for typed points, `raw` for raw points). An
 empty `writes` array is rejected (`failed`), so a malformed request cannot succeed without touching
-the device. Any other request field (e.g. `origin`) is ignored by the connector and left on the
-retained `init` message for requesters and flows to correlate with.
+the device.
+
+A request MAY carry an `origin` object: opaque correlation data the requester attaches. The
+connector MUST NOT interpret it, and MUST echo it verbatim into every transition it publishes
+for that command (`write` and `write-batch` alike). The topic is retained and holds exactly one
+message, so the result *overwrites* the request — without the echo, a consumer that starts or
+restarts afterwards replays the terminal state alone and has lost what the request said. That is
+what lets a flow still tell which parameter set (§5.2) an acknowledged write belongs to, rather
+than guessing and retaining a fragment under a name no definition matches.
 
 Transitions: `executing` carries `points` (the ids about to be written); the terminal message
 carries `results`, one entry per *attempted* write in order:

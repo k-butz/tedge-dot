@@ -53,10 +53,17 @@ tdot_set_naming_t tdot_param_naming(const tdot_device_t *dev,
  * rejects '.' and '$'). */
 bool tdot_param_key_valid(const char *key);
 
-/* True when the point is a parameter. When it is and `set_out` is non-NULL,
- * `*set_out` receives the newly allocated set name (caller frees). */
-bool tdot_param_of(const tdot_point_t *point, const tdot_set_naming_t *naming,
-                   char **set_out);
+/* Every parameter set the point belongs to, or NULL when it is not a parameter.
+ * `*n` receives the count. `meta.parameter.set` and `.group` each accept a
+ * string or an array of them, so one point can appear in several sets -- its
+ * schema goes into each set's definition and its value into each fragment.
+ * Free with tdot_param_sets_free(). */
+char **tdot_param_sets(const tdot_point_t *point,
+                       const tdot_set_naming_t *naming, size_t *n);
+void tdot_param_sets_free(char **sets, size_t n);
+
+/* True when the point is a parameter (convenience over tdot_param_sets). */
+bool tdot_param_is(const tdot_point_t *point, const tdot_set_naming_t *naming);
 
 /* Parameter ids and set names that cannot be used as fragment keys, joined with
  * ", " (e.g. "point id 'Boiler.Temp'"). NULL when every key is usable.

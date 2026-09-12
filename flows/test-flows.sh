@@ -355,6 +355,43 @@ check "parameter-state: the set learned from samples wins over the request" ot-p
   "[te/device/plc1/ot/modbus/sample/temp_u16] $SAMPLED"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--3] $RQINIT"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--3] {\"status\":\"successful\",\"results\":[{\"point\":\"temp_u16\",\"status\":\"successful\",\"value\":4242}]}" \
   '[te/device/plc1///twin/acme_boiler_v2_control_parameters] {"temp_u16":4242}'
 
+# A point can be in SEVERAL groups: operators group signals by what they are for, and the same
+# setpoint belongs on the daily screen and the commissioning one. Its value must reach every
+# fragment, or the groups disagree about the device.
+SMULTI='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","type":"acme-boiler-v2","protocol":"modbus","point":"flow_limit","mode":"typed","datatype":"uint16","value":42,"value_repr":"number","raw":"002a","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"group":["control","commissioning"]}}}'
+check "parameter-state: a point in two groups updates both fragments" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/flow_limit] $SMULTI" \
+  '[te/device/plc1///twin/acme_boiler_v2_control_parameters] {"flow_limit":42}'
+check "parameter-state: ...and the second fragment carries it too" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/flow_limit] $SMULTI" \
+  '[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"flow_limit":42}'
+# A write to a multi-group point fans out to every one of its fragments.
+check "parameter-state: a write to a multi-group point updates every fragment" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/flow_limit] $SMULTI"$'\n'"[te/device/plc1/ot/modbus/cmd/write/w9] {\"status\":\"successful\",\"point\":\"flow_limit\",\"value\":7}" \
+  '[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"flow_limit":7}'
+# An absolute list works the same way, and wins over any group.
+SSETLIST='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","type":"acme-boiler-v2","protocol":"modbus","point":"shared","mode":"typed","datatype":"uint16","value":5,"value_repr":"number","raw":"0005","quality":"good","addr":{},"access":"read_write","meta":{"parameter":{"set":["plant_a","plant_b"],"group":"ignored"}}}'
+check "parameter-state: an absolute set list wins over group" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/shared] $SSETLIST" \
+  '[te/device/plc1///twin/plant_b] {"shared":5}'
+# The connector echoes `origin` into its results (§6.4), so a mapper that restarts and replays
+# ONLY the retained terminal message still attributes a write-only point to the right set. The
+# retained request is long gone by then — it was overwritten on the same topic.
+RESONLY='{"status":"successful","results":[{"point":"valve_cmd","status":"successful","value":true}],"origin":{"command":"parameter_update","set":"acme_boiler_v2_commissioning_parameters","parameters":{"valve_cmd":true}}}'
+check "parameter-state: a replayed result alone still names the set (origin echo)" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2"}'$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--9] $RESONLY" \
+  '[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"valve_cmd":true}'
+# A sample that omits the type must NOT clear a type already learned: the runtime omits it for
+# a point it has no configuration entry for, which says nothing about the device.
+SNOTYPE='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","protocol":"modbus","point":"temp_u16","mode":"typed","datatype":"uint16","value":17001,"value_repr":"number","raw":"4269","quality":"good","addr":{},"access":"read_write"}'
+check "parameter-state: a sample without a type keeps the learned one" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2"}'$'\n'"[te/device/plc1/ot/modbus/sample/temp_u16] $SNOTYPE" \
+  '[te/device/plc1///twin/acme_boiler_v2_control_parameters] {"temp_u16":17001}'
+# An opted-out point stays out even when a request names a set for it.
+OPTOUT='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","type":"acme-boiler-v2","protocol":"modbus","point":"hidden_rw","mode":"typed","datatype":"uint16","value":1,"value_repr":"number","raw":"0001","quality":"good","addr":{},"access":"read_write","meta":{"parameter":false}}'
+check_empty "parameter-state: origin.set cannot resurrect an opted-out point" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/hidden_rw] $OPTOUT"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--8] {\"status\":\"successful\",\"results\":[{\"point\":\"hidden_rw\",\"status\":\"successful\",\"value\":2}],\"origin\":{\"command\":\"parameter_update\",\"set\":\"acme_boiler_v2_control_parameters\"}}"
+
 # --- ot-command-forward: parameter_update -> write-batch ---
 C8YOP='{"status":"init","operation":{"deviceId":"123","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_acme_boiler_v2_control_parameters":{},"acme_boiler_v2_control_parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
 check "command-forward: c8y parameter update -> one write-batch with origin + mapper metadata" ot-command-forward \

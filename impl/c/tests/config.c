@@ -437,6 +437,51 @@ static void check_device_type_is_inherited_from_the_first_library(void) {
         failures++;
     }
 
+    /* A padded type is normalised at load, exactly as the Rust loader does: the set
+     * names, the sample envelope and the link status all read the stored value,
+     * so they cannot spell it differently.
+     * Mirrors library.rs::a_declared_type_is_trimmed_once_at_load. */
+    char padded[2048];
+    snprintf(padded, sizeof padded, "[library]\ntype = \"  acme-meter-v2 \"\n%s",
+             LIBRARY + strlen("[library]\n"));
+    write_file(&s, "modbus/padded.toml", padded);
+    cfg = load_with_libs(&s, "\"padded\"", "", err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].type &&
+                  strcmp(cfg->devices[0].type, "acme-meter-v2") == 0,
+              "an inherited type must be trimmed, got '%s'",
+              cfg->devices[0].type ? cfg->devices[0].type : "<none>");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL padded library did not load: %s\n", err);
+        failures++;
+    }
+    char padded_dev[1024];
+    snprintf(padded_dev, sizeof padded_dev,
+             "[connector]\n"
+             "protocol = \"modbus\"\n"
+             "point_library_path = [\"%s\"]\n"
+             "\n"
+             "[[device]]\n"
+             "name = \"plc1\"\n"
+             "type = \" site-special \"\n"
+             "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
+             "port = 502, unit_id = 1 }\n"
+             "points_from = [\"acme-meter\"]\n",
+             s.dir);
+    write_file(&s, "etc/padded-type.toml", padded_dev);
+    cfg = tdot_config_load(scratch_path(&s, "etc/padded-type.toml"), err, sizeof err);
+    if (cfg) {
+        CHECK(cfg->devices[0].type &&
+                  strcmp(cfg->devices[0].type, "site-special") == 0,
+              "a declared type must be trimmed, got '%s'",
+              cfg->devices[0].type ? cfg->devices[0].type : "<none>");
+        tdot_config_free(cfg);
+    } else {
+        printf("FAIL padded device type did not load: %s\n", err);
+        failures++;
+    }
+
     /* A device `type` that is present but unusable is an error, not an absent
      * type -- and the Rust loader must reject the same files. */
     /* An array or a table is present but unusable, not absent: tomlc99's

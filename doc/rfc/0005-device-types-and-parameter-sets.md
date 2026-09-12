@@ -86,6 +86,19 @@ tenant that already registered an identifier, or a fleet that deliberately wants
 across device types (a site-wide `plant_setpoints`), needs a way to say a name outright —
 `set` is that, and keeping it verbatim is what makes an existing configuration keep working.
 
+Either key also accepts a **list**, and the point joins every set it names:
+
+```toml
+meta.parameter = { group = ["control", "commissioning"] }
+```
+
+That is the shape operators actually ask for — they group settings by what they are *for*, and
+one setpoint legitimately belongs on the commissioning screen and the daily-operation one. The
+point's schema goes into each definition and its value into each fragment, so the groups cannot
+disagree about the device: a change through either screen updates both. Nothing else in the
+design had to move for it, because a set was already a *derived* name rather than a place a
+point lives — the implementations simply yield one parameter per (point, set) pair.
+
 **Alternative rejected:** making `set` relative too (qualifying every name). It would have
 changed the meaning of a key that already had one, and left no way to express "this exact
 identifier", which is the only way to talk to a definition someone else created.
@@ -167,5 +180,10 @@ Set names change, which matters to anyone who registered the old ones:
 ```sh
 tedge mqtt pub -r -q 1 'te/device/plc1///twin/modbus_parameters' ''
 ```
+
+The same applies when a `type` changes on a *running* connector (`set-config`, `define-device`):
+the sets are renamed from the next publish, the fragment under the old name stays retained until
+it is cleared the same way, and `ot-registration` — which registers a device once per mapper
+lifetime — keeps the entity type it first published until the mapper restarts.
 
 `type` itself is optional everywhere, so no configuration fails to load.

@@ -93,10 +93,12 @@ impl SetNaming {
     pub fn of(device: &DeviceConfig, protocol: &str, forced: Option<&str>) -> Self {
         SetNaming {
             forced: forced.map(String::from),
+            // Used verbatim: the loader normalised and validated the declared type, so every
+            // renderer (set names, sample envelope, link status) spells it identically.
             qualifier: device
                 .device_type
                 .clone()
-                .filter(|t| !t.trim().is_empty())
+                .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| protocol.to_string()),
         }
     }
@@ -108,6 +110,61 @@ impl SetNaming {
             None => set_name(&self.qualifier, group.unwrap_or(DEFAULT_GROUP)),
         }
     }
+
+    /// Every set a point belongs to, given its `meta.parameter` options.
+    ///
+    /// `set` and `group` each accept a string or an array of them, so one point can appear in
+    /// several sets — operators group signals by what they are *for*, and the same setpoint
+    /// belongs on the commissioning screen and the daily-operation one. The point's value is
+    /// published to every set's fragment, so the groups stay consistent with each other.
+    pub fn sets_of(&self, options: &Map<String, Value>) -> Vec<String> {
+        // An absolute `set` bypasses the naming rule entirely and wins over `group`.
+        let absolute = names_of(options.get("set"));
+        if !absolute.is_empty() {
+            return absolute;
+        }
+        if let Some(forced) = &self.forced {
+            return vec![forced.clone()];
+        }
+        let groups = names_of(options.get("group"));
+        if groups.is_empty() {
+            return vec![self.set_for(None)];
+        }
+        // Two group names can fold to one set name ("a b" and "a-b"), so dedupe the result
+        // rather than the input: a point must not appear twice in one definition.
+        let mut sets: Vec<String> = Vec::with_capacity(groups.len());
+        for group in groups {
+            let set = set_name(&self.qualifier, &group);
+            if !sets.contains(&set) {
+                sets.push(set);
+            }
+        }
+        sets
+    }
+}
+
+/// The names a `set`/`group` option holds: one string, or an array of them. Empty and
+/// non-string entries are ignored, so a mistyped entry degrades to the default group rather
+/// than inventing a set name out of `null`.
+fn names_of(value: Option<&Value>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut push = |name: &str| {
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    };
+    match value {
+        Some(Value::String(s)) => push(s),
+        Some(Value::Array(items)) => {
+            for item in items {
+                if let Some(s) = item.as_str() {
+                    push(s);
+                }
+            }
+        }
+        _ => {}
+    }
+    names
 }
 
 /// True when `id` can be used verbatim as a fragment key (Cumulocity rejects `.` and `$`).
@@ -134,13 +191,16 @@ pub struct Parameter {
     pub options: Map<String, Value>,
 }
 
-/// The parameters of one point, if it is one. `naming` names the set for points that do not
-/// give an absolute one.
-pub fn parameter_of(point: &PointConfig, naming: &SetNaming) -> Option<Parameter> {
+/// The parameters of one point: one per set it belongs to, and none when it is not a
+/// parameter at all. `naming` names the sets for a point that does not give absolute ones.
+///
+/// A point in several groups yields several [`Parameter`]s — identical but for `set` — which
+/// is what puts it in each of those definitions and fragments.
+pub fn parameters_of(point: &PointConfig, naming: &SetNaming) -> Vec<Parameter> {
     let access = Access::parse(point.access.as_deref());
     let options: Option<Map<String, Value>> = match point.meta.as_ref().and_then(|m| m.get("parameter")) {
         None => None,
-        Some(Value::Bool(false)) => return None, // explicit opt-out
+        Some(Value::Bool(false)) => return Vec::new(), // explicit opt-out
         Some(Value::Bool(true)) => Some(Map::new()),
         Some(Value::String(set)) => {
             let mut m = Map::new();
@@ -151,36 +211,23 @@ pub fn parameter_of(point: &PointConfig, naming: &SetNaming) -> Option<Parameter
         Some(_) => Some(Map::new()),
     };
     if !access.can_write() && options.is_none() {
-        return None;
+        return Vec::new();
     }
     let options = options.unwrap_or_default();
-    // `set` is absolute (used verbatim); `group` only names a set within the device type.
-    // Only the *empty* string counts as absent — not a blank one — because the C and JS
-    // implementations test exactly that, and a blank group would otherwise name a different
-    // set here than it does there.
-    let set = options
-        .get("set")
-        .and_then(|s| s.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .unwrap_or_else(|| {
-            naming.set_for(
-                options
-                    .get("group")
-                    .and_then(|g| g.as_str())
-                    .filter(|g| !g.is_empty()),
-            )
-        });
-    Some(Parameter {
-        point: point.id.clone(),
-        set,
-        datatype: point.datatype,
-        access,
-        unit: point.unit.clone(),
-        name: point.name.clone(),
-        description: point.description.clone(),
-        options,
-    })
+    naming
+        .sets_of(&options)
+        .into_iter()
+        .map(|set| Parameter {
+            point: point.id.clone(),
+            set,
+            datatype: point.datatype,
+            access,
+            unit: point.unit.clone(),
+            name: point.name.clone(),
+            description: point.description.clone(),
+            options: options.clone(),
+        })
+        .collect()
 }
 
 /// Every parameter of every device in the config, in configuration order. `forced` is the
@@ -194,7 +241,7 @@ pub fn parameters(config: &ConnectorConfig, forced: Option<&str>) -> Vec<Paramet
             device
                 .points
                 .iter()
-                .filter_map(move |p| parameter_of(p, &naming))
+                .flat_map(move |p| parameters_of(p, &naming))
         })
         .collect()
 }
@@ -206,10 +253,10 @@ pub fn devices_without_type(config: &ConnectorConfig) -> Vec<String> {
     config
         .devices
         .iter()
-        .filter(|d| d.device_type.as_deref().unwrap_or("").trim().is_empty())
+        .filter(|d| d.device_type.as_deref().unwrap_or("").is_empty())
         .filter(|d| {
             let naming = SetNaming::of(d, &config.connector.protocol, None);
-            d.points.iter().any(|p| parameter_of(p, &naming).is_some())
+            d.points.iter().any(|p| !parameters_of(p, &naming).is_empty())
         })
         .map(|d| d.name.clone())
         .collect()
@@ -459,6 +506,15 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   address = { table = "holding", address = 22, count = 1 }
   meta = { parameter = { group = "commissioning" } }
 
+  # In two groups at once: operators see it on the daily screen and the
+  # commissioning one, and both fragments carry its value.
+  [[device.point]]
+  id = "flow_limit"
+  datatype = "uint16"
+  access = "read_write"
+  address = { table = "holding", address = 23, count = 1 }
+  meta = { parameter = { group = ["control", "commissioning"] } }
+
 # A device of an undeclared type: its sets fall back to the protocol.
 [[device]]
 name = "plc2"
@@ -494,6 +550,9 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
                 ("pump_speed", "pump"),
                 ("status_word", "acme_boiler_v2_control_parameters"),
                 ("commission_code", "acme_boiler_v2_commissioning_parameters"),
+                // One point, two groups -> one parameter per set, in the declared order.
+                ("flow_limit", "acme_boiler_v2_control_parameters"),
+                ("flow_limit", "acme_boiler_v2_commissioning_parameters"),
                 // plc2 declares no type: back to the protocol, which is what collides across
                 // device types and is the reason `describe` warns about it.
                 ("spare_rw", "modbus_control_parameters"),
@@ -520,9 +579,69 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
                 ("pump_speed", "pump"),
                 ("status_word", "legacy_params"),
                 ("commission_code", "legacy_params"),
+                // --set collapses a multi-group point to the one forced name, once.
+                ("flow_limit", "legacy_params"),
                 ("spare_rw", "legacy_params"),
             ]
         );
+    }
+
+    /// `set` and `group` both accept a list, an absolute `set` still wins, and names that fold
+    /// to the same set are not repeated.
+    #[test]
+    fn a_point_can_belong_to_several_sets() {
+        let naming = SetNaming::of(&cfg().devices[0], "modbus", None);
+        let sets = |toml: &str| {
+            let point: PointConfig = toml::from_str(toml).unwrap();
+            parameters_of(&point, &naming)
+                .into_iter()
+                .map(|p| p.set)
+                .collect::<Vec<_>>()
+        };
+        let point = |meta: &str| {
+            format!(
+                "id = \"p\"\ndatatype = \"uint16\"\naccess = \"read_write\"\n\
+                 address = {{ table = \"holding\", address = 1, count = 1 }}\n{meta}"
+            )
+        };
+
+        assert_eq!(
+            sets(&point("meta = { parameter = { group = [\"control\", \"commissioning\"] } }")),
+            [
+                "acme_boiler_v2_control_parameters",
+                "acme_boiler_v2_commissioning_parameters"
+            ]
+        );
+        assert_eq!(
+            sets(&point("meta = { parameter = { set = [\"plant_a\", \"plant_b\"] } }")),
+            ["plant_a", "plant_b"]
+        );
+        // An absolute set still wins over the groups.
+        assert_eq!(
+            sets(&point(
+                "meta = { parameter = { set = \"pump\", group = [\"a\", \"b\"] } }"
+            )),
+            ["pump"]
+        );
+        // Group names that fold to the same set name yield one set, not two.
+        assert_eq!(
+            sets(&point("meta = { parameter = { group = [\"a b\", \"a-b\"] } }")),
+            ["acme_boiler_v2_a_b_parameters"]
+        );
+        // An empty or unusable list is an absent one: the default group, never no set at all.
+        for meta in [
+            "meta = { parameter = { group = [] } }",
+            "meta = { parameter = { group = [1, true] } }",
+            "meta = { parameter = { set = [] } }",
+        ] {
+            assert_eq!(
+                sets(&point(meta)),
+                ["acme_boiler_v2_control_parameters"],
+                "{meta}"
+            );
+        }
+        // ...and opting out still beats every list.
+        assert!(sets(&point("meta = { parameter = false }")).is_empty());
     }
 
     #[test]
@@ -549,6 +668,9 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 503, unit_id 
     fn dtm_definitions_group_by_set_and_render_schema() {
         let defs = c8y_dtm_definitions(&cfg(), None);
         assert_eq!(defs.len(), 4);
+        // The two-group point is a property of BOTH its sets, so either screen can edit it.
+        assert!(defs[0]["jsonSchema"]["properties"]["flow_limit"].is_object());
+        assert!(defs[2]["jsonSchema"]["properties"]["flow_limit"].is_object());
         let main = &defs[0];
         assert_eq!(main["identifier"], "acme_boiler_v2_control_parameters");
         assert_eq!(main["contexts"], json!(["asset", "event", "operation"]));

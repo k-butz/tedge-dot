@@ -15,6 +15,9 @@
 //
 //   <device type, else the protocol>_<meta.parameter.group, default "control">_parameters
 //
+// `group` (and `set`) may be a list, so one point can belong to several sets — operators group
+// signals by what they are for — and its value is published to each of their fragments.
+//
 // The device type is echoed in every sample and on the link status (contract §3.1/§5), so the
 // flow never needs the connector's configuration file. meta.parameter.set bypasses the rule and
 // is used verbatim.
@@ -34,7 +37,7 @@
 //                                            (read by ot-command-forward)
 //   "ot-device-type:<device>"             -> declared device type, when the connector reports one
 //   "ot-parameter-values:<device>:<set>"  -> { <point>: value }
-//   "ot-parameter-set:<device>:<point>"   -> set name, or false for opted-out points
+//   "ot-parameter-set:<device>:<point>"   -> [set names], or false for opted-out points
 //                                            (from the point's samples, else from the
 //                                            parameter_update request that wrote it)
 
@@ -73,43 +76,72 @@ function setFor(names, group) {
   return sanitize(`${names.qualifier}_${group || DEFAULT_GROUP}_parameters`);
 }
 
-// The set a sampled point belongs to (false when it is not a parameter).
-function setFromSample(sample, names) {
-  const mp = sample.meta?.parameter;
-  if (mp === false) return false;
-  if (typeof mp === "string" && mp) return mp; // a bare string names the set, absolutely
-  if (mp && typeof mp === "object") {
-    if (typeof mp.set === "string" && mp.set) return mp.set;
-    return setFor(names, typeof mp.group === "string" ? mp.group : undefined);
+// The names a `set`/`group` option holds: one string, or an array of them. Empty and
+// non-string entries are ignored, so a mistyped entry degrades to the default group rather
+// than inventing a set name. Mirrors descriptor.rs::names_of / descriptor.c::names_of.
+function namesOf(value) {
+  const out = [];
+  for (const name of Array.isArray(value) ? value : [value]) {
+    if (typeof name === "string" && name && !out.includes(name)) out.push(name);
   }
-  if (mp === undefined || mp === null) return canWrite(sample.access) ? setFor(names) : false;
-  return setFor(names); // `true`, or any other scalar
+  return out;
 }
 
-// The points a write/write-batch REQUEST names (the retained `init`), in order.
+// EVERY set a point belongs to: `set` and `group` each accept a string or a list, so one point
+// can appear on several operator screens and its value reaches each of their fragments.
+// `set` is absolute and wins over `group`. Mirrors SetNaming::sets_of in both SDKs.
+function setsOf(options, names) {
+  const absolute = namesOf(options.set);
+  if (absolute.length) return absolute;
+  if (names.forced) return [names.forced];
+  const groups = namesOf(options.group);
+  if (!groups.length) return [setFor(names)];
+  // Deduped on the resulting names: two group names can fold to the same set name.
+  const sets = [];
+  for (const group of groups) {
+    const set = setFor(names, group);
+    if (!sets.includes(set)) sets.push(set);
+  }
+  return sets;
+}
+
+// The sets a sampled point belongs to (false when it is not a parameter).
+function setsFromSample(sample, names) {
+  const mp = sample.meta?.parameter;
+  if (mp === false) return false;
+  if (typeof mp === "string" && mp) return [mp]; // a bare string names the set, absolutely
+  if (mp && typeof mp === "object" && !Array.isArray(mp)) return setsOf(mp, names);
+  if (mp === undefined || mp === null) return canWrite(sample.access) ? [setFor(names)] : false;
+  return [setFor(names)]; // `true`, or any other scalar
+}
+
+// The points a write/write-batch message names — the `writes` of a request, the `results` of a
+// terminal transition, or the single `point` of a `write` in any of its states.
 function writtenPoints(verb, payload) {
   if (verb === "write") return typeof payload.point === "string" ? [payload.point] : [];
   if (verb === "write-batch") {
-    return (payload.writes ?? [])
-      .map((w) => w?.point)
-      .filter((p) => typeof p === "string" && p);
+    const listed = payload.writes ?? payload.results ?? [];
+    return listed.map((w) => w?.point).filter((p) => typeof p === "string" && p);
   }
   return [];
 }
 
 // Apply {point: value} updates for a device; returns the twin messages of the changed sets.
-function applyValues(context, device, updates, resolveSet) {
+// A point in several sets updates each of them, so the groups never disagree about its value.
+function applyValues(context, device, updates, resolveSets) {
   const changed = new Set();
   for (const [point, value] of Object.entries(updates)) {
     if (value === undefined) continue;
-    const set = resolveSet(point);
-    if (!set) continue;
-    const key = `ot-parameter-values:${device}:${set}`;
-    const values = context.mapper.get(key) || {};
-    if (JSON.stringify(values[point]) === JSON.stringify(value)) continue;
-    values[point] = value;
-    context.mapper.set(key, values);
-    changed.add(set);
+    const sets = resolveSets(point);
+    if (!sets) continue;
+    for (const set of sets) {
+      const key = `ot-parameter-values:${device}:${set}`;
+      const values = context.mapper.get(key) || {};
+      if (JSON.stringify(values[point]) === JSON.stringify(value)) continue;
+      values[point] = value;
+      context.mapper.set(key, values);
+      changed.add(set);
+    }
   }
   return [...changed].map((set) => ({
     topic: `te/device/${device}///twin/${set}`,
@@ -149,17 +181,20 @@ export function onMessage(message, context) {
 
   if (kind === "sample") {
     const point = payload.point || parts[6];
-    // Remember the point's set (or opt-out) so write results can be attributed later.
-    const set = setFromSample(payload, names);
-    context.mapper.set(`ot-parameter-set:${device}:${point}`, set);
-    if (!set || payload.quality !== "good" || payload.value === undefined) return [];
-    return applyValues(context, device, { [point]: payload.value }, () => set);
+    // Remember the point's sets (or opt-out) so write results can be attributed later.
+    const sets = setsFromSample(payload, names);
+    context.mapper.set(`ot-parameter-set:${device}:${point}`, sets);
+    if (!sets || payload.quality !== "good" || payload.value === undefined) return [];
+    return applyValues(context, device, { [point]: payload.value }, () => sets);
   }
 
-  // The request half of a write: a parameter_update names the set it edited (origin.set), and
-  // for a write-only point — which never samples — that is the ONLY thing that can say which
-  // set its value belongs in. Recorded, never overriding what a sample already established.
-  if (kind === "cmd" && payload.status === "init") {
+  // A parameter_update names the set it edited (origin.set), and for a write-only point —
+  // which never samples — that is the ONLY thing that can say which set its value belongs in.
+  // The connector echoes `origin` into every transition it publishes (§6.4), so this survives
+  // the request being overwritten on the retained command topic, and therefore survives a
+  // mapper restart, which replays the terminal state alone.
+  // Recorded, never overriding what a sample already established.
+  if (kind === "cmd") {
     const set = payload.origin?.set;
     if (typeof set === "string" && set) {
       for (const point of writtenPoints(parts[6], payload)) {
@@ -167,11 +202,11 @@ export function onMessage(message, context) {
         // real value (an opted-out point) and must not be overwritten.
         const known = context.mapper.get(`ot-parameter-set:${device}:${point}`);
         if (known === undefined || known === null) {
-          context.mapper.set(`ot-parameter-set:${device}:${point}`, set);
+          context.mapper.set(`ot-parameter-set:${device}:${point}`, [set]);
         }
       }
     }
-    return [];
+    if (payload.status === "init") return [];
   }
 
   if (kind === "cmd" && payload.status === "successful") {
@@ -186,13 +221,15 @@ export function onMessage(message, context) {
         }
       }
     }
-    // A point that was written is writable by definition: the set learned from its samples or
+    // A point that was written is writable by definition: the sets learned from its samples or
     // from the request that wrote it, else the default one.
-    const resolveSet = (point) => {
+    const resolveSets = (point) => {
       const known = context.mapper.get(`ot-parameter-set:${device}:${point}`);
-      return known === undefined || known === null ? setFor(names) : known;
+      if (known === undefined || known === null) return [setFor(names)];
+      // Tolerate the pre-list shape (a bare set name) in case state outlives a flow upgrade.
+      return typeof known === "string" ? [known] : known;
     };
-    return applyValues(context, device, updates, resolveSet);
+    return applyValues(context, device, updates, resolveSets);
   }
   return [];
 }

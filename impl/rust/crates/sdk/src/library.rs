@@ -111,7 +111,8 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
     // devices publish over each other on one entity's topics — and they are what makes
     // "was this reference already here" ambiguous for the management guard.
     let mut seen: Vec<&str> = Vec::new();
-    for device in devices.iter() {
+    let mut normalised: Vec<(usize, String)> = Vec::new();
+    for (index, device) in devices.iter().enumerate() {
         let Some(name) = device.get("name").and_then(Value::as_str) else {
             continue; // a device without a name is the typed parse's error to report
         };
@@ -123,11 +124,20 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
         // otherwise be accepted as a type and silently behave like an absent one — and the C
         // loader must reject exactly the same files as this one.
         if let Some(declared) = device.get("type") {
-            if declared.as_str().map(|t| t.trim().is_empty()).unwrap_or(true) {
-                return Err(format!(
-                    "device '{name}': type must be a non-empty string"
-                ));
+            match declared.as_str().map(str::trim) {
+                None | Some("") => {
+                    return Err(format!("device '{name}': type must be a non-empty string"))
+                }
+                // Normalised once, here: the type is rendered in three places (the parameter
+                // set names, the sample envelope and the link status) which must agree on its
+                // exact spelling, so surrounding whitespace goes before anything reads it.
+                Some(trimmed) => normalised.push((index, trimmed.to_string())),
             }
+        }
+    }
+    for (index, device_type) in normalised {
+        if let Some(table) = devices[index].as_table_mut() {
+            table.insert("type".to_string(), Value::String(device_type));
         }
     }
 
@@ -418,8 +428,9 @@ fn read_library(path: &Path, protocol: &str) -> Result<Library, String> {
         .and_then(|l| l.get("type"))
         .map(|t| {
             t.as_str()
-                .map(str::to_string)
-                .filter(|t| !t.trim().is_empty())
+                // Normalised like the device's own type: one spelling, everywhere.
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
                 .ok_or_else(|| {
                     format!("point library '{where_}': [library] type must be a non-empty string")
                 })
@@ -664,6 +675,32 @@ points_from      = [{refs}]
         // guessed at: the type ends up as a tenant-wide identifier in the cloud).
         let none = resolve_in(dir.path(), "\"untyped\"", "").unwrap();
         assert_eq!(none.devices[0].device_type, None);
+    }
+
+    /// A padded type is normalised at load, so the set names, the sample envelope and the link
+    /// status cannot spell it differently from one another (they all read the stored value).
+    #[test]
+    fn a_declared_type_is_trimmed_once_at_load() {
+        let dir = Dir::new("type-trim");
+        dir.write(
+            "modbus/acme-meter.toml",
+            &LIBRARY.replace("[library]\n", "[library]\ntype = \"  acme-meter-v2 \"\n"),
+        );
+        let inherited = resolve_in(dir.path(), "\"acme-meter\"", "").unwrap();
+        assert_eq!(
+            inherited.devices[0].device_type.as_deref(),
+            Some("acme-meter-v2")
+        );
+
+        let own = resolve(
+            &config_with(Some(dir.path()), "\"acme-meter\"", "").replace(
+                "points_from",
+                "type             = \" site-special \"\npoints_from",
+            ),
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(own.devices[0].device_type.as_deref(), Some("site-special"));
     }
 
     #[test]

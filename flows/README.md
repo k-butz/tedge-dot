@@ -67,8 +67,9 @@ needed: the c8y mapper binds templates per fragment name, so two templates for
 A set name is a tenant-wide identifier in the cloud, so it is derived from the **device type**
 (echoed in every sample and on the retained link status) rather than from the protocol:
 `<type, else protocol>_<meta.parameter.group, default "control">_parameters`, e.g.
-`acme_meter_v2_control_parameters`. `meta.parameter.set` still names a set outright, and the
-flow's `default_set` param forces one name for everything. `tedge-dot describe` derives the same
+`acme_meter_v2_control_parameters`. Both `group` and `set` accept a list, so one point can be in
+several sets and its value is published to each of their fragments. `meta.parameter.set` still
+names a set outright, and the flow's `default_set` param forces one name for everything. `tedge-dot describe` derives the same
 names from the same configuration and renders them as Cumulocity DTM definitions for a tenant
 admin to register — see [RFC 0005](../doc/rfc/0005-device-types-and-parameter-sets.md).
 

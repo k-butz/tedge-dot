@@ -889,7 +889,7 @@ fn build_meta_index(config: &ConnectorConfig) -> MetaIndex {
                 PointExtras {
                     meta: point.meta.clone(),
                     access: Access::parse(point.access.as_deref()),
-                    device_type: device.device_type.clone().filter(|t| !t.trim().is_empty()),
+                    device_type: device.device_type.clone().filter(|t| !t.is_empty()),
                 },
             );
         }
@@ -897,14 +897,15 @@ fn build_meta_index(config: &ConnectorConfig) -> MetaIndex {
     index
 }
 
-/// The declared `type` of one configured device (§3.1), if it has one.
+/// The declared `type` of one configured device (§3.1), if it has one. Used verbatim: the
+/// loader normalised and validated it (`library::expand`), so trimming here — and only here —
+/// would make the link status spell the type differently from the samples and the set names.
 fn device_type_of<'a>(config: &'a ConnectorConfig, device: &str) -> Option<&'a str> {
     config
         .devices
         .iter()
         .find(|d| d.name == device)
         .and_then(|d| d.device_type.as_deref())
-        .map(str::trim)
         .filter(|t| !t.is_empty())
 }
 
@@ -1040,11 +1041,17 @@ async fn handle_command(
         raw: json.get("raw").and_then(|v| v.as_str()).map(|s| s.to_string()),
     };
 
+    let origin = json.get("origin");
+
     // executing
     publish_retained(
         client,
         topic,
-        serde_json::json!({ "status": "executing", "point": point }).to_string(),
+        with_origin(
+            serde_json::json!({ "status": "executing", "point": point }),
+            origin,
+        )
+        .to_string(),
     )
     .await?;
 
@@ -1059,17 +1066,21 @@ async fn handle_command(
             if let Some(r) = result.raw {
                 obj.insert("raw".into(), serde_json::Value::String(r));
             }
-            publish_retained(client, topic, serde_json::Value::Object(obj).to_string()).await?;
+            let payload = with_origin(serde_json::Value::Object(obj), origin);
+            publish_retained(client, topic, payload.to_string()).await?;
         }
         Err(e) => {
             publish_retained(
                 client,
                 topic,
-                serde_json::json!({
-                    "status": "failed",
-                    "point": point,
-                    "reason": e.to_string()
-                })
+                with_origin(
+                    serde_json::json!({
+                        "status": "failed",
+                        "point": point,
+                        "reason": e.to_string()
+                    }),
+                    origin,
+                )
                 .to_string(),
             )
             .await?;
@@ -1138,14 +1149,18 @@ async fn handle_write_batch(
     json: &serde_json::Value,
     limits: Limits,
 ) -> Result<(), BoxError> {
+    let origin = json.get("origin");
     let writes = match parse_batch_writes(json) {
         Ok(w) => w,
         Err(reason) => {
             publish_retained(
                 client,
                 topic,
-                serde_json::json!({ "status": "failed", "reason": reason, "results": [] })
-                    .to_string(),
+                with_origin(
+                    serde_json::json!({ "status": "failed", "reason": reason, "results": [] }),
+                    origin,
+                )
+                .to_string(),
             )
             .await?;
             return Ok(());
@@ -1155,7 +1170,11 @@ async fn handle_write_batch(
     publish_retained(
         client,
         topic,
-        serde_json::json!({ "status": "executing", "points": points }).to_string(),
+        with_origin(
+            serde_json::json!({ "status": "executing", "points": points }),
+            origin,
+        )
+        .to_string(),
     )
     .await?;
 
@@ -1199,9 +1218,27 @@ async fn handle_write_batch(
             }
         }
     }
-    let payload = batch_result(failure, results);
+    let payload = with_origin(batch_result(failure, results), origin);
     publish_retained(client, topic, payload.to_string()).await?;
     Ok(())
+}
+
+/// Echo the request's `origin` (§6.4) into a transition the connector publishes for that
+/// command.
+///
+/// The command topic is retained and holds exactly ONE message, so `executing` and then the
+/// result overwrite the request that carried `origin` — a consumer that starts (or restarts)
+/// afterwards replays the terminal state alone. Carrying the correlation data forward is what
+/// lets it still tell which parameter set an acknowledged write belongs to, rather than
+/// guessing the default one and retaining a fragment under a name no definition matches.
+fn with_origin(
+    mut payload: serde_json::Value,
+    origin: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    if let (Some(origin), Some(obj)) = (origin, payload.as_object_mut()) {
+        obj.insert("origin".into(), origin.clone());
+    }
+    payload
 }
 
 /// Shape the terminal `write-batch` envelope: `successful` with every result, or `failed`

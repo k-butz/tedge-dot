@@ -60,4 +60,17 @@ derived from — `acme_meter_v2_control_parameters` rather than
 `modbus_control_parameters`. Those names are tenant-wide identifiers in
 Cumulocity, so without a type two different Modbus device types would claim the
 same one. It also becomes the thin-edge entity type of the registered child
-device. See [RFC 0005](../../doc/rfc/0005-device-types-and-parameter-sets.md).
+device.
+
+Points choose their group with `meta.parameter.group`, and a point may name several:
+
+```toml
+[[point]]
+id   = "coil_rw"
+meta = { parameter = { group = ["control", "commissioning"] } }
+```
+
+gives `..._control_parameters` and `..._commissioning_parameters`, both carrying that point —
+which is how one signal appears on two operator screens without either going stale. The Modbus
+demo library above does exactly this. See
+[RFC 0005](../../doc/rfc/0005-device-types-and-parameter-sets.md).
