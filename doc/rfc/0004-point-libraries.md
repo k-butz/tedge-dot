@@ -222,7 +222,7 @@ Deliberately left for when there is a real need, rather than guessed at now:
 | [impl/rust/crates/sdk/src/library.rs](../../impl/rust/crates/sdk/src/library.rs) | the resolver; `load`/`resolve` are now the only way a config is read |
 | [impl/c/sdk/src/config.c](../../impl/c/sdk/src/config.c) | the same resolution and merge rules; the parsed library documents are owned by the config, since a point's `address` is borrowed from the document that declared it |
 | [connectors/modbus/](../../connectors/modbus/) | the e2e harness gets half its points from a library, so the existing suite also checks that an inherited point behaves identically |
-| [demo/](../../demo/) | `points.d/modbus/pymodbus-demo.toml` and `config/modbus-library.toml` |
+| [demo/](../../demo/) | a library per simulator in `points.d/<protocol>/demo-sim.toml`, which the demo configs in `config/` reference instead of inlining their points — also what the packages ship, so a user can point a device at an address and be reading it |
 
 Both implementations resolve the same references to the same points in the same order; the
 mirrored unit tests (`library.rs` and `impl/c/tests/config.c`) exist because a divergence here

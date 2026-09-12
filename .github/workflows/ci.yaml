@@ -44,6 +44,16 @@ jobs:
       - uses: extractions/setup-just@v2
       - run: just check-capability-tags
 
+  # The two packages are meant to be interchangeable, so they must install the same files.
+  # Nothing enforced that, and point libraries went into one manifest twice running.
+  packaging-parity:
+    name: Packaging manifest parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - run: just check-manifest-parity
+
   flows:
     name: Flow tests (tedge flows test)
     runs-on: ubuntu-latest

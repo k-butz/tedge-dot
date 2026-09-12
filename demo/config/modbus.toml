@@ -4,7 +4,11 @@
 #
 # Two ways to use it:
 #
-#   * Local exploration, no broker needed — the read/write CLI ignores [mqtt]:
+#   * Local exploration, no broker needed — the read/write CLI ignores [mqtt].
+#     The points come from a packaged library, so from a checkout say where it is
+#     once (an installed package needs none of this):
+#
+#       export TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d
 #       cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/modbus.toml                        # all readable points, once
 #       cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/modbus.toml -p 'temp_*' --poll     # keep polling (Ctrl-C stops)
 #       cargo run --manifest-path impl/rust/Cargo.toml -- write -c demo/config/modbus.toml -d plc1 -p coil_rw --value true
@@ -14,15 +18,7 @@
 #   * Installed demo — ships with the tedge-dot package in /usr/share/tedge-dot/demo/.
 #     Copy it to /etc/tedge/plugins/ot/ and restart tedge-dot.service to run it
 #     against the simulator. Publishes to the thin-edge.io broker on 127.0.0.1:1883.
-#
-# The points map onto the values seeded in connectors/modbus/sim/modbus.json
-# (shared address space):
-#
-#   holding 3      -> uint16  17001
-#   holding 4..5   -> uint32  617001
-#   holding 6..7   -> float32 404.17
-#   coil    48     -> bool    false (initially)
-#   holding 1      -> flagged "invalid" -> read raises a Modbus exception (bad quality)
+#     The library it references is installed alongside, so the copy just works.
 
 [connector]
 protocol      = "modbus"
@@ -44,53 +40,19 @@ databits = 8
 name             = "plc1"
 protocol_address = { transport = "tcp", host = "127.0.0.1", port = 5020, unit_id = 1 }
 default_mode     = "typed"
+points_from      = ["demo-sim"]
 
-  # uint16 holding register (also used for the register write round-trip).
-  # Writable points are *parameters*: the ot-parameter-state flow publishes them as the
-  # `modbus_parameters` twin fragment and `tedge-dot describe` renders the matching Cumulocity
-  # Digital Twin Manager definition; meta.parameter enriches that schema
-  # (title/description/min/max/enum/order) or picks another set (set = "...").
-  [[device.point]]
-  id       = "temp_u16"
-  datatype = "uint16"
-  access   = "read_write"
-  address  = { table = "holding", address = 3, count = 1 }
-  meta     = { parameter = { title = "Temperature setpoint", min = 0, max = 30000 } }
-
-  # Same register, but with a per-point linear transform applied by the connector:
-  # (17001 * 10^-3) + 0 = 17.001. Scaling is a property of the signal, not the flow.
-  # The free-form `meta` table is echoed verbatim in every sample envelope; flows read it for
-  # per-signal behaviour (ot-measurement honours on_change / deadband / min_interval / debounce).
-  [[device.point]]
-  id        = "temp_scaled"
-  datatype  = "uint16"
-  address   = { table = "holding", address = 3, count = 1 }
-  transform = { decimal_shift = -3 }
-  unit      = "°C"
-  meta      = { on_change = true, deadband = 0.5, min_interval = "10s" }
-
-  # uint32 across two registers.
-  [[device.point]]
-  id       = "count_u32"
-  datatype = "uint32"
-  address  = { table = "holding", address = 4, count = 2 }
-
-  # float32 across two registers.
-  [[device.point]]
-  id       = "level_f32"
-  datatype = "float32"
-  address  = { table = "holding", address = 6, count = 2 }
-
-  # Reading this address makes the simulator return an exception -> quality "bad"
-  # (kept in the demo deliberately, to show quality propagation end to end).
-  [[device.point]]
-  id       = "bad_point"
-  datatype = "uint16"
-  address  = { table = "holding", address = 1, count = 1 }
-
-  # Coil used for the boolean write round-trip.
-  [[device.point]]
-  id       = "coil_rw"
-  datatype = "bool"
-  access   = "read_write"
-  address  = { table = "coil", address = 48, count = 1 }
+  # The points come from the packaged point library
+  # points.d/modbus/demo-sim.toml (contract §3.4): the simulator's data point
+  # list lives there, so this file holds only what is per-instance. An
+  # installed package finds it automatically; from a source checkout point the
+  # search path at the copy in this repo:
+  #
+  #   export TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d
+  #
+  # A device may still add points of its own, or adjust an inherited one by
+  # naming its id and only the fields to change, e.g.:
+  #
+  #   [[device.point]]
+  #   id   = "temp_u16"
+  #   name = "A label of my own"

@@ -14,23 +14,25 @@ configs ([config/](config/)) supports two workflows:
 
 ## Local exploration on your laptop
 
-Build the connector once:
+Build the connector once, and say where the demo point lists are:
 
 ```sh
 cargo build --manifest-path impl/rust/Cargo.toml
+export TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d
 ```
 
-> The configs in [config/](config/) inline their points, which keeps the point
-> syntax in front of you. [config/modbus-library.toml](config/modbus-library.toml)
-> is the same demo written the other way: its points come from the *point
-> library* [points.d/modbus/pymodbus-demo.toml](points.d/modbus/pymodbus-demo.toml),
-> so two device instances share one list (contract §3.4). From a checkout the
-> library is not in its packaged location yet, so point the search path at it:
+> **Why the export.** Each config in [config/](config/) holds only what is
+> per-instance — the address of the simulator — and gets its points from a
+> **point library** in [points.d/](points.d/) (contract §3.4), one per
+> simulator. A package installs those libraries to
+> `/usr/share/tedge-dot/points.d/`, where the connector finds them with no
+> configuration at all; a checkout has not installed them, so the search path
+> has to be pointed at the copies in this repo. Every command below assumes
+> the export above.
 >
-> ```sh
-> TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d \
->   cargo run --manifest-path impl/rust/Cargo.toml -- read -c demo/config/modbus-library.toml -d plc1
-> ```
+> That is also the quickest way to experiment with a device of your own: give
+> a `[[device]]` its address and `points_from = ["demo-sim"]`, and you have a
+> working config without typing a single point definition.
 
 ### Modbus
 
@@ -220,6 +222,11 @@ Installing the package:
 - ships the demo configs from [config/](config/) (pre-wired to the simulators)
   in `/usr/share/tedge-dot/demo/`, plus the CAN database at
   `/usr/share/tedge-dot/demo/can/test.dbc`;
+- ships a **point library** per simulator from [points.d/](points.d/) in
+  `/usr/share/tedge-dot/points.d/<protocol>/demo-sim.toml` — the data point
+  lists the demo configs reference, and the shortest path to reading a device
+  of your own: give a `[[device]]` its address, add
+  `points_from = ["demo-sim"]`, and skip the point definitions entirely;
 - installs and starts **one** service: `tedge-dot.service`, which runs every
   configured connector inside a single `tedge-dot` process.
 
@@ -230,6 +237,10 @@ Replace the empty defaults with the demo configs that point at the simulators:
 ```sh
 sudo cp /usr/share/tedge-dot/demo/*.toml /etc/tedge/plugins/ot/
 ```
+
+Nothing else to copy: the configs reference their point libraries by name, and
+the connector looks those up under `/usr/share/tedge-dot/points.d/` where the
+package already installed them.
 
 ### 4. Start the simulators
 

@@ -33,6 +33,7 @@ just build                # cross-compile + package (goreleaser, this package on
 
 # or directly
 cargo test --manifest-path impl/rust/Cargo.toml --workspace
+export TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d   # the demo point lists (a package installs them)
 cargo run  --manifest-path impl/rust/Cargo.toml -- read -c demo/config/modbus.toml
 ```
 

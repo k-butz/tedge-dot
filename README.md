@@ -117,12 +117,17 @@ Points can also carry a `name` and `description`, so a shared list documents its
 every instance that references it — they render into the Cumulocity parameter UI and into the
 connector's retained capability descriptor, rather than being echoed on every sample.
 
+The packages ship a library per demo simulator (`demo-sim`, one for each protocol), so the
+quickest way to get data out of a device is to give a `[[device]]` its address and
+`points_from = ["demo-sim"]` — no point definitions to type. The demo configs in
+[demo/config/](demo/config/) are written exactly that way.
+
 Because only the *reference* is stored, `define-device` can add an instance at runtime from
 its address alone, which is what lets your own discovery (mDNS, a subnet scan, an asset
 inventory) onboard a known device type without shipping its point list. See
 [RFC 0004](doc/rfc/0004-point-libraries.md), the normative
 [contract §3.4](doc/contract/ot-connector-contract.md#34-point-libraries), and
-[demo/config/modbus-library.toml](demo/config/modbus-library.toml) for a runnable example.
+the demo configs in [demo/config/](demo/config/) for runnable examples.
 
 ## Try it without hardware
 
@@ -131,6 +136,7 @@ poke — the CLI talks to the device directly:
 
 ```sh
 just sim modbus     # pymodbus simulator on 127.0.0.1:5020
+export TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d   # where the demo point lists live in a checkout
 cargo run --manifest-path impl/rust/Cargo.toml -- read -c demo/config/modbus.toml                    # all devices, all readable points
 cargo run --manifest-path impl/rust/Cargo.toml -- read -c demo/config/modbus.toml -d plc1 -p 'temp_*' --poll   # keep polling (Ctrl-C stops)
 cargo run --manifest-path impl/rust/Cargo.toml -- run  -c demo/config/modbus.toml --output stdout --duration 10s  # sample JSON lines, no broker

@@ -1,0 +1,43 @@
+# Point library for the demo CANopen simulator (contract §3.4).
+#
+# The object dictionary entries of a *device type*, with no connection
+# information in it: the interface (`[connection]`) and the node id
+# (`protocol_address`) belong to the instance, these objects belong to every
+# node of this type. Reference it from a device with:
+#
+#   points_from = ["demo-sim"]
+#
+# Packages install this at /usr/share/tedge-dot/points.d/canopen/demo-sim.toml.
+#
+# Addresses are object-dictionary index/subindex pairs, read and written with
+# expedited SDO transfers.
+
+[library]
+protocol    = "canopen"
+description = "Demo CANopen node (canopen-sim in demo/docker-compose.yaml)"
+version     = "1"
+
+[[point]]
+id          = "analog_in"
+name        = "Analog input"
+description = "Raw analog input word at object 0x2000"
+datatype    = "uint16"
+access      = "read"
+address     = { index = 0x2000, subindex = 0 }
+
+[[point]]
+id          = "temperature"
+name        = "Temperature"
+description = "Signed temperature word at object 0x2001"
+datatype    = "int16"
+access      = "read"
+address     = { index = 0x2001, subindex = 0 }
+
+# Writable, so it appears as a Cumulocity device parameter (RFC 0003).
+[[point]]
+id          = "digital_out"
+name        = "Digital outputs"
+description = "Output byte at object 0x2002, one bit per channel"
+datatype    = "uint8"
+access      = "read_write"
+address     = { index = 0x2002, subindex = 0 }
