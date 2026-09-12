@@ -18,7 +18,7 @@ connectors/
     requirements.txt            # base Robot deps (robotframework, paho-mqtt, DeviceLibrary)
     Dockerfile.flows            # cloud-free flows runner: tedge (main channel) as the
     flows-entrypoint.sh         #   user-defined mapper "ot" running ../flows against the broker
-    Dockerfile.connector-c      # the C implementation (poc-c/) built for any stack (ARG PROTOCOL)
+    Dockerfile.connector-c      # the C implementation (impl/c/) built for any stack (ARG PROTOCOL)
 
   <proto>/                      # one directory per OT protocol
     sim/                        # simulator image (Dockerfile + server code)
@@ -73,7 +73,7 @@ just sim-down modbus       # stop the simulator
 
 just test-e2e modbus       # run the robot suite (it starts and stops its own stack)
 just test-e2e modbus --include smoke   # pass extra robot args
-just test-e2e-c modbus     # the SAME suite against the C connector (poc-c/)
+just test-e2e-c modbus     # the SAME suite against the C connector (impl/c/)
 
 just e2e-up modbus [c]     # start a stack manually (ports pinned) for inspection
 just e2e-down modbus [c]   # tear that manual stack down
@@ -81,7 +81,7 @@ just e2e-down modbus [c]   # tear that manual stack down
 
 ### Rust and C: one suite, two connectors
 
-The Rust crates and the C proof of concept ([poc-c/](../poc-c/)) implement the same
+The Rust crates and the C proof of concept ([impl/c/](../impl/c/)) implement the same
 contract and are maintained to the same coverage. Every stack therefore runs its Robot suite
 against both: `test-e2e` builds the stack's `Dockerfile.connector` (Rust), `test-e2e-c` sets
 `CONNECTOR_DOCKERFILE` so the same compose file builds the `connector` service from
@@ -93,7 +93,7 @@ CI runs both matrices (`e2e` and `e2e-c`).
 
 The **cloud** suites under [cloud/](../cloud/) work the same way, with one difference: there is a
 single `Dockerfile.tedge` whose `IMPL` build argument selects one of two connector-install
-stages — the packaged `.deb` from `dist/` (`rust`) or a stage that compiles [poc-c/](../poc-c/)
+stages — the packaged `.deb` from `dist/` (`rust`) or a stage that compiles [impl/c/](../impl/c/)
 in the image (`c`). Everything after the install (flows, configs, operation shims) is shared, so
 both implementations are exercised by the same tests, and the C path needs no `just build`
 because `dist/` is never read. `Setup Cloud Device` asserts that the image really holds the
@@ -135,7 +135,7 @@ profile from [`robot.toml`](../robot.toml):
 
 - **VS Code**: command palette → *RobotCode: Select Configuration Profiles* → `c`. The choice
   applies to Run/Debug Test in the test explorer and to the editor's gutter actions, so the
-  interactive debugger attaches to a stack built from [poc-c/](../poc-c/). Switch back by
+  interactive debugger attaches to a stack built from [impl/c/](../impl/c/). Switch back by
   selecting `rust` (or deselecting).
 - **CLI**: `robotcode --profile c run -- -t "<test>" connectors/modbus/tests/`, or just
   `just test-e2e-c <proto>` for the whole suite. The same profile works for the cloud suites
@@ -158,9 +158,9 @@ been copied from another checkout — its `pip` would have installed into *that*
 > See [doc/connectors/_template-connector-spec.md](../doc/connectors/_template-connector-spec.md)
 > for the full connector spec template and a detailed checklist.
 
-1. **Rust crate** — create `crates/connector-<proto>/` and implement the
+1. **Rust crate** — create `impl/rust/crates/connector-<proto>/` and implement the
    [`Connector` trait](../doc/sdk/connector-sdk.md).  Add a cargo feature flag
-   in `Cargo.toml`.
+   in `impl/rust/Cargo.toml`.
 
 2. **Simulator** — create `connectors/<proto>/sim/` with a `Dockerfile` and
    whatever server code the protocol needs.

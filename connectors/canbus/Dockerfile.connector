@@ -15,9 +15,9 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,id=tedge-dot-canbus-target,target=/src/target \
-    cargo build --release --no-default-features --features canbus --bin tedge-dot && \
-    cp /src/target/release/tedge-dot /usr/local/bin/tedge-dot
+    --mount=type=cache,id=tedge-dot-canbus-target,target=/src/impl/rust/target \
+    cargo build --manifest-path impl/rust/Cargo.toml --release --no-default-features --features canbus --bin tedge-dot && \
+    cp /src/impl/rust/target/release/tedge-dot /usr/local/bin/tedge-dot
 
 FROM ${BASE_REGISTRY}/debian:bookworm-slim
 RUN apt-get update \

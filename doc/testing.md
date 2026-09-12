@@ -6,10 +6,10 @@ class of bug the others cannot.
 
 | Layer | Where | Catches | Run with |
 |---|---|---|---|
-| Unit tests | `crates/*/src` (inline `#[cfg(test)]`) | Known-answer regressions, spec acceptance vectors | `just test` |
-| Property-based tests | `crates/sdk/tests/properties.rs` | Invariant violations across the whole input space | `just test-properties` |
-| Fuzzing | `crates/sdk/fuzz/` | Panics/crashes on hostile or malformed input | `just fuzz <target>` |
-| Integration tests | `crates/connector-*/tests/` | Protocol framing against an in-process or scripted peer | `just test` |
+| Unit tests | `impl/rust/crates/*/src` (inline `#[cfg(test)]`) | Known-answer regressions, spec acceptance vectors | `just test` |
+| Property-based tests | `impl/rust/crates/sdk/tests/properties.rs` | Invariant violations across the whole input space | `just test-properties` |
+| Fuzzing | `impl/rust/crates/sdk/fuzz/` | Panics/crashes on hostile or malformed input | `just fuzz <target>` |
+| Integration tests | `impl/rust/crates/connector-*/tests/` | Protocol framing against an in-process or scripted peer | `just test` |
 | Simulator e2e | `connectors/<proto>/` (sim, compose, Robot suite) | Real protocol stacks end to end, both implementations | `just test-e2e <proto>` / `just test-e2e-c <proto>` |
 | Flow tests | `flows/test-flows.sh` (`tedge flows test`) | Sample→measurement/alarm/event mapping, offline | `just test-flows` |
 | Cloud e2e | `cloud/<proto>/tests/*.robot` | Cumulocity operation round-trips on a live tenant | `just test-cloud <proto>` |
@@ -36,7 +36,7 @@ hand (`just e2e-up`, `just sim`).
 
 ## Property-based tests (proptest)
 
-`crates/sdk/tests/properties.rs` pins the invariants of the shared decode/transform layer —
+`impl/rust/crates/sdk/tests/properties.rs` pins the invariants of the shared decode/transform layer —
 the layer where a bug corrupts *every* protocol at once:
 
 - encode → decode is the identity for all integer/float datatypes × endianness × word order;
@@ -52,7 +52,7 @@ alongside the fix.
 
 ## Fuzzing (cargo-fuzz / libFuzzer)
 
-`crates/sdk/fuzz/` has four targets, runnable with `just fuzz <target> [seconds]` or all
+`impl/rust/crates/sdk/fuzz/` has four targets, runnable with `just fuzz <target> [seconds]` or all
 briefly via `just fuzz-all` (requires the nightly toolchain and `cargo install cargo-fuzz`):
 
 - `decode_primitive` — arbitrary wire bytes × datatype × byte orders; asserts integer

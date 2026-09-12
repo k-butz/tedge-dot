@@ -1,9 +1,9 @@
 name: Release (C PoC)
 
-# Build, test and release the C proof-of-concept build (poc-c/).
+# Build, test and release the C proof-of-concept build (impl/c/).
 #
 # Every architecture is cross-compiled with zig on a single runner, inside the
-# Debian multiarch image in poc-c/cross/: zig supplies the compiler and libc,
+# Debian multiarch image in impl/c/cross/: zig supplies the compiler and libc,
 # Debian supplies the target-architecture shared libraries. Besides collapsing
 # the old per-architecture native runners into one job, this lets us pin the
 # minimum glibc (2.17 -- RHEL 7 / Debian 8 era), which a native build cannot:
@@ -47,7 +47,7 @@ jobs:
       - uses: docker/setup-qemu-action@v3
 
       - name: Build the cross-compilation image
-        run: docker build -t tedge-dot-cross poc-c/cross
+        run: docker build -t tedge-dot-cross impl/c/cross
 
       - name: Compute version
         id: ver
@@ -71,9 +71,9 @@ jobs:
         run: |
           set -eux
           for arch in $ARCHS; do
-            mkdir -p "poc-c/dist/$arch"
+            mkdir -p "impl/c/dist/$arch"
             docker run --rm \
-              -v "$PWD:/src:ro" -v "$PWD/poc-c/dist/$arch:/out" \
+              -v "$PWD:/src:ro" -v "$PWD/impl/c/dist/$arch:/out" \
               -e ARCH="$arch" -e GLIBC_MIN="$GLIBC_MIN" \
               tedge-dot-cross
           done
@@ -87,9 +87,9 @@ jobs:
               *)     platform="linux/$arch" ;;
             esac
             docker run --rm --platform "$platform" \
-              -v "$PWD/poc-c/dist/$arch:/out" \
+              -v "$PWD/impl/c/dist/$arch:/out" \
               -v "$PWD:/src:ro" \
-              -v "$PWD/poc-c/cross/verify.sh:/verify.sh:ro" \
+              -v "$PWD/impl/c/cross/verify.sh:/verify.sh:ro" \
               debian:bullseye-slim /verify.sh
           done
 
@@ -98,24 +98,24 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -eux
-          mkdir -p dist poc-c/dist/staged
+          mkdir -p dist impl/c/dist/staged
           for arch in $ARCHS; do
             # nfpm expands env vars in scalar fields but not in contents[].src,
             # so stage this architecture's binary where nfpm.yaml points.
-            cp "poc-c/dist/$arch/tedge-dot" poc-c/dist/staged/tedge-dot
+            cp "impl/c/dist/$arch/tedge-dot" impl/c/dist/staged/tedge-dot
             case "$arch" in
               armhf) export ARCH=arm7 ;;
               *)     export ARCH="$arch" ;;
             esac
             for format in deb rpm apk; do
-              nfpm pkg -f poc-c/packaging/nfpm.yaml -p "$format" -t dist/
+              nfpm pkg -f impl/c/packaging/nfpm.yaml -p "$format" -t dist/
             done
 
             staging="tedge-dot-c_${VERSION}_linux_${arch}"
             mkdir -p "pkgroot/$staging"
-            cp "poc-c/dist/$arch/tedge-dot" "pkgroot/$staging/"
-            cp poc-c/README.md "pkgroot/$staging/"
-            cp -r poc-c/packaging/config "pkgroot/$staging/config-defaults"
+            cp "impl/c/dist/$arch/tedge-dot" "pkgroot/$staging/"
+            cp impl/c/README.md "pkgroot/$staging/"
+            cp -r impl/c/packaging/config "pkgroot/$staging/config-defaults"
             # The device-side flows, as the packages ship them (see flows/README.md):
             # a tarball install is manual, so the whole set travels with the binary.
             mkdir -p "pkgroot/$staging/flows"
@@ -197,4 +197,4 @@ jobs:
             --target "${{ github.sha }}" \
             --title "$TITLE" \
             --prerelease \
-            --notes-file poc-c/packaging/release-notes.md
+            --notes-file impl/c/packaging/release-notes.md

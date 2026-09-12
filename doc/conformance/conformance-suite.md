@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Implemented — [`crates/ot-conformance`](../../crates/ot-conformance/) |
+| Status | Implemented — [`impl/rust/crates/ot-conformance`](../../impl/rust/crates/ot-conformance/) |
 | Applies to | every connector implementing the [OT Connector Contract](../contract/ot-connector-contract.md) |
 
 The conformance suite is what makes a community of connectors trustworthy. A connector that
@@ -51,7 +51,7 @@ SDK's `decode_primitive`/`encode_primitive`, the golden vectors live **once** in
 every connector that advertises a datatype must pass the vectors for it.
 
 Vectors are stored as data (JSON), not code, so they are language-neutral and AI-auditable.
-The file lives at [`crates/sdk/conformance/vectors.json`](../../crates/sdk/conformance/vectors.json)
+The file lives at [`impl/rust/crates/sdk/conformance/vectors.json`](../../impl/rust/crates/sdk/conformance/vectors.json)
 and is enforced on every `cargo test` via `tedge_dot_sdk::conformance`:
 
 ```json
@@ -107,8 +107,8 @@ container-based end-to-end tests.
 The connector under test runs in-process by default (the protocol module under the real SDK
 runtime — the identical code path the shipped binary links). An out-of-tree connector binary
 is tested instead via `[harness] command` in its manifest — this is how the C build
-([poc-c/](../../poc-c/)) is checked: `connectors/<proto>/conformance-c.toml` points the
-harness at `poc-c/build/tedge-dot` (`just conformance-c <proto>`), and the static S1 check is
+([impl/c/](../../impl/c/)) is checked: `connectors/<proto>/conformance-c.toml` points the
+harness at `impl/c/build/tedge-dot` (`just conformance-c <proto>`), and the static S1 check is
 skipped for external connectors because only the live descriptor (B9) describes them.
 
 ### 3.1 Required behavioural checks
@@ -188,7 +188,7 @@ cargo run -p ot-conformance -- check --spec connectors/modbus/conformance.toml \
 ```
 
 `ot-conformance` is a small harness binary (part of the workspace,
-[`crates/ot-conformance`](../../crates/ot-conformance/)). It exits non-zero on any failure and
+[`impl/rust/crates/ot-conformance`](../../impl/rust/crates/ot-conformance/)). It exits non-zero on any failure and
 emits a machine-readable report (JUnit + JSON) suitable for CI and for an AI agent to consume
 and self-correct against. The full suite also runs as a workspace integration test
 (`cargo test -p ot-conformance`), so a connector PR cannot silently break conformance.

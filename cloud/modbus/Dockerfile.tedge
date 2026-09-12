@@ -5,7 +5,7 @@
 # IMPL selects the implementation under test, exactly as the connector e2e stacks do:
 #
 #   rust (default) — the cross-compiled .deb from dist/; run `just build` first.
-#   c              — the C proof of concept (poc-c/), compiled in a builder stage here, so
+#   c              — the C proof of concept (impl/c/), compiled in a builder stage here, so
 #                    nothing has to be built beforehand and dist/ is not read at all
 #                    (BuildKit skips the stage that COPYs it).
 #
@@ -30,9 +30,9 @@ RUN apt-get update \
         libmodbus-dev libmosquitto-dev libcjson-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-COPY poc-c /src/poc-c
-COPY crates/sdk/conformance /src/crates/sdk/conformance
-RUN cmake -S poc-c -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+COPY impl/c /src/impl/c
+COPY impl/rust/crates/sdk/conformance /src/impl/rust/crates/sdk/conformance
+RUN cmake -S impl/c -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DTDOT_MODBUS=ON -DTDOT_OPCUA=OFF -DTDOT_PROFIBUS=OFF \
         -DTDOT_CANBUS=OFF -DTDOT_CANOPEN=OFF \
     && cmake --build build --target tedge-dot \
@@ -52,7 +52,7 @@ RUN arch=$(dpkg --print-architecture) \
     && rm -rf /var/lib/apt/lists/*
 
 # --- connector install, C: the same layout the C package would produce ---------------------
-# poc-c/packaging/nfpm.yaml declares the C package a drop-in replacement for the Rust one
+# impl/c/packaging/nfpm.yaml declares the C package a drop-in replacement for the Rust one
 # (same binary path, same unit, same config directory), so this stage reproduces that layout
 # by hand rather than building a package inside the image.
 FROM ${DEMO_IMAGE} AS connector-c

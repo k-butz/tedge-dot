@@ -158,8 +158,8 @@ protocol-specific Python deps such as `asyncua`).
 Use this list to track progress when implementing a new connector. Cross-reference
 each item with the corresponding section of this spec.
 
-- [ ] **Rust crate** — `crates/connector-<protocol>/` created, `Connector`
-  trait implemented (§5, §6, §7), feature flag added in root `Cargo.toml`.
+- [ ] **Rust crate** — `impl/rust/crates/connector-<protocol>/` created, `Connector`
+  trait implemented (§5, §6, §7), feature flag added in `impl/rust/Cargo.toml`.
 - [ ] **Spec** — this template filled out and saved as
   `doc/connectors/<protocol>-connector-spec.md`.
 - [ ] **Simulator** — `connectors/<protocol>/sim/` created with a working

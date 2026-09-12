@@ -1,11 +1,19 @@
-# Build / package recipes for the Rust tedge-dot.
+# Build / package recipes for tedge-dot.
+#
+# Both implementations live under impl/: the Rust workspace in impl/rust/ and the C one in
+# impl/c/. Recipes always run from the repository root (where the shared connectors/,
+# cloud/, flows/, demo/ and packaging/ trees live), so cargo is pointed at the workspace
+# with --manifest-path rather than by changing directory.
 
 set dotenv-load := true
 
 # Default cross-compilation target and matching package architecture.
 TARGET := "aarch64-unknown-linux-musl"
 PKG_ARCH := "arm64"
-VERSION := `awk -F '"' '/^version = /{print $2; exit}' Cargo.toml`
+VERSION := `awk -F '"' '/^version = /{print $2; exit}' impl/rust/Cargo.toml`
+
+# Points cargo at the Rust workspace without leaving the repository root.
+MANIFEST := "--manifest-path impl/rust/Cargo.toml"
 
 # Create/refresh the single Python virtualenv used by every system test (and by the editor,
 # see .vscode/settings.json).
@@ -35,43 +43,43 @@ venv:
 
 # Run the Rust unit + integration tests
 test *args="":
-    cargo test --workspace {{args}}
+    cargo test {{MANIFEST}} --workspace {{args}}
 
 # Lint
 lint:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy {{MANIFEST}} --workspace --all-targets -- -D warnings
 
 # Run the SDK property-based tests only (proptest; part of `just test` too).
 test-properties:
-    cargo test -p tedge-dot-sdk --test properties
+    cargo test {{MANIFEST}} -p tedge-dot-sdk --test properties
 
 # Run the OT connector conformance suite (layers 1-3; built-in broker + simulator, no
 # hardware). Usage: just conformance modbus [extra ot-conformance flags]
 conformance protocol="modbus" *args="":
-    cargo run -p ot-conformance -- check --spec connectors/{{protocol}}/conformance.toml {{args}}
+    cargo run {{MANIFEST}} -p ot-conformance -- check --spec connectors/{{protocol}}/conformance.toml {{args}}
 
-# The same conformance suite against the C build (poc-c/), launched as an external connector
+# The same conformance suite against the C build (impl/c/), launched as an external connector
 # through the `[harness] command` of connectors/<proto>/conformance-c.toml. Build the C binary
-# first: cmake -S poc-c -B poc-c/build && cmake --build poc-c/build
+# first: cmake -S impl/c -B impl/c/build && cmake --build impl/c/build
 # Usage: just conformance-c modbus
 conformance-c protocol="modbus" *args="":
-    cargo run -p ot-conformance -- check --spec connectors/{{protocol}}/conformance-c.toml {{args}}
+    cargo run {{MANIFEST}} -p ot-conformance -- check --spec connectors/{{protocol}}/conformance-c.toml {{args}}
 
 # Compile-check the Linux-only code paths (SocketCAN connectors are cfg-gated and silently
 # skipped by a macOS `cargo build`). profibus is excluded: its serial dependency has a native
 # build script that needs Linux headers — it is covered by the Docker e2e build instead.
 check-linux target=TARGET:
-    cargo check -p connector-canbus -p connector-canopen --target {{target}}
+    cargo check {{MANIFEST}} -p connector-canbus -p connector-canopen --target {{target}}
 
 # Fuzz one SDK target (decode_primitive, config_toml, transform, sample_envelope).
 # Requires: rustup nightly + `cargo install cargo-fuzz`.
 # Usage: just fuzz decode_primitive 60
 fuzz target="decode_primitive" seconds="60":
-    cd crates/sdk && cargo +nightly fuzz run {{target}} -- -max_total_time={{seconds}}
+    cd impl/rust/crates/sdk && cargo +nightly fuzz run {{target}} -- -max_total_time={{seconds}}
 
 # Fuzz every SDK target briefly (CI smoke; ~2 min total).
 fuzz-all seconds="30":
-    cd crates/sdk && for t in decode_primitive config_toml transform sample_envelope; do \
+    cd impl/rust/crates/sdk && for t in decode_primitive config_toml transform sample_envelope; do \
         cargo +nightly fuzz run $t -- -max_total_time={{seconds}} || exit 1; done
 
 # Validate the thin-edge flows offline with `tedge flows test` (no broker/device/cloud).
@@ -137,7 +145,7 @@ _sim-port proto:
 test-e2e proto *args="":
     just _e2e {{proto}} rust "{{args}}"
 
-# Same suite, same stack, but the connector is the C implementation (poc-c/): the Rust and
+# Same suite, same stack, but the connector is the C implementation (impl/c/): the Rust and
 # C connectors are maintained to the same contract, so they get the same e2e coverage.
 # Usage: just test-e2e-c modbus
 test-e2e-c proto *args="":
@@ -235,7 +243,7 @@ shell proto *args='bash':
 test-cloud proto *args="":
     just _cloud {{proto}} rust "{{args}}"
 
-# The same cloud suites against the C implementation (poc-c/), which the image compiles itself —
+# The same cloud suites against the C implementation (impl/c/), which the image compiles itself —
 # no `just build` needed, since dist/ is not read on this path.
 # Usage: just test-cloud-c modbus
 test-cloud-c proto *args="":
@@ -285,25 +293,25 @@ cleanup PATTERN="TST_*" $CI="true":
     c8y users list -n --tenant "$tenant" --filter "userName like device_{{PATTERN}}" --pageSize 2000 \
         | c8y users delete --tenant "$tenant" --silentStatusCodes 404 || true
 
-# --- C proof of concept (poc-c/) ---------------------------------------------
+# --- C proof of concept (impl/c/) ---------------------------------------------
 #
 # The C build is cross-compiled with zig inside a Debian multiarch container
-# (poc-c/cross/), so one host builds every architecture and the binaries carry
+# (impl/c/cross/), so one host builds every architecture and the binaries carry
 # a glibc floor we choose (2.17 by default) rather than the build host's.
 
 # Build the C PoC natively and run its unit tests: the golden decode vectors shared with
 # the Rust SDK, plus the device-parameter/`describe` checks.
 # Usage: just c-test [extra ctest flags]
 c-test *args="":
-    cmake -B poc-c/build -S poc-c
-    cmake --build poc-c/build
-    ctest --test-dir poc-c/build --output-on-failure {{args}}
+    cmake -B impl/c/build -S impl/c
+    cmake --build impl/c/build
+    ctest --test-dir impl/c/build --output-on-failure {{args}}
 
 # Check that `tedge-dot describe` renders identical Cumulocity DTM definitions in the Rust
 # and C builds. With no argument every connector config in the repo is compared.
 # Usage: just c-describe-parity [config.toml ...]
 c-describe-parity *configs="":
-    ./poc-c/ci/describe-parity.sh {{configs}}
+    ./impl/c/ci/describe-parity.sh {{configs}}
 
 # Debian architectures the C PoC is built and packaged for.
 C_ARCHS := "amd64 arm64 armhf"
@@ -311,14 +319,14 @@ C_GLIBC_MIN := "2.17"
 
 # Build the zig cross-compilation image.
 c-cross-image:
-    docker build -t tedge-dot-cross poc-c/cross
+    docker build -t tedge-dot-cross impl/c/cross
 
-# Cross-build the C PoC for one architecture into poc-c/dist/<arch>/.
+# Cross-build the C PoC for one architecture into impl/c/dist/<arch>/.
 # Usage: just c-cross arm64 [extra cmake args]
 c-cross arch="arm64" *args="": c-cross-image
-    mkdir -p "poc-c/dist/{{arch}}"
+    mkdir -p "impl/c/dist/{{arch}}"
     docker run --rm \
-        -v "$PWD:/src:ro" -v "$PWD/poc-c/dist/{{arch}}:/out" \
+        -v "$PWD:/src:ro" -v "$PWD/impl/c/dist/{{arch}}:/out" \
         -e ARCH={{arch}} -e GLIBC_MIN={{C_GLIBC_MIN}} \
         tedge-dot-cross {{args}}
 
@@ -334,20 +342,20 @@ c-cross-all: c-cross-image
 #   docker run --privileged --rm tonistiigi/binfmt --install all
 c-verify arch="arm64":
     docker run --rm --platform linux/{{ if arch == "armhf" { "arm/v7" } else { arch } }} \
-        -v "$PWD/poc-c/dist/{{arch}}:/out" \
+        -v "$PWD/impl/c/dist/{{arch}}:/out" \
         -v "$PWD:/src:ro" \
-        -v "$PWD/poc-c/cross/verify.sh:/verify.sh:ro" \
+        -v "$PWD/impl/c/cross/verify.sh:/verify.sh:ro" \
         debian:bullseye-slim /verify.sh
 
-# Package one cross-built architecture as deb/rpm/apk into poc-c/dist/packages/.
+# Package one cross-built architecture as deb/rpm/apk into impl/c/dist/packages/.
 # Usage: just c-package arm64 0.1.0
 c-package arch="arm64" version="0.0.0-dev":
     #!/usr/bin/env bash
     set -euo pipefail
     # nfpm expands env vars in scalar fields but not in contents[].src, so stage
     # the architecture's binary at the fixed path nfpm.yaml points to.
-    mkdir -p poc-c/dist/staged poc-c/dist/packages
-    cp "poc-c/dist/{{arch}}/tedge-dot" poc-c/dist/staged/tedge-dot
+    mkdir -p impl/c/dist/staged impl/c/dist/packages
+    cp "impl/c/dist/{{arch}}/tedge-dot" impl/c/dist/staged/tedge-dot
     case "{{arch}}" in
         armhf) nfpm_arch=arm7 ;;
         *)     nfpm_arch="{{arch}}" ;;
@@ -356,6 +364,6 @@ c-package arch="arm64" version="0.0.0-dev":
         docker run --rm -v "$PWD:/work" -w /work \
             -e ARCH="$nfpm_arch" -e VERSION="{{version}}" \
             ghcr.io/goreleaser/nfpm:latest \
-            pkg -f poc-c/packaging/nfpm.yaml -p "$format" -t poc-c/dist/packages/
+            pkg -f impl/c/packaging/nfpm.yaml -p "$format" -t impl/c/dist/packages/
     done
-    ls -l poc-c/dist/packages
+    ls -l impl/c/dist/packages

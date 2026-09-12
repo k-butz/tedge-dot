@@ -1,4 +1,4 @@
-# Conformance manifest for the C build of the OPC UA connector (poc-c/): same claims as
+# Conformance manifest for the C build of the OPC UA connector (impl/c/): same claims as
 # conformance.toml except that the C module polls only (no push subscriptions).
 #
 # Run the full suite (layers 1-3, no external server or broker):
@@ -26,5 +26,5 @@ seed = "conformance/seed.json"
 [harness]
 config = "conformance/connector.toml"
 
-# Exercise the C build (poc-c/) instead of the in-process module.
-command = ["poc-c/build/tedge-dot", "run"]
+# Exercise the C build (impl/c/) instead of the in-process module.
+command = ["impl/c/build/tedge-dot", "run"]

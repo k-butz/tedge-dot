@@ -152,7 +152,7 @@ of two byte orders described in DBC files:
   3. See §9 acceptance vectors for worked examples.
 
 This bit extraction logic lives in the `extract_can_signal(frame_bytes, start_bit, bit_count, byte_order) -> u64`
-private function in `crates/connector-canbus/src/lib.rs`. It is **not** the SDK's
+private function in `impl/rust/crates/connector-canbus/src/lib.rs`. It is **not** the SDK's
 `extract_bitfield` helper (which uses Modbus register-word-order semantics).
 
 ### 4.2 Datatype interpretation after extraction

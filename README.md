@@ -30,11 +30,11 @@ cargo feature flags; each process runs one protocol (selected by
 
 | Protocol | Crate | Transport | In released packages |
 |---|---|---|---|
-| Modbus (reference) | [connector-modbus](crates/connector-modbus/) | TCP + RTU | ✅ |
-| OPC UA | [connector-opcua](crates/connector-opcua/) | opc.tcp | ✅ |
-| CAN bus | [connector-canbus](crates/connector-canbus/) | Linux SocketCAN + DBC | ✅ |
-| CANopen | [connector-canopen](crates/connector-canopen/) | Linux SocketCAN (SDO) | ✅ |
-| PROFIBUS-DP | [connector-profibus](crates/connector-profibus/) | serial | ❌ build from source (`--features profibus`, Linux only) |
+| Modbus (reference) | [connector-modbus](impl/rust/crates/connector-modbus/) | TCP + RTU | ✅ |
+| OPC UA | [connector-opcua](impl/rust/crates/connector-opcua/) | opc.tcp | ✅ |
+| CAN bus | [connector-canbus](impl/rust/crates/connector-canbus/) | Linux SocketCAN + DBC | ✅ |
+| CANopen | [connector-canopen](impl/rust/crates/connector-canopen/) | Linux SocketCAN (SDO) | ✅ |
+| PROFIBUS-DP | [connector-profibus](impl/rust/crates/connector-profibus/) | serial | ❌ build from source (`--features profibus`, Linux only) |
 
 ## Install
 
@@ -104,9 +104,9 @@ the same config. See [RFC 0003](doc/rfc/0003-parameter-writes.md), [flows/](flow
 
 | Path | Contents |
 |---|---|
-| [crates/sdk](crates/sdk/) | `tedge-dot-sdk` — runtime, `Connector` trait, config model, decode helpers |
-| [crates/connector-*](crates/) | one crate per protocol module |
-| [crates/ot-conformance](crates/ot-conformance/) | `ot-conformance` — the connector conformance harness (schema, decode vectors, behavioural checks) |
+| [impl/rust/crates/sdk](impl/rust/crates/sdk/) | `tedge-dot-sdk` — runtime, `Connector` trait, config model, decode helpers |
+| [impl/rust/crates/connector-*](impl/rust/crates/) | one crate per protocol module |
+| [impl/rust/crates/ot-conformance](impl/rust/crates/ot-conformance/) | `ot-conformance` — the connector conformance harness (schema, decode vectors, behavioural checks) |
 | [src/](src/) | the `tedge-dot` binary (run service, `read`/`write` CLI) |
 | [flows/](flows/) | protocol-neutral thin-edge.io flows (sample→measurement, alarms, registration, commands) |
 | [operations/](operations/) | Cumulocity operation shims (legacy `c8y_*` operations and `c8y_ParameterUpdate` → generic OT commands) |
@@ -128,7 +128,7 @@ just lint               # clippy -D warnings
 just conformance modbus # full conformance suite (no hardware/broker needed)
 just test-flows         # offline flow tests (tedge flows test)
 just test-e2e modbus    # Dockerised MQTT e2e suite for one protocol (the suite starts its own stack)
-just test-e2e-c modbus  # the same suite against the C connector (poc-c/)
+just test-e2e-c modbus  # the same suite against the C connector (impl/c/)
 just test-cloud modbus  # live Cumulocity suite (needs C8Y_* credentials; device created per run)
 just test-cloud-c modbus # the same cloud suite against the C connector
 just fuzz config_toml   # fuzz one SDK target (nightly + cargo-fuzz)

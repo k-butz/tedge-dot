@@ -17,22 +17,23 @@ serialization, and conformance hooks).
 ## 1. Crate layout
 
 ```text
-tedge-dot/                 # cargo workspace
-├── crates/
-│   ├── sdk/                         # tedge-dot-sdk (the runtime + trait + types)
-│   │   ├── src/
-│   │   │   ├── lib.rs
-│   │   │   ├── connector.rs         # the Connector trait
-│   │   │   ├── model.rs             # Sample, Quality, DataType, Value, PointConfig, ...
-│   │   │   ├── runtime.rs           # scheduler, MQTT, command router, health
-│   │   │   ├── decode.rs            # shared primitive decode helpers (endianness, IEEE-754)
-│   │   │   ├── config.rs            # contract-level config + schema validation
-│   │   │   └── registry.rs          # protocol module registration
-│   ├── connector-modbus/           # reference protocol module (feature = "modbus")
-│   ├── connector-opcua/            # future module (feature = "opcua")
-│   └── ...
-├── src/main.rs                     # the binary: select module by config, run the runtime
-└── Cargo.toml                      # feature flags: modbus, opcua, bacnet, canbus, ...
+tedge-dot/                           # repository root (shared connectors/, flows/, doc/, ...)
+└── impl/rust/                       # the Rust implementation (cargo workspace)
+    ├── crates/
+    │   ├── sdk/                     # tedge-dot-sdk (the runtime + trait + types)
+    │   │   ├── src/
+    │   │   │   ├── lib.rs
+    │   │   │   ├── connector.rs     # the Connector trait
+    │   │   │   ├── model.rs         # Sample, Quality, DataType, Value, PointConfig, ...
+    │   │   │   ├── runtime.rs       # scheduler, MQTT, command router, health
+    │   │   │   ├── decode.rs        # shared primitive decode helpers (endianness, IEEE-754)
+    │   │   │   ├── config.rs        # contract-level config + schema validation
+    │   │   │   └── registry.rs      # protocol module registration
+    │   ├── connector-modbus/        # reference protocol module (feature = "modbus")
+    │   ├── connector-opcua/         # future module (feature = "opcua")
+    │   └── ...
+    ├── src/main.rs                  # the binary: select module by config, run the runtime
+    └── Cargo.toml                   # feature flags: modbus, opcua, bacnet, canbus, ...
 ```
 
 ### 1.1 Feature flags
@@ -40,7 +41,7 @@ tedge-dot/                 # cargo workspace
 Each protocol module is a separate crate, enabled by a cargo feature on the binary:
 
 ```toml
-# Cargo.toml (binary)
+# impl/rust/Cargo.toml (binary)
 [features]
 default = ["modbus"]
 modbus  = ["dep:connector-modbus"]
@@ -293,10 +294,10 @@ Modules register themselves behind their feature flag so the binary can instanti
 named in config:
 
 ```rust
-// crates/connector-modbus/src/lib.rs
+// impl/rust/crates/connector-modbus/src/lib.rs
 pub fn factory() -> Box<dyn Connector> { Box::new(ModbusConnector::default()) }
 
-// src/main.rs
+// impl/rust/src/main.rs
 fn build_connector(protocol: &str) -> Result<Box<dyn Connector>, FatalError> {
     match protocol {
         #[cfg(feature = "modbus")]

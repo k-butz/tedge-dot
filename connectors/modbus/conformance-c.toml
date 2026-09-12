@@ -27,4 +27,4 @@ image = "connectors/modbus/sim"
 config = "conformance/connector.toml"
 # The harness runs the modbus module in-process by default (identical code path to the
 # shipped binary). To exercise an external build instead, uncomment:
-command = ["poc-c/build/tedge-dot", "run"]
+command = ["impl/c/build/tedge-dot", "run"]
