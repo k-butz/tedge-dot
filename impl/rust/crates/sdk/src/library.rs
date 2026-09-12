@@ -119,9 +119,19 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
             return Err(format!("device '{name}' is defined more than once"));
         }
         seen.push(name);
+        // Checked here rather than left to the typed parse, because an empty string would
+        // otherwise be accepted as a type and silently behave like an absent one — and the C
+        // loader must reject exactly the same files as this one.
+        if let Some(declared) = device.get("type") {
+            if declared.as_str().map(|t| t.trim().is_empty()).unwrap_or(true) {
+                return Err(format!(
+                    "device '{name}': type must be a non-empty string"
+                ));
+            }
+        }
     }
 
-    let mut cache: HashMap<PathBuf, Vec<Value>> = HashMap::new();
+    let mut cache: HashMap<PathBuf, Library> = HashMap::new();
     for device in devices {
         let name = device
             .get("name")
@@ -134,17 +144,23 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
         }
 
         let mut points: Vec<Value> = Vec::new();
+        let mut device_type: Option<String> = None;
         for reference in &refs {
             let path = locate(reference, &protocol, base_dir, &search_path)
                 .map_err(|e| format!("device '{name}': {e}"))?;
             let library = match cache.get(&path) {
-                Some(points) => points,
+                Some(library) => library,
                 None => {
                     let parsed = read_library(&path, &protocol)?;
                     cache.entry(path.clone()).or_insert(parsed)
                 }
             };
-            for point in library {
+            // The device type comes from the *first* library that names one: later references
+            // extend a type rather than redefine it (`["acme-meter-v2", "site-extras"]`).
+            if device_type.is_none() {
+                device_type.clone_from(&library.device_type);
+            }
+            for point in &library.points {
                 merge_point(&mut points, point.clone());
             }
         }
@@ -177,10 +193,18 @@ fn expand(doc: &mut Value, base_dir: &Path) -> Result<(), String> {
             inline = inline_count,
             "resolved device points from point libraries"
         );
-        device
+        let table = device
             .as_table_mut()
-            .ok_or_else(|| format!("device '{name}' is not a table"))?
-            .insert("point".to_string(), Value::Array(points));
+            .ok_or_else(|| format!("device '{name}' is not a table"))?;
+        // A device that does not declare its own type inherits the library's (§3.1). Written
+        // into the expanded document rather than resolved later, so everything reading the
+        // typed config — `describe`, the runtime, a connector — sees one resolved type.
+        if let Some(device_type) = device_type {
+            table
+                .entry("type".to_string())
+                .or_insert(Value::String(device_type));
+        }
+        table.insert("point".to_string(), Value::Array(points));
     }
     Ok(())
 }
@@ -359,8 +383,18 @@ fn locate(
     ))
 }
 
+/// One parsed point library: the device type it describes, and its points.
+struct Library {
+    /// `[library] type`, the device type these points belong to (§3.4). Absent when the
+    /// library does not name one — the file name is deliberately not used instead, because
+    /// this ends up as a tenant-wide identifier in the cloud (§5.2) and so is worth declaring.
+    device_type: Option<String>,
+    /// The `[[point]]` entries in declaration order.
+    points: Vec<Value>,
+}
+
 /// Read and validate one point library, returning its points in declaration order.
-fn read_library(path: &Path, protocol: &str) -> Result<Vec<Value>, String> {
+fn read_library(path: &Path, protocol: &str) -> Result<Library, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read point library '{}': {e}", path.display()))?;
     let doc: Value = toml::from_str(&text)
@@ -379,6 +413,18 @@ fn read_library(path: &Path, protocol: &str) -> Result<Vec<Value>, String> {
              section); a point library holds only [library] and [[point]]"
         ));
     }
+    let device_type = table
+        .get("library")
+        .and_then(|l| l.get("type"))
+        .map(|t| {
+            t.as_str()
+                .map(str::to_string)
+                .filter(|t| !t.trim().is_empty())
+                .ok_or_else(|| {
+                    format!("point library '{where_}': [library] type must be a non-empty string")
+                })
+        })
+        .transpose()?;
     let declared = table
         .get("library")
         .and_then(|l| l.get("protocol"))
@@ -422,7 +468,10 @@ fn read_library(path: &Path, protocol: &str) -> Result<Vec<Value>, String> {
         }
         seen.push(id);
     }
-    Ok(points.clone())
+    Ok(Library {
+        device_type,
+        points: points.clone(),
+    })
 }
 
 /// Add `incoming` to `points`, or merge it into the existing point with the same id.
@@ -572,6 +621,74 @@ points_from      = [{refs}]
         assert_eq!(ids, ["boiler_temp", "pump_run"]);
         assert_eq!(device.points[0].unit.as_deref(), Some("°C"));
         assert_eq!(device.points[1].access.as_deref(), Some("read_write"));
+    }
+
+    /// A library is the point list of one device *type*, so it is where the type is named
+    /// (§3.1): every instance that references it inherits it, and its parameter sets are named
+    /// after it rather than after the protocol. A device's own `type` wins, and a second
+    /// library extends the type rather than redefining it.
+    #[test]
+    fn device_inherits_the_type_of_the_first_library_that_names_one() {
+        let dir = Dir::new("type");
+        dir.write(
+            "modbus/acme-meter.toml",
+            &LIBRARY.replace("[library]\n", "[library]\ntype = \"acme-meter-v2\"\n"),
+        );
+        dir.write(
+            "modbus/site-extras.toml",
+            "[library]\nprotocol = \"modbus\"\ntype = \"site-extras\"\n\n[[point]]\nid = \"spare\"\ndatatype = \"bool\"\naddress = { table = \"coil\", address = 9, count = 1 }\n",
+        );
+        dir.write("modbus/untyped.toml", LIBRARY);
+
+        let cfg = resolve_in(dir.path(), "\"acme-meter\", \"site-extras\"", "").unwrap();
+        assert_eq!(
+            cfg.devices[0].device_type.as_deref(),
+            Some("acme-meter-v2"),
+            "the first library that names a type gives it; later ones extend it"
+        );
+
+        // The device's own declaration wins over the library's.
+        let text = resolve_in(dir.path(), "\"acme-meter\"", "").unwrap();
+        assert_eq!(text.devices[0].device_type.as_deref(), Some("acme-meter-v2"));
+        let own = resolve(
+            &config_with(Some(dir.path()), "\"acme-meter\"", "").replace(
+                "points_from",
+                "type             = \"site-special\"\npoints_from",
+            ),
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(own.devices[0].device_type.as_deref(), Some("site-special"));
+
+        // A library that names no type leaves the device without one (the file name is not
+        // guessed at: the type ends up as a tenant-wide identifier in the cloud).
+        let none = resolve_in(dir.path(), "\"untyped\"", "").unwrap();
+        assert_eq!(none.devices[0].device_type, None);
+    }
+
+    #[test]
+    fn device_type_must_be_a_non_empty_string() {
+        let dir = Dir::new("device-type-invalid");
+        dir.write("modbus/acme-meter.toml", LIBRARY);
+        for bad in ["\"\"", "7"] {
+            let text = config_with(Some(dir.path()), "\"acme-meter\"", "").replace(
+                "points_from",
+                &format!("type             = {bad}\npoints_from"),
+            );
+            let err = resolve(&text, dir.path()).unwrap_err();
+            assert!(err.contains("type must be a non-empty string"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn library_type_must_be_a_non_empty_string() {
+        let dir = Dir::new("type-invalid");
+        dir.write(
+            "modbus/bad.toml",
+            &LIBRARY.replace("[library]\n", "[library]\ntype = 7\n"),
+        );
+        let err = resolve_in(dir.path(), "\"bad\"", "").unwrap_err();
+        assert!(err.contains("[library] type"), "{err}");
     }
 
     #[test]

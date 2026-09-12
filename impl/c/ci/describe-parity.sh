@@ -74,18 +74,23 @@ if [ ${#configs[@]} -eq 0 ]; then
              "$repo"/cloud/modbus/modbus.toml)
 fi
 
+# stdout is the JSON and stderr carries diagnostics (a config with no device `type` is
+# warned about, §5.2) — merging them would feed a warning line to the JSON parser below.
+errs=$(mktemp)
+trap 'rm -f "$compare" "$errs"' EXIT
+
 fail=0
 for config in "${configs[@]}"; do
     name=${config#"$repo"/}
-    if ! rust_out=$("$rust_bin" describe -c "$config" --compact 2>&1); then
+    if ! rust_out=$("$rust_bin" describe -c "$config" --compact 2>"$errs"); then
         echo "FAIL $name: the Rust binary rejected the config:" >&2
-        echo "$rust_out" >&2
+        cat "$errs" >&2
         fail=1
         continue
     fi
-    if ! c_out=$("$c_bin" describe -c "$config" --compact 2>&1); then
+    if ! c_out=$("$c_bin" describe -c "$config" --compact 2>"$errs"); then
         echo "FAIL $name: the C binary rejected the config:" >&2
-        echo "$c_out" >&2
+        cat "$errs" >&2
         fail=1
         continue
     fi

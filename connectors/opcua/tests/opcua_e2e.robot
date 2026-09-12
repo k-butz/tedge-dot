@@ -27,7 +27,10 @@ ${CAPS_TOPIC}           te/device/main/service/${SERVICE}/ot/capabilities
 ${HEALTH_TOPIC}         te/device/main/service/${SERVICE}/status/health
 ${BATCH_PREFIX}         te/device/${DEVICE}/ot/${PROTOCOL}/cmd/write-batch
 ${PARAM_CMD_PREFIX}     te/device/${DEVICE}///cmd/parameter_update
-${PARAM_TWIN}           te/device/${DEVICE}///twin/${PROTOCOL}_parameters
+# The device type declared on [[device]] (§3.1) qualifies the parameter set names (§5.2).
+${DEVICE_TYPE}          opcua-sim
+${PARAM_SET}            opcua_sim_control_parameters
+${PARAM_TWIN}           te/device/${DEVICE}///twin/${PARAM_SET}
 # The flows container installs thin-edge from the main channel at build time; give it time.
 ${FLOWS_TIMEOUT}        120
 
@@ -218,10 +221,13 @@ Polled Sample Carries The Device Name
     Should Be Equal    ${device}    ${DEVICE}
 
 
-Samples Carry The Point Access
-    [Documentation]    Every sample echoes the point's declared access, so flows can tell
-    ...                writable points (parameters) apart without reading the config file.
+Samples Carry The Point Access And The Device Type
+    [Documentation]    Every sample echoes the point's declared access and the device's type, so
+    ...                flows can tell writable points (parameters) apart and name their parameter
+    ...                set without reading the config file.
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/setpoint    timeout=${SAMPLE_TIMEOUT}
+    ${type}=    Get Json Field    ${payload}    type
+    Should Be Equal    ${type}    ${DEVICE_TYPE}
     ${access}=    Get Json Field    ${payload}    access
     Should Be Equal    ${access}    read_write
     ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temperature    timeout=${SAMPLE_TIMEOUT}
@@ -283,7 +289,7 @@ Describe Renders The Parameter Set Definition
     ${output}=    DeviceLibrary.Execute Command
     ...    cmd=tedge-dot describe -c /etc/connector.toml --compact    strip=${True}
     ${definition}=    Evaluate    json.loads($output.splitlines()[0])    modules=json
-    Should Be Equal    ${definition}[identifier]    ${PROTOCOL}_parameters
+    Should Be Equal    ${definition}[identifier]    ${PARAM_SET}
     ${properties}=    Set Variable    ${definition}[jsonSchema][properties]
     Dictionary Should Contain Key    ${properties}    setpoint
     Dictionary Should Contain Key    ${properties}    running
@@ -299,6 +305,10 @@ Flows Register The Device And Advertise The Parameter Capability
     ${payload}=    Wait For Retained    te/device/${DEVICE}//    timeout=${FLOWS_TIMEOUT}
     ${type}=    Get Json Field    ${payload}    @type
     Should Be Equal    ${type}    child-device
+    # The connector reports the configured device type on its link status, and the registration
+    # flow uses it as the entity type instead of the generic "<protocol>-device" (§3.1).
+    ${entity_type}=    Get Json Field    ${payload}    type
+    Should Be Equal    ${entity_type}    ${DEVICE_TYPE}
     Wait For Retained    ${PARAM_CMD_PREFIX}    timeout=${FLOWS_TIMEOUT}
 
 Parameter Twin Follows The Device
@@ -318,7 +328,7 @@ Parameter Update Command Writes The Points And Completes
     ...                the twin reflects the new values.
     [Tags]    flows
     Publish Message    ${PARAM_CMD_PREFIX}/c8y-mapper-1
-    ...    {"status":"init","operation":{"deviceId":"1","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_${PROTOCOL}_parameters":{},"${PROTOCOL}_parameters":{"setpoint":1234,"running":false}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}    retain=True
+    ...    {"status":"init","operation":{"deviceId":"1","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_${PARAM_SET}":{},"${PARAM_SET}":{"setpoint":1234,"running":false}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}    retain=True
     ${result}=    Wait For Message Containing    ${PARAM_CMD_PREFIX}/c8y-mapper-1    "status":"successful"    timeout=${FLOWS_TIMEOUT}
     ${meta}=    Get Json Field    ${result}    c8y-mapper.on_fragment
     Should Be Equal    ${meta}    c8y_ParameterUpdate
@@ -335,7 +345,7 @@ Parameter Update Command Writes The Points And Completes
 Parameter Update With An Unknown Key Fails With The Connector Reason
     [Tags]    flows
     Publish Message    ${PARAM_CMD_PREFIX}/c8y-mapper-2
-    ...    {"status":"init","operation":{"c8y_ParameterUpdate":{},"c8y_ParameterUpdate_${PROTOCOL}_parameters":{},"${PROTOCOL}_parameters":{"bogus":1}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}    retain=True
+    ...    {"status":"init","operation":{"c8y_ParameterUpdate":{},"c8y_ParameterUpdate_${PARAM_SET}":{},"${PARAM_SET}":{"bogus":1}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}    retain=True
     ${result}=    Wait For Message Containing    ${PARAM_CMD_PREFIX}/c8y-mapper-2    "status":"failed"    timeout=${FLOWS_TIMEOUT}
     ${reason}=    Get Json Field    ${result}    reason
     Should Contain    ${reason}    bogus

@@ -15,6 +15,10 @@
 
 [library]
 protocol    = "profibus"
+# The device *type* this list describes (§3.1): it names the parameter sets of every
+# device that references this library, which is what keeps two device types on the
+# same protocol from sharing a (tenant-wide) Cumulocity identifier.
+type        = "profibus-demo-sim"
 description = "Demo DP slave (profibus-sim in demo/docker-compose.yaml), 8 input / 4 output bytes"
 version     = "1"
 

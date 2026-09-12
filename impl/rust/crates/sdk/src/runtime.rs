@@ -109,14 +109,18 @@ struct LinkTracker {
     /// Last device descriptor seen per device, re-attached to transition reports so the
     /// retained link message keeps carrying it.
     infos: HashMap<String, serde_json::Value>,
+    /// Declared device `type` per device (§3.1), echoed on the link status so the registration
+    /// flow can use it as the thin-edge entity type. Rebuilt on a config reload.
+    types: HashMap<String, String>,
 }
 
 impl LinkTracker {
-    fn new(protocol: &str) -> Self {
+    fn new(protocol: &str, config: &ConnectorConfig) -> Self {
         LinkTracker {
             protocol: protocol.to_string(),
             states: HashMap::new(),
             infos: HashMap::new(),
+            types: device_types(config),
         }
     }
 
@@ -132,7 +136,7 @@ impl LinkTracker {
                 self.infos.insert(report.device.clone(), info.clone());
             }
         }
-        publish_links(client, &self.protocol, reports).await
+        publish_links(client, &self.protocol, reports, &self.types).await
     }
 
     /// Record a device descriptor without publishing, so a later transition publish carries
@@ -427,7 +431,7 @@ pub async fn run_until_watched(
     info!(%protocol, %service, "connector started");
 
     // 4. Connect to devices and publish link status.
-    let mut links = LinkTracker::new(&protocol);
+    let mut links = LinkTracker::new(&protocol, &config);
     match bounded(limits, "connect", connector.connect()).await {
         Ok(reports) => links.publish_reports(&client, &reports).await?,
         Err(e) => warn!("initial connect failed: {e}"),
@@ -565,6 +569,7 @@ pub async fn run_until_watched(
                         ).await;
                         schedule = build_schedule(&config, &subscribed);
                         meta_index = build_meta_index(&config);
+                        links.types = device_types(&config);
                         seq_counters.clear();
                         // the management path already reconnected every device
                         reconnects.clear();
@@ -852,6 +857,9 @@ async fn subscribe_device(
 struct PointExtras {
     meta: Option<serde_json::Value>,
     access: Access,
+    /// The device's declared `type` (§3.1). Per device rather than per point, but carried here
+    /// so one lookup answers everything the envelope needs.
+    device_type: Option<String>,
 }
 
 type MetaIndex = HashMap<(String, String), PointExtras>;
@@ -865,11 +873,26 @@ fn build_meta_index(config: &ConnectorConfig) -> MetaIndex {
                 PointExtras {
                     meta: point.meta.clone(),
                     access: Access::parse(point.access.as_deref()),
+                    device_type: device.device_type.clone().filter(|t| !t.trim().is_empty()),
                 },
             );
         }
     }
     index
+}
+
+/// Device name -> declared device `type`, for the link status payload.
+fn device_types(config: &ConnectorConfig) -> HashMap<String, String> {
+    config
+        .devices
+        .iter()
+        .filter_map(|d| {
+            d.device_type
+                .clone()
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| (d.name.clone(), t))
+        })
+        .collect()
 }
 
 fn access_str(access: Access) -> &'static str {
@@ -889,6 +912,9 @@ fn envelope_with_meta(sample: &Sample, meta_index: &MetaIndex) -> serde_json::Va
             envelope["meta"] = meta.clone();
         }
         envelope["access"] = serde_json::Value::String(access_str(extras.access).into());
+        if let Some(device_type) = &extras.device_type {
+            envelope["type"] = serde_json::Value::String(device_type.clone());
+        }
     }
     envelope
 }
@@ -1537,6 +1563,7 @@ async fn publish_links(
     client: &AsyncClient,
     protocol: &str,
     reports: &[LinkReport],
+    types: &HashMap<String, String>,
 ) -> Result<(), BoxError> {
     for report in reports {
         let topic = format!("te/device/{}/ot/{}/status/link", report.device, protocol);
@@ -1545,6 +1572,12 @@ async fn publish_links(
             "status".into(),
             serde_json::Value::String(report.status.as_str().into()),
         );
+        if let Some(device_type) = types.get(&report.device) {
+            obj.insert(
+                "type".into(),
+                serde_json::Value::String(device_type.clone()),
+            );
+        }
         if report.status == LinkStatus::Connected {
             obj.insert(
                 "since".into(),
@@ -1824,6 +1857,7 @@ protocol = "modbus"
 
 [[device]]
 name = "plc-1"
+type = "acme-meter-v2"
 protocol_address = { host = "127.0.0.1" }
 
   [[device.point]]
@@ -1838,6 +1872,11 @@ protocol_address = { host = "127.0.0.1" }
         let extras = index.get(&("plc-1".to_string(), "temp".to_string())).unwrap();
         let meta = extras.meta.as_ref().unwrap();
         assert_eq!(extras.access, Access::Read);
+        assert_eq!(extras.device_type.as_deref(), Some("acme-meter-v2"));
+        assert_eq!(
+            device_types(&cfg).get("plc-1").map(String::as_str),
+            Some("acme-meter-v2")
+        );
         assert_eq!(meta["on_change"], serde_json::json!(true));
         assert_eq!(meta["min_interval"], serde_json::json!("5s"));
         assert_eq!(meta["room"], serde_json::json!("boiler"));
@@ -1867,15 +1906,20 @@ protocol_address = { host = "127.0.0.1" }
             PointExtras {
                 meta: Some(serde_json::json!({ "on_change": true })),
                 access: Access::ReadWrite,
+                device_type: Some("acme-meter-v2".into()),
             },
         );
         let env = envelope_with_meta(&sample, &index);
         assert_eq!(env["meta"]["on_change"], serde_json::json!(true));
         assert_eq!(env["access"], serde_json::json!("read_write"));
-        // a sample of an unindexed point has neither meta nor access
+        // The device type (§3.1): what a consumer needs to name the point's parameter set
+        // without the configuration file (§5.2).
+        assert_eq!(env["type"], serde_json::json!("acme-meter-v2"));
+        // a sample of an unindexed point has neither meta, access nor type
         let env2 = envelope_with_meta(&sample, &HashMap::new());
         assert!(env2.get("meta").is_none());
         assert!(env2.get("access").is_none());
+        assert!(env2.get("type").is_none());
     }
 
     #[test]

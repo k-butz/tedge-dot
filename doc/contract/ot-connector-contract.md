@@ -102,6 +102,7 @@ port = 1883
 
 [[device]]
 name     = "<device-name>"      # -> te/device/<device-name>
+type     = "<device-type>"      # optional; what this device IS (§3.1), else from its library
 protocol_address = { } # protocol-specific: how to reach this device. Shape per connector spec.
 poll_interval = "2s"            # optional per-device override
 default_mode  = "typed"         # optional; default output mode for this device's points
@@ -172,6 +173,20 @@ points_from   = []              # optional; point libraries to inherit points fr
 | `subscribe` | boolean | no | Default `true`. `false` keeps the point on the polling schedule even when the connector supports push delivery. |
 | `address` | object | yes | **Protocol-specific**; shape defined by the connector spec. |
 
+#### The device `type`
+
+`[[device]] type` names the **device type** the instance is one of: what its point list
+describes, as opposed to `protocol_address`, which says where to reach it. It is optional, and
+a device that does not declare one inherits the `type` of the first point library it references
+(§3.4) — a library *is* the point list of one device type, so that is where it is usually
+declared, once, for every instance.
+
+It matters because it names things that outlive the device: the device's **parameter sets**
+(§5.2), whose names are tenant-wide identifiers in the cloud, and the thin-edge entity type a
+registration flow assigns. A connector MUST therefore echo it where a consumer needs it without
+the configuration file: in every sample (§5) and on the link status (§8). Nothing else in the
+runtime interprets it.
+
 `name` and `description` are **not** echoed in the sample envelope: they are static per point,
 so the connector publishes them once in its retained capability descriptor (§7) instead of on
 every read. `meta.parameter.title` / `meta.parameter.description` override them for a
@@ -213,6 +228,7 @@ file, carrying no connection information at all:
 # /usr/share/tedge-dot/points.d/modbus/acme-meter-v2.toml
 [library]
 protocol    = "modbus"          # MUST match the referencing connector's protocol
+type        = "acme-meter-v2"   # optional; the device type these points describe (§3.1)
 description = "ACME meter, firmware 2.x"   # optional, informational
 version     = "2.1"                        # optional, informational
 
@@ -278,6 +294,17 @@ The validation rules of §3.3 apply to the **resolved** point: a definition that
 appears as a patch, with no library supplying the rest, is rejected for the fields it is
 missing. Within a single library a repeated `id` is an error, not an override: there is no
 order in which to apply it.
+
+#### The device type a library declares
+
+`[library] type` names the device type the points describe (§3.1). A device that does not
+declare its own `type` inherits it from the **first** library in `points_from` that declares
+one; later references extend that type rather than redefine it (`["acme-meter-v2",
+"site-extras"]`), and a `type` on the device itself wins over every library.
+
+A library that declares no `type` leaves the device without one: the file name is deliberately
+not used instead, because the type ends up as a tenant-wide identifier in the cloud (§5.2) and
+is worth declaring on purpose.
 
 #### Relationship to the rest of the contract
 
@@ -389,6 +416,7 @@ native address so flows can route or debug). The example below uses Modbus to ma
   "ts": "2026-05-30T10:00:00.000Z",
   "ts_ms": 1780221600000.0,
   "device": "plc-1",
+  "type": "acme-meter-v2",
   "protocol": "modbus",
   "point": "boiler_temp",
   "mode": "typed",
@@ -408,6 +436,7 @@ native address so flows can route or debug). The example below uses Modbus to ma
 | `ts` | string (RFC 3339, ms, UTC `Z`) | yes | Read completion time. |
 | `ts_ms` | number | no | The same instant as Unix epoch milliseconds (float); the numeric companion to `ts` for consumers doing time arithmetic. |
 | `device` | string | yes | thin-edge device entity id segment. |
+| `type` | string | no | Echo of the device's declared `type` (§3.1), when it has one. Lets consumers name the point's parameter set (§5.2) without the configuration file. |
 | `protocol` | string | yes | Protocol module id. |
 | `point` | string | yes | Point `id`. |
 | `mode` | `"raw"` \| `"typed"` | yes | Echoes the point mode. |
@@ -440,13 +469,38 @@ native address so flows can route or debug). The example below uses Modbus to ma
 
 A point whose `access` permits writes is, to an operator, a *parameter*: a setting with a
 current value and a control to change it. The contract deliberately adds no mechanism for
-this beyond echoing `access` (and `meta`) in samples: a flow (`ot-parameter-state`) derives one
+this beyond echoing `access`, `meta` and the device `type` in samples: a flow
+(`ot-parameter-state`) derives one
 retained twin fragment per *parameter set* from the samples and acknowledged writes, and
 cloud-specific tooling (`tedge-dot describe`) renders the same sets as cloud-side definitions.
-The set a point belongs to is `meta.parameter.set` (default `<protocol>_parameters`); a
-read-only point can opt in with `meta.parameter = true`, a writable point can opt out with
+A read-only point can opt in with `meta.parameter = true`, a writable point can opt out with
 `meta.parameter = false`. Because point ids become the fragment keys, parameter ids SHOULD be
-plain identifiers (`[A-Za-z0-9_]`). See [RFC 0003](../rfc/0003-parameter-writes.md).
+plain identifiers (`[A-Za-z0-9_]`).
+
+**Naming a set.** A set name is a tenant-wide identifier in the cloud, so it is qualified by the
+*device type* (§3.1) — what decides which points exist — and never by the protocol alone, which
+says nothing about them:
+
+```text
+<device type, else the protocol>_<group, default "control">_parameters
+```
+
+Every *run* of characters outside `[A-Za-z0-9]` folds to a single `_`, so `acme-meter-v2` with
+the default group gives `acme_meter_v2_control_parameters`. Two knobs refine it, both under `meta.parameter`:
+
+| Key | Meaning |
+| --- | --- |
+| `group` | A second set *of the same device type* (`commissioning` → `acme_meter_v2_commissioning_parameters`). |
+| `set` | An absolute name, used verbatim — the escape hatch for an identifier that predates this rule, or for a set deliberately shared by several device types. A bare string (`meta.parameter = "pump"`) is this form. |
+
+A device with no declared type falls back to `<protocol>_control_parameters`, which every other
+device type on that protocol also falls back to: fine for a fleet of one type, a collision for a
+fleet of several, and the reason `tedge-dot describe` warns about it. Consumers derive the same
+name from the device `type` echoed in samples and on the link status, so the connector, the
+flows and the cloud-side definitions agree without sharing a configuration file.
+
+See [RFC 0003](../rfc/0003-parameter-writes.md) and
+[RFC 0005](../rfc/0005-device-types-and-parameter-sets.md).
 
 ## 6. Command protocol
 
@@ -696,8 +750,13 @@ labels live here rather than in the sample envelope.
   `te/device/<device>/ot/<protocol>/status/link`:
 
   ```json
-  { "status": "connected", "since": "2026-05-30T09:59:00.000Z" }
+  { "status": "connected", "type": "acme-meter-v2", "since": "2026-05-30T09:59:00.000Z" }
   ```
+
+  `type` is the device's declared type (§3.1), present when it has one: the message is retained
+  and published before any sample, which is what lets a consumer name the device's parameter
+  sets (§5.2) and its thin-edge entity type from the start — including for a device whose
+  parameters are all write-only and therefore never sampled.
 
   with `status` ∈ `{"connected","disconnected","degraded"}` and an optional `reason`.
 

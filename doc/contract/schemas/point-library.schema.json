@@ -22,9 +22,14 @@
           "minLength": 1,
           "description": "The protocol module these points address. MUST equal the referencing connector's `[connector] protocol`: a point's `address` is protocol-specific, so a library is only ever valid for one protocol."
         },
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The device type this point list describes (§3.1). Every device that references the library inherits it unless it declares its own, and it qualifies their parameter set names (§5.2). Declared rather than derived from the file name, because it becomes a tenant-wide identifier in the cloud."
+        },
         "description": {
           "type": "string",
-          "description": "Informational: what device type this list describes."
+          "description": "Informational: a human-readable account of what this list describes."
         },
         "version": {
           "type": "string",
@@ -45,6 +50,7 @@
     {
       "library": {
         "protocol": "modbus",
+        "type": "acme-meter-v2",
         "description": "ACME meter, firmware 2.x",
         "version": "2.1"
       },

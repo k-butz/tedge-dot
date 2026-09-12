@@ -5,15 +5,48 @@
 #include <stdlib.h>
 #include <string.h>
 
-char *tdot_param_default_set(const char *protocol) {
-    size_t n = protocol ? strlen(protocol) : 0;
-    char *out = malloc(n + sizeof("_parameters"));
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)protocol[i];
-        out[i] = isalnum(c) ? (char)c : '_';
+/* Fold `src` into `dst` in place: every RUN of characters outside [A-Za-z0-9]
+ * becomes a single '_', so a device type or group can be written the way it
+ * reads ("acme-meter-v2") and still be a valid fragment key. A run rather than
+ * a character because this folds bytes while the Rust implementation folds
+ * chars: collapsing runs is what makes them agree on a name with a non-ASCII
+ * character in it (one multi-byte character = one run either way). */
+static void sanitize_in_place(char *s) {
+    size_t o = 0;
+    bool last_was_sep = false;
+    for (size_t i = 0; s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (isalnum(c)) {
+            s[o++] = (char)c;
+            last_was_sep = false;
+        } else if (!last_was_sep) {
+            s[o++] = '_';
+            last_was_sep = true;
+        }
     }
-    strcpy(out + n, "_parameters");
+    s[o] = '\0';
+}
+
+char *tdot_param_set_name(const char *qualifier, const char *group) {
+    if (!group || !*group)
+        group = TDOT_PARAM_DEFAULT_GROUP;
+    if (!qualifier)
+        qualifier = "";
+    /* Assembled first and sanitized as a whole, so a qualifier that already
+     * ends in a separator does not produce a doubled '_'. */
+    size_t n = strlen(qualifier) + 1 + strlen(group) + sizeof("_parameters");
+    char *out = malloc(n);
+    snprintf(out, n, "%s_%s_parameters", qualifier, group);
+    sanitize_in_place(out);
     return out;
+}
+
+tdot_set_naming_t tdot_param_naming(const tdot_device_t *dev,
+                                    const char *protocol, const char *forced) {
+    tdot_set_naming_t naming = {forced, protocol};
+    if (dev && dev->type && *dev->type)
+        naming.qualifier = dev->type;
+    return naming;
 }
 
 bool tdot_param_key_valid(const char *key) {
@@ -54,18 +87,28 @@ static cJSON *parameter_options(const tdot_point_t *point) {
     return options;
 }
 
-static char *set_name_of(const cJSON *options, const char *default_set) {
+/* `set` is absolute (used verbatim); `group` only names a set within the device
+ * type. Mirrors descriptor.rs::parameter_of. */
+static char *set_name_of(const cJSON *options,
+                         const tdot_set_naming_t *naming) {
     const cJSON *set = cJSON_GetObjectItemCaseSensitive(options, "set");
-    return strdup(cJSON_IsString(set) ? set->valuestring : default_set);
+    if (cJSON_IsString(set) && *set->valuestring)
+        return strdup(set->valuestring);
+    if (naming->forced)
+        return strdup(naming->forced);
+    const cJSON *group = cJSON_GetObjectItemCaseSensitive(options, "group");
+    return tdot_param_set_name(
+        naming->qualifier,
+        cJSON_IsString(group) ? group->valuestring : TDOT_PARAM_DEFAULT_GROUP);
 }
 
-bool tdot_param_of(const tdot_point_t *point, const char *default_set,
+bool tdot_param_of(const tdot_point_t *point, const tdot_set_naming_t *naming,
                    char **set_out) {
     cJSON *options = parameter_options(point);
     if (!options)
         return false;
     if (set_out)
-        *set_out = set_name_of(options, default_set);
+        *set_out = set_name_of(options, naming);
     cJSON_Delete(options);
     return true;
 }
@@ -80,16 +123,17 @@ static void append(char **buf, size_t *len, const char *sep, const char *text) {
     *len += add;
 }
 
-char *tdot_param_invalid_keys(const tdot_config_t *cfg,
-                              const char *default_set) {
+char *tdot_param_invalid_keys(const tdot_config_t *cfg, const char *forced) {
     char *buf = NULL;
     size_t len = 0;
     for (size_t i = 0; i < cfg->ndevices; i++) {
         const tdot_device_t *dev = &cfg->devices[i];
+        tdot_set_naming_t naming =
+            tdot_param_naming(dev, cfg->protocol, forced);
         for (size_t j = 0; j < dev->npoints; j++) {
             const tdot_point_t *pt = &dev->points[j];
             char *set = NULL;
-            if (!tdot_param_of(pt, default_set, &set))
+            if (!tdot_param_of(pt, &naming, &set))
                 continue;
             char item[256];
             if (!tdot_param_key_valid(pt->id)) {
@@ -101,6 +145,24 @@ char *tdot_param_invalid_keys(const tdot_config_t *cfg,
                 append(&buf, &len, ", ", item);
             }
             free(set);
+        }
+    }
+    return buf;
+}
+
+char *tdot_param_untyped_devices(const tdot_config_t *cfg) {
+    char *buf = NULL;
+    size_t len = 0;
+    for (size_t i = 0; i < cfg->ndevices; i++) {
+        const tdot_device_t *dev = &cfg->devices[i];
+        if (dev->type && *dev->type)
+            continue;
+        tdot_set_naming_t naming = tdot_param_naming(dev, cfg->protocol, NULL);
+        for (size_t j = 0; j < dev->npoints; j++) {
+            if (tdot_param_of(&dev->points[j], &naming, NULL)) {
+                append(&buf, &len, ", ", dev->name);
+                break;
+            }
         }
     }
     return buf;
@@ -210,7 +272,7 @@ static cJSON *property_schema(const tdot_point_t *point, const cJSON *options) {
     return schema;
 }
 
-/* "modbus_parameters" -> "Modbus parameters" (only the first word is
+/* "modbus_control_parameters" -> "Modbus control parameters" (only the first word is
  * capitalized, as in Rust's title_from_key). Writes into `out`. */
 static void title_from_key(const char *key, char *out, size_t outlen) {
     size_t o = 0;
@@ -235,23 +297,20 @@ static void title_from_key(const char *key, char *out, size_t outlen) {
     out[o] = '\0';
 }
 
-cJSON *tdot_c8y_dtm_definitions(const tdot_config_t *cfg,
-                                const char *default_set) {
-    char *owned_default = default_set ? NULL
-                                      : tdot_param_default_set(cfg->protocol);
-    const char *dflt = default_set ? default_set : owned_default;
-
+cJSON *tdot_c8y_dtm_definitions(const tdot_config_t *cfg, const char *forced) {
     /* One entry per set, in configuration order; `properties` keeps the order
      * the points are configured in so the default `order` matches Rust. */
     cJSON *sets = cJSON_CreateObject(); /* set name -> properties object */
     for (size_t i = 0; i < cfg->ndevices; i++) {
         const tdot_device_t *dev = &cfg->devices[i];
+        tdot_set_naming_t naming =
+            tdot_param_naming(dev, cfg->protocol, forced);
         for (size_t j = 0; j < dev->npoints; j++) {
             const tdot_point_t *pt = &dev->points[j];
             cJSON *options = parameter_options(pt);
             if (!options)
                 continue;
-            char *set = set_name_of(options, dflt);
+            char *set = set_name_of(options, &naming);
             cJSON *props = cJSON_GetObjectItemCaseSensitive(sets, set);
             if (!props)
                 props = cJSON_AddObjectToObject(sets, set);
@@ -305,6 +364,5 @@ cJSON *tdot_c8y_dtm_definitions(const tdot_config_t *cfg,
         cJSON_AddItemToArray(docs, doc);
     }
     cJSON_Delete(sets);
-    free(owned_default);
     return docs;
 }

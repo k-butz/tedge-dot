@@ -31,6 +31,10 @@ security_mode    = "none"
 
 [[device]]
 name             = "opc1"
+# The device type (§3.1), declared on the device itself here -- the Modbus harness inherits
+# its type from a point library instead, so the pair covers both halves of the rule. It names
+# the device's parameter sets (opcua_sim_control_parameters) and its thin-edge entity type.
+type             = "opcua-sim"
 protocol_address = { endpoint = "opc.tcp://simulator:4840/", security_policy = "None", security_mode = "none" }
 default_mode     = "typed"
 

@@ -124,6 +124,10 @@ static void publish_link(rt_t *rt, tdot_device_t *dev, tdot_link_t status) {
 
     cJSON *obj = cJSON_CreateObject();
     cJSON_AddStringToObject(obj, "status", name);
+    /* The device type (§3.1), so the registration flow can use it as the
+     * thin-edge entity type without reading the connector config. */
+    if (dev->type)
+        cJSON_AddStringToObject(obj, "type", dev->type);
     cJSON_AddStringToObject(obj, "since", ts);
     /* Optional device descriptor from the module (contract status schema
      * `info`); the registration flow forwards it into a twin fragment. */

@@ -1,4 +1,8 @@
-# Parameter set (twin fragment name / Cumulocity DTM identifier) for points that do not name
-# their own via meta.parameter.set. Empty -> derived from the protocol as "<protocol>_parameters"
-# (e.g. modbus_parameters). Must match `tedge-dot describe --set <name>`.
+# One parameter set (twin fragment name / Cumulocity DTM identifier) for every point that does
+# not name an absolute one via meta.parameter.set — the escape hatch for a tenant identifier
+# that predates the naming rule, and it applies to every device this mapper sees.
+#
+# Empty (the default) derives the name instead, per device:
+#   "<device type, else the protocol>_<meta.parameter.group, default control>_parameters"
+# e.g. acme_meter_v2_control_parameters. Must match `tedge-dot describe [--set <name>]`.
 default_set = ""

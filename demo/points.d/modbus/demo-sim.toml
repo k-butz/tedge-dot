@@ -21,6 +21,10 @@
 
 [library]
 protocol    = "modbus"
+# The device *type* this list describes (§3.1): it names the parameter sets of every
+# device that references this library, which is what keeps two device types on the
+# same protocol from sharing a (tenant-wide) Cumulocity identifier.
+type        = "modbus-demo-sim"
 description = "pymodbus simulator, as seeded by demo/docker-compose.yaml's modbus-sim"
 version     = "1"
 

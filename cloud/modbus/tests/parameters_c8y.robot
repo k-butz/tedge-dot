@@ -22,7 +22,9 @@ Suite Teardown      Teardown Cloud Device
 *** Variables ***
 ${CHILD_NAME}           plc1
 # ${CHILD_EXTERNAL_ID} is built in the suite setup: it embeds the per-run device id.
-${SET}                  modbus_parameters
+# The parameter set is named after the device *type* the config declares (§5.2), not after the
+# protocol: a DTM identifier is tenant-wide, and two Modbus device types must not share one.
+${SET}                  modbus_plc_sim_control_parameters
 ${OP_TIMEOUT}           60
 ${MEAS_TIMEOUT}         90
 ${NEW_VALUE}            4343

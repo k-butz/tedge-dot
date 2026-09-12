@@ -20,16 +20,20 @@ export function onMessage(message, context) {
 
   let status = "connected";
   let info = null;
+  let declaredType = null;
   try {
     const payload = JSON.parse(decoder.decode(message.payload));
     if (typeof payload?.status === "string") status = payload.status;
     if (payload && typeof payload.info === "object" && payload.info !== null) info = payload.info;
+    // The device type the connector was configured with (contract §3.1) — what the points
+    // describe, which is a far better entity type than "<protocol>-device".
+    if (typeof payload?.type === "string" && payload.type) declaredType = payload.type;
   } catch (_e) {
     // tolerate empty/non-JSON payloads
   }
   if (status !== "connected") return []; // only register on a healthy link
 
-  const deviceType = context.config?.device_type || `${protocol}-device`;
+  const deviceType = declaredType || context.config?.device_type || `${protocol}-device`;
 
   // Register each device only once per mapper lifetime.
   const key = `registered:${device}`;

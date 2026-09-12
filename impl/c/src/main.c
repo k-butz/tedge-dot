@@ -425,15 +425,28 @@ static int cmd_describe(const args_t *a) {
 
     /* Parameter ids become fragment keys on the device twin, so they must be
      * plain identifiers. */
-    char *default_set = a->set ? strdup(a->set)
-                               : tdot_param_default_set(cfg->protocol);
-    char *bad = tdot_param_invalid_keys(cfg, default_set);
-    free(default_set);
+    char *bad = tdot_param_invalid_keys(cfg, a->set);
     if (bad) {
         fprintf(stderr, "error: parameter keys must match [A-Za-z0-9_]: %s\n",
                 bad);
         free(bad);
         goto out;
+    }
+
+    /* A DTM identifier is tenant-wide, so a set named after the protocol is
+     * shared with every other device type that speaks it. Declaring the device
+     * type is what keeps them apart. */
+    if (!a->set) {
+        char *untyped = tdot_param_untyped_devices(cfg);
+        if (untyped) {
+            fprintf(stderr,
+                    "warning: device(s) %s declare no `type`, so their parameter "
+                    "sets are named after the protocol ('%s_...') and collide "
+                    "with every other %s device type in the tenant; set `type` "
+                    "on the device or in its point library\n",
+                    untyped, cfg->protocol, cfg->protocol);
+            free(untyped);
+        }
     }
 
     cJSON *docs = tdot_c8y_dtm_definitions(cfg, a->set);

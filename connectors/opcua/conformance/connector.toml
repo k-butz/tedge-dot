@@ -20,6 +20,9 @@ request_timeout_s = 2
 
 [[device]]
 name             = "plant-server"
+# The device type (§3.1): echoed in every sample and on the link status, so the captured
+# traffic validates against the schemas with the field present.
+type             = "opcua-conformance-sim"
 protocol_address = { endpoint = "opc.tcp://127.0.0.1:4840" }
 default_mode     = "typed"
 

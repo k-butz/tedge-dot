@@ -32,4 +32,5 @@ connect_timeout_s = 10
 #
 # [[device]]
 # name             = "opc-server-1"
+# type             = "acme-plc-v3"   # the device TYPE: names its parameter sets (§5.2)
 # protocol_address = { endpoint = "opc.tcp://127.0.0.1:4840/", security_policy = "None", security_mode = "None" }

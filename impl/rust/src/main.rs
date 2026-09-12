@@ -72,8 +72,9 @@ struct DescribeArgs {
     /// Device name or wildcard pattern to restrict the output to.
     #[arg(short, long, default_value = "*")]
     device: String,
-    /// Default parameter set for points without meta.parameter.set
-    /// (default: <protocol>_parameters). Must match the ot-parameter-state flow setting.
+    /// One parameter set for every point that does not name an absolute one, instead of the
+    /// derived <type-or-protocol>_<group>_parameters. Must match the ot-parameter-state flow
+    /// setting.
     #[arg(long, value_name = "NAME")]
     set: Option<String>,
     /// Print compact JSON (one document per line) instead of pretty-printed.
@@ -850,16 +851,24 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
         }
     }
     // Parameter ids become fragment keys on the device twin, so they must be plain identifiers.
-    let default_set = args
-        .set
-        .clone()
-        .unwrap_or_else(|| tedge_dot_sdk::descriptor::default_set(&config.connector.protocol));
-    let bad = tedge_dot_sdk::descriptor::invalid_keys(&config, &default_set);
+    let bad = tedge_dot_sdk::descriptor::invalid_keys(&config, args.set.as_deref());
     if !bad.is_empty() {
         return Err(format!(
             "parameter keys must match [A-Za-z0-9_]: {}",
             bad.join(", ")
         ));
+    }
+    // A DTM identifier is tenant-wide, so a set named after the protocol is shared with every
+    // other device type that speaks it. Declaring the device type is what keeps them apart.
+    if args.set.is_none() {
+        for device in tedge_dot_sdk::descriptor::devices_without_type(&config) {
+            eprintln!(
+                "warning: device '{device}' declares no `type`, so its parameter sets are named \
+                 after the protocol ('{}_...') and collide with every other {} device type in \
+                 the tenant; set `type` on the device or in its point library",
+                config.connector.protocol, config.connector.protocol
+            );
+        }
     }
     let docs: Vec<serde_json::Value> = match args.format {
         DescribeFormat::C8yDtm => tedge_dot_sdk::c8y_dtm_definitions(&config, args.set.as_deref()),

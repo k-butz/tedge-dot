@@ -30,6 +30,7 @@ slot_bits      = 300
 #
 # [[device]]
 # name             = "remote_io"
+# type             = "acme-io-v1"    # the device TYPE: names its parameter sets (§5.2)
 # protocol_address = { station_address = 7, ident_number = 0, input_bytes = 8, output_bytes = 4 }
 #
 #   [[device.point]]
