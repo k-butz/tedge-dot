@@ -41,7 +41,7 @@ jobs:
         if: inputs.impl == 'rust'
         run: |
           docker build -f Dockerfile.package --build-arg PKG_ARCH=amd64 --target export --output dist .
-          mv dist/tedge-dot.deb dist/tedge-dot_0.0.0-ci_linux_amd64.deb
+          mv dist/tedge-dot.deb dist/tedge-dot-rs_0.0.0-ci_linux_amd64.deb
 
       - name: Run cloud e2e suite (${{ inputs.impl }})
         run: |

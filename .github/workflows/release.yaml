@@ -1,19 +1,64 @@
 name: Release
 
+# One release, both implementations.
+#
+# tedge-dot ships as two interchangeable packages, each containing /usr/bin/tedge-dot:
+#
+#   * tedge-dot-rs -- the Rust implementation (impl/rust/), cross-compiled and packaged by
+#     goreleaser with cargo-zigbuild;
+#   * tedge-dot-c  -- the C implementation (impl/c/), cross-compiled in the zig + Debian
+#     multiarch image in impl/c/cross/ and packaged with nfpm.
+#
+# They declare each other as conflicting and both Provide the `tedge-dot` virtual package, so
+# a host installs one or the other. Building them needs completely different toolchains, hence
+# the two build jobs; `publish` then assembles a single GitHub release (and a single Cloudsmith
+# push) from both sets of assets, with one SHA256SUMS covering everything.
+#
+#   * push a v* tag       -> GitHub release with deb/rpm/apk + tarballs for both packages
+#   * run manually        -> builds both and uploads them to the run; optionally refreshes the
+#                            rolling `snapshot` pre-release so the latest build is one download
+#                            away.
+
 on:
   push:
-    # All tags except the C proof-of-concept release tags (c-v*), which are
-    # handled by release-c.yaml.
-    tags: ["*", "!c-v*"]
-  # Manual runs build a snapshot (no GitHub release, no publish) so the
-  # pipeline can be tested before tagging.
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish_snapshot:
+        description: "Refresh the rolling `snapshot` pre-release"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
+env:
+  # Debian architectures the C build targets, and the oldest glibc its binaries must run on.
+  # zig lets us pin the floor at 2.17 (Debian 8 / RHEL 7 era), which a native build cannot:
+  # an ubuntu-24.04 build hard-requires glibc 2.39 on the target, ruling out most OT gateways.
+  C_ARCHS: "amd64 arm64 armhf"
+  GLIBC_MIN: "2.17"
+
 jobs:
-  release:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ver
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            v="${{ github.ref_name }}"; v="${v#v}"
+          else
+            v="0.0.0-dev.$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Releasing version $v"
+
+  rust:
+    name: Build tedge-dot-rs (Rust)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,12 +83,18 @@ jobs:
           tool: cargo-zigbuild
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: impl/rust
 
-      - name: Build packages (and GitHub release on tags)
+      # Always --skip=publish: the GitHub release is created once, by the `publish` job below,
+      # so that it carries the C assets too.
+      - name: Build packages
         uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean ${{ github.ref_type != 'tag' && '--snapshot' || '' }}
+          args: >-
+            release --clean --skip=publish,announce
+            ${{ github.ref_type != 'tag' && '--snapshot' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -53,8 +104,15 @@ jobs:
       - name: Package smoke (flows are shipped)
         run: |
           set -eux
-          deb=$(ls dist/*_linux_amd64.deb)
+          deb=$(ls dist/tedge-dot-rs_*_linux_amd64.deb)
+          dpkg-deb -I "$deb" | grep -E 'Package:|Provides:|Conflicts:|Replaces:'
+          # The package renaming is load-bearing: tedge-dot-rs and tedge-dot-c must stay
+          # mutually exclusive, which is what Provides/Conflicts on the virtual package buys.
+          dpkg-deb -f "$deb" Package | grep -qx 'tedge-dot-rs'
+          dpkg-deb -f "$deb" Provides | grep -q 'tedge-dot'
+          dpkg-deb -f "$deb" Conflicts | grep -q 'tedge-dot-c'
           contents=$(dpkg-deb -c "$deb")
+          echo "$contents" | grep -q '/usr/bin/tedge-dot$'
           for flow in ot-measurement ot-registration ot-command-forward \
                       ot-command-result ot-parameter-state; do
             echo "$contents" | grep -q "/etc/tedge/mappers/c8y/flows/$flow/flow.toml"
@@ -64,17 +122,210 @@ jobs:
           echo "$contents" | grep -q "/usr/share/tedge-dot/flows/ot-event/flow.toml"
           tar -tzf dist/tedge-dot_Linux_x86_64.tar.gz | grep -q "flows/ot-measurement/main.js"
 
-      - name: Upload snapshot packages
-        if: github.ref_type != 'tag'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: packages
+          name: packages-rust
           path: |
             dist/*.deb
             dist/*.rpm
             dist/*.apk
             dist/*.tar.gz
             dist/*.zip
+          if-no-files-found: error
+
+  c:
+    name: Build tedge-dot-c (C)
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Needed to *run* the arm64/armhf binaries in the verify step below.
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Build the cross-compilation image
+        run: docker build -t tedge-dot-cross impl/c/cross
+
+      - name: Install nfpm
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' \
+            | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update
+          sudo apt-get install -y nfpm
+
+      - name: Cross-build every architecture
+        run: |
+          set -eux
+          for arch in $C_ARCHS; do
+            mkdir -p "impl/c/dist/$arch"
+            docker run --rm \
+              -v "$PWD:/src:ro" -v "$PWD/impl/c/dist/$arch:/out" \
+              -e ARCH="$arch" -e GLIBC_MIN="$GLIBC_MIN" \
+              tedge-dot-cross
+          done
+
+      - name: Verify on an old distro (golden vectors, glibc floor)
+        run: |
+          set -eux
+          for arch in $C_ARCHS; do
+            case "$arch" in
+              armhf) platform=linux/arm/v7 ;;
+              *)     platform="linux/$arch" ;;
+            esac
+            docker run --rm --platform "$platform" \
+              -v "$PWD/impl/c/dist/$arch:/out" \
+              -v "$PWD:/src:ro" \
+              -v "$PWD/impl/c/cross/verify.sh:/verify.sh:ro" \
+              debian:bullseye-slim /verify.sh
+          done
+
+      - name: Package (deb / rpm / apk + tarball)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eux
+          mkdir -p dist impl/c/dist/staged
+          for arch in $C_ARCHS; do
+            # nfpm expands env vars in scalar fields but not in contents[].src,
+            # so stage this architecture's binary where nfpm.yaml points.
+            cp "impl/c/dist/$arch/tedge-dot" impl/c/dist/staged/tedge-dot
+            case "$arch" in
+              armhf) export ARCH=arm7 ;;
+              *)     export ARCH="$arch" ;;
+            esac
+            for format in deb rpm apk; do
+              nfpm pkg -f impl/c/packaging/nfpm.yaml -p "$format" -t dist/
+            done
+
+            staging="tedge-dot-c_${VERSION}_linux_${arch}"
+            mkdir -p "pkgroot/$staging"
+            cp "impl/c/dist/$arch/tedge-dot" "pkgroot/$staging/"
+            cp impl/c/README.md "pkgroot/$staging/"
+            cp -r impl/c/packaging/config "pkgroot/$staging/config-defaults"
+            # The device-side flows, as the packages ship them (see flows/README.md):
+            # a tarball install is manual, so the whole set travels with the binary.
+            mkdir -p "pkgroot/$staging/flows"
+            cp -r flows/ot-* flows/README.md "pkgroot/$staging/flows/"
+            tar -czf "dist/${staging}.tar.gz" -C pkgroot "$staging"
+          done
+          ls -l dist
+
+      - name: Package smoke (inspect, install, run)
+        run: |
+          set -eux
+          deb=$(ls dist/tedge-dot-c_*_amd64.deb)
+          echo "== control metadata =="
+          dpkg-deb -I "$deb" | grep -E 'Package:|Version:|Architecture:|Depends:|Conflicts:|Provides:'
+          # The package renaming is load-bearing: tedge-dot-c and tedge-dot-rs must stay
+          # mutually exclusive, which is what Provides/Conflicts on the virtual package buys.
+          dpkg-deb -f "$deb" Package | grep -qx 'tedge-dot-c'
+          dpkg-deb -f "$deb" Provides | grep -q 'tedge-dot'
+          dpkg-deb -f "$deb" Conflicts | grep -q 'tedge-dot-rs'
+          # A real thin-edge host already has the tedge user; create it so the
+          # package's tedge-owned config files and service user resolve cleanly.
+          sudo groupadd --system tedge 2>/dev/null || true
+          sudo useradd --system --gid tedge --no-create-home --shell /usr/sbin/nologin tedge 2>/dev/null || true
+          sudo apt-get install -y "./$deb"
+          echo "== packaged binary runs =="
+          command -v tedge-dot
+          tedge-dot run /nonexistent 2>&1 | head -1 || true
+          # The connector is a dumb driver: without the flows nothing it publishes
+          # reaches the cloud, so the package must deploy the core pipeline active.
+          echo "== flows deployed =="
+          for flow in ot-measurement ot-registration ot-command-forward \
+                      ot-command-result ot-parameter-state; do
+            test -f "/etc/tedge/mappers/c8y/flows/$flow/flow.toml"
+            test -f "/etc/tedge/mappers/c8y/flows/$flow/main.js"
+          done
+          # ...and ship the opt-in ones for the admin to enable.
+          test -f /usr/share/tedge-dot/flows/ot-alarm/flow.toml
+          test -f /usr/share/tedge-dot/flows/ot-event/flow.toml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-c
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [version, rust, c]
+    if: github.ref_type == 'tag' || inputs.publish_snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both implementations' assets land in the same directory, so the release and the
+      # Cloudsmith push each happen once and carry everything.
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages-rust
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages-c
+          path: dist
+
+      - name: One checksum file over every asset
+        run: |
+          set -eux
+          ( cd dist && sha256sum ./* > ../SHA256SUMS.tmp && mv ../SHA256SUMS.tmp SHA256SUMS )
+          ls -l dist
+          # Both packages must be in the release; a silently missing build job would
+          # otherwise ship a half release.
+          ls dist/tedge-dot-rs_*.deb >/dev/null
+          ls dist/tedge-dot-c_*.deb >/dev/null
+
+      - name: Resolve release tag
+        id: rel
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "title=tedge-dot ${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=snapshot" >> "$GITHUB_OUTPUT"
+            echo "title=tedge-dot (rolling snapshot)" >> "$GITHUB_OUTPUT"
+            echo "prerelease=--prerelease" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The handwritten preamble (which package do I want, how do I install it) followed by
+      # GitHub's generated changelog. `gh release create` takes only one notes source, so the
+      # changelog is fetched separately and the two are concatenated.
+      - name: Assemble release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -eu
+          cp packaging/release-notes.md notes.md
+          {
+            printf '\n---\n\n'
+            gh api "repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="$TAG" -f target_commitish="${{ github.sha }}" \
+              --jq .body || echo "_No changelog available._"
+          } >> notes.md
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          TITLE: ${{ steps.rel.outputs.title }}
+          PRERELEASE: ${{ steps.rel.outputs.prerelease }}
+        run: |
+          set -eux
+          # The snapshot tag is rolling: replace the previous release and tag.
+          if [ "$TAG" = "snapshot" ]; then
+            gh release delete "$TAG" --yes --cleanup-tag || true
+          fi
+          gh release create "$TAG" dist/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "$TITLE" \
+            --notes-file notes.md \
+            $PRERELEASE
 
       - name: Publish packages to Cloudsmith
         if: github.ref_type == 'tag'

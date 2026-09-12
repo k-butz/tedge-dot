@@ -195,9 +195,9 @@ just build                       # writes packages to dist/
 ### 2. Install the package on the device
 
 ```sh
-sudo apt install ./tedge-dot_*_linux_amd64.deb     # deb
-# sudo dnf install ./tedge-dot_*_linux_amd64.rpm   # rpm
-# sudo apk add --allow-untrusted tedge-dot_*.apk   # apk
+sudo apt install ./tedge-dot-rs_*_linux_amd64.deb     # deb
+# sudo dnf install ./tedge-dot-rs_*_linux_amd64.rpm   # rpm
+# sudo apk add --allow-untrusted tedge-dot-rs_*.apk   # apk
 ```
 
 Installing the package:

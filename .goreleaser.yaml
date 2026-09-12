@@ -1,6 +1,12 @@
-# goreleaser configuration for tedge-dot.
+# goreleaser configuration for the Rust implementation of tedge-dot (impl/rust/).
 # Docs: https://goreleaser.com
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+#
+# The C implementation (impl/c/) is packaged by impl/c/packaging/nfpm.yaml instead —
+# goreleaser cross-compiles Rust/Go with zig and has no notion of a C build that also
+# links system shared libraries. Both produce a package containing /usr/bin/tedge-dot:
+# `tedge-dot-rs` here and `tedge-dot-c` there. The two are interchangeable and mutually
+# exclusive; see the `provides`/`conflicts`/`replaces` block below.
 
 version: 2
 
@@ -12,10 +18,14 @@ before:
     # would fail there since the binary already exists at the destination.
     # Local `just build` has no such step, so still install it here if missing.
     - sh -c 'command -v cargo-zigbuild >/dev/null || cargo install --locked cargo-zigbuild'
-    - cargo fetch --locked
+    - cargo fetch --locked --manifest-path impl/rust/Cargo.toml
 
 builds:
   - builder: rust
+    # The cargo workspace lives in impl/rust/ (the C implementation is its sibling).
+    # Only the build runs there: goreleaser itself, and every nfpms `contents.src`
+    # below, stay relative to the repository root where the shared trees live.
+    dir: impl/rust
     flags:
       - --release
       - --package=tedge-dot
@@ -63,8 +73,22 @@ archives:
 
 nfpms:
   - id: linux
+    # The two implementations ship the same /usr/bin/tedge-dot, the same systemd unit
+    # and the same /etc/tedge/plugins/ot/ layout, so they are packaged under distinct
+    # names and only one can be installed at a time. Both Provide the `tedge-dot`
+    # virtual package and Conflict with it, which is what makes them mutually
+    # exclusive: a conflict against a virtual package also conflicts with everything
+    # else providing it. Replacing `tedge-dot` upgrades installs made before the split.
+    package_name: tedge-dot-rs
+    provides:
+      - tedge-dot
+    conflicts:
+      - tedge-dot
+      - tedge-dot-c
+    replaces:
+      - tedge-dot
     maintainer: thin-edge.io <info@thin-edge.io>
-    description: "thin-edge.io OT protocol connectors (Modbus, OPC UA, CAN bus, CANopen)"
+    description: "thin-edge.io OT protocol connectors (Modbus, OPC UA, CAN bus, CANopen) - Rust implementation"
     homepage: "https://github.com/thin-edge/tedge-dot"
     section: "default"
     priority: "extra"
@@ -189,9 +213,8 @@ changelog:
       - "^docs:"
       - "^test:"
 
+# The GitHub release is assembled by .github/workflows/release.yaml, not by goreleaser:
+# it has to carry the C implementation's packages too, and a release can only be created
+# once. goreleaser therefore only builds and packages (the workflow passes --skip=publish).
 release:
-  footer: >-
-
-    ---
-
-    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).
+  disable: true

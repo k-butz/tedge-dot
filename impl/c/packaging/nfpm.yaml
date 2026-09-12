@@ -1,17 +1,19 @@
-# nfpm configuration for the C proof-of-concept build of tedge-dot.
+# nfpm configuration for the C implementation of tedge-dot (impl/c/).
 # Docs: https://nfpm.goreleaser.com
 #
-# Run once per architecture by .github/workflows/release-c.yaml (and by
+# Run once per architecture by .github/workflows/release.yaml (and by
 # `just c-package`) with ARCH and VERSION set in the env. nfpm expands env vars
 # in scalar fields like `arch:` but NOT in `contents[].src`, so the binary for
 # the architecture being packaged is staged into impl/c/dist/staged/ first --
 # a dedicated path rather than impl/c/build/, so a cross-package run can never
 # silently pick up a stale native build. See impl/c/cross/ for the builds.
 #
-# The package is a drop-in replacement for the Rust `tedge-dot` package: same
-# binary path, same systemd unit, same config layout — so it conflicts with it
-# and only one can be installed at a time. It additionally ships the PROFIBUS
-# connector, which the Rust package omits.
+# The package is interchangeable with the Rust one (`tedge-dot-rs`, built by
+# .goreleaser.yaml): same /usr/bin/tedge-dot, same systemd unit, same
+# /etc/tedge/plugins/ot/ layout and the same connector contract — so the two are
+# mutually exclusive and only one can be installed at a time. This one
+# additionally ships the PROFIBUS connector, which the Rust package omits
+# because its serial dependency does not cross-compile (see TODO.md).
 
 name: tedge-dot-c
 arch: ${ARCH}
@@ -22,16 +24,21 @@ section: default
 priority: extra
 maintainer: thin-edge.io <info@thin-edge.io>
 description: |
-  thin-edge.io OT protocol connectors (C proof of concept).
+  thin-edge.io OT protocol connectors - C implementation.
   Modbus, OPC UA, CAN bus, CANopen and PROFIBUS-DP in one small native binary.
 homepage: https://github.com/thin-edge/tedge-dot
 license: Apache-2.0
 
-# Drop-in for the Rust package: same files, so the two cannot coexist.
+# Interchangeable with the Rust package: same files, so the two cannot coexist.
+# Both Provide the `tedge-dot` virtual package and Conflict with it, which makes
+# them mutually exclusive (a conflict against a virtual package also conflicts
+# with everything else providing it); `tedge-dot-rs` is named explicitly too.
+# Replacing `tedge-dot` upgrades installs made before the package split.
 provides:
   - tedge-dot
 conflicts:
   - tedge-dot
+  - tedge-dot-rs
 replaces:
   - tedge-dot
 

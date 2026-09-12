@@ -7,7 +7,9 @@
 # Or directly:
 #   docker build -f Dockerfile.package --target export --output ./out .
 #
-# The produced tedge-dot.deb is written to the --output directory.
+# The produced tedge-dot.deb is written to the --output directory. It holds the
+# `tedge-dot-rs` package (the Rust implementation); the C implementation is packaged
+# separately by impl/c/packaging/nfpm.yaml, see `just c-package`.
 
 ARG PKG_ARCH=amd64
 

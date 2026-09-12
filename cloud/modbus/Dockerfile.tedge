@@ -47,14 +47,15 @@ COPY dist/*.deb /opt/debs/
 RUN arch=$(dpkg --print-architecture) \
     && apt-get update \
     && apt-get install -y --no-install-recommends --allow-downgrades \
-        /opt/debs/tedge-dot_*_linux_${arch}.deb \
+        /opt/debs/tedge-dot-rs_*_linux_${arch}.deb \
     && rm -rf /opt/debs \
     && rm -rf /var/lib/apt/lists/*
 
 # --- connector install, C: the same layout the C package would produce ---------------------
-# impl/c/packaging/nfpm.yaml declares the C package a drop-in replacement for the Rust one
-# (same binary path, same unit, same config directory), so this stage reproduces that layout
-# by hand rather than building a package inside the image.
+# impl/c/packaging/nfpm.yaml makes the C package (tedge-dot-c) interchangeable with the Rust
+# one (tedge-dot-rs): same binary path, same unit, same config directory. This stage
+# reproduces that layout by hand rather than building a package inside the image, which is
+# also what lets the Robot guard below tell the two apart by whether a package is installed.
 FROM ${DEMO_IMAGE} AS connector-c
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libmodbus5 libmosquitto1 libcjson1 \
