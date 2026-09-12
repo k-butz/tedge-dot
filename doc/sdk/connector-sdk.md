@@ -12,6 +12,13 @@ new protocol is **only** a `Connector` trait implementation plus a config schema
 provides everything else (MQTT, scheduling, command routing, health, hot-reload,
 serialization, and conformance hooks).
 
+> The [C implementation](../../impl/c/README.md) mirrors this SDK with a vtable of function
+> pointers (`tdot_connector_t` in
+> [impl/c/sdk/include/tedge_dot/connector.h](../../impl/c/sdk/include/tedge_dot/connector.h)).
+> The mapping is one-to-one except for `subscribe`, which the C runtime splits into
+> `subscribe_device()` + `drain_subscriptions()` because it has no async runtime to select a
+> stream on — see the parity table in the C README.
+
 ---
 
 ## 1. Crate layout

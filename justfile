@@ -250,7 +250,9 @@ e2e-down proto impl="rust":
     export IMPL={{impl}}
     docker compose -p tedge-dot-{{proto}}-manual -f connectors/{{proto}}/docker-compose.yaml down -v
 
-# Cross-compile + build all packages
+# Cross-compile + package the RUST implementation (the `tedge-dot-rs` package).
+# The C implementation is packaged separately, by `just c-cross-all` + `just c-package`
+# (different toolchain entirely); release.yaml runs both and publishes one release.
 build:
     goreleaser release --snapshot --clean
 

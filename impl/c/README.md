@@ -105,8 +105,10 @@ restart loop.
 The C build is held to the same coverage as the Rust one:
 
 - **unit tests** — `just c-test` (`ctest --test-dir impl/c/build`): the golden decode vectors
-  shared with the Rust SDK, and the device-parameter/`describe` checks, which assert the same
-  facts over the same fixture config as `crates/sdk/src/descriptor.rs`;
+  shared with the Rust SDK; the device-parameter/`describe` checks, which assert the same facts
+  over the same fixture config as `impl/rust/crates/sdk/src/descriptor.rs`; and the
+  config-loader rules the runtime depends on (the liveness bounds and the per-point sampling
+  hint, `tests/config.c`);
 - **describe parity** — [`ci/describe-parity.sh`](ci/describe-parity.sh) (`just
   c-describe-parity`) renders the Cumulocity DTM definitions of every connector config in the
   repo with both binaries and compares them parsed, so the tenant-side declaration cannot drift
@@ -129,10 +131,8 @@ The C build is held to the same coverage as the Rust one:
   identical claims to the Rust ones); CI runs it in the `c` job. Both
   connectors are fully conformant, hot reload through the management verbs included.
 
-Liveness: the C runtime has no equivalent of the Rust SDK's `operation_timeout` /
-`stall_timeout`. It relies on the response timeouts of libmodbus and open62541, which is enough
-for conformance check B5's silent peer (verified for both protocols), but a call that hangs
-*inside* a library would still wedge the C loop. Those two config keys are accepted and ignored.
+Liveness is covered by `operation_timeout` and `stall_timeout` — see
+[Liveness](#liveness) above for how they differ from the Rust runtime's.
 
 Debugging: `TDOT_OPCUA_DEBUG=1` keeps open62541's client handshake log on stdout.
 

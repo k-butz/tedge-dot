@@ -46,6 +46,26 @@ int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
 int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
                              const tdot_run_opts_t *opts);
 
+/* ---- stall watchdog, internals exposed for tests --------------------------
+ *
+ * The watchdog thread itself cannot be driven from a test without a protocol
+ * library that ignores its own timeout, so its two decisions are factored out
+ * here and tested directly (impl/c/tests/config.c). What remains uncovered is
+ * the thread plumbing and the _exit() call.
+ */
+
+/* Seconds a connector's loop has been stuck, or -1 when it has NOT stalled --
+ * which includes a disabled slot (limit_s <= 0) and one that has not started
+ * ticking yet (beat_ms == 0). Both must stay silent: a disabled watchdog must
+ * never fire, and a loop that has not begun has not stalled. */
+double tdot_runtime_stall_idle(long long beat_ms, long long now_ms,
+                               double limit_s);
+
+/* How often the watchdog should check, given every slot's limit: a quarter of
+ * the tightest enabled limit, clamped to [0.5s, 10s]. Returns 0 when no slot
+ * is enabled, i.e. no watchdog is needed. */
+double tdot_runtime_watchdog_period(const double *limits, size_t n);
+
 #ifdef __cplusplus
 }
 #endif

@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "tedge_dot/config.h"
+#include "tedge_dot/runtime.h"
 
 static int failures = 0;
 
@@ -188,6 +189,48 @@ static void check_subscribe_defaults_on(void) {
     tdot_config_free(cfg);
 }
 
+static void check_stall_decision(void) {
+    /* Not stalled yet: idle is below the limit. */
+    CHECK(tdot_runtime_stall_idle(1000, 3000, 5.0) < 0,
+          "2s idle under a 5s limit must not fire");
+    /* Stalled: idle has reached the limit, and the idle time is reported so the
+     * log line can say how long. */
+    CHECK(tdot_runtime_stall_idle(1000, 8000, 5.0) == 7.0,
+          "7s idle under a 5s limit must fire and report 7s, got %.1f",
+          tdot_runtime_stall_idle(1000, 8000, 5.0));
+    /* Exactly at the limit counts as stalled. */
+    CHECK(tdot_runtime_stall_idle(1000, 6000, 5.0) == 5.0,
+          "idle exactly at the limit must fire");
+    /* A disabled watchdog must never fire, however long the loop is idle. */
+    CHECK(tdot_runtime_stall_idle(1000, 900000, 0.0) < 0,
+          "limit 0 disables the watchdog and must never fire");
+    /* A loop that has not started ticking has not stalled -- otherwise every
+     * connector would be killed moments after launch. */
+    CHECK(tdot_runtime_stall_idle(0, 900000, 5.0) < 0,
+          "a loop that has not started ticking must not fire");
+}
+
+static void check_watchdog_period(void) {
+    double none[] = {0.0, 0.0};
+    CHECK(tdot_runtime_watchdog_period(none, 2) == 0.0,
+          "no armed slot needs no watchdog");
+    /* A quarter of the TIGHTEST enabled limit, ignoring disabled slots. */
+    double mixed[] = {120.0, 0.0, 20.0};
+    CHECK(tdot_runtime_watchdog_period(mixed, 3) == 5.0,
+          "period should be a quarter of the tightest limit (20s -> 5s), got %.2f",
+          tdot_runtime_watchdog_period(mixed, 3));
+    /* Clamped so a tight limit cannot spin the CPU... */
+    double tight[] = {1.0};
+    CHECK(tdot_runtime_watchdog_period(tight, 1) == 0.5,
+          "period must be clamped to a 0.5s floor, got %.2f",
+          tdot_runtime_watchdog_period(tight, 1));
+    /* ...and a huge one still checks regularly. */
+    double loose[] = {3600.0};
+    CHECK(tdot_runtime_watchdog_period(loose, 1) == 10.0,
+          "period must be clamped to a 10s ceiling, got %.2f",
+          tdot_runtime_watchdog_period(loose, 1));
+}
+
 int main(void) {
     check_timeout_defaults();
     check_timeouts_are_parsed();
@@ -196,6 +239,8 @@ int main(void) {
     check_invalid_timeouts_fall_back();
     check_point_interval_resolution();
     check_subscribe_defaults_on();
+    check_stall_decision();
+    check_watchdog_period();
 
     if (failures) {
         printf("%d check(s) failed\n", failures);

@@ -915,6 +915,14 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
         }
     }
 
+    /* Arm the watchdog before the first protocol call, not at the top of the
+     * loop: the initial connect is itself a protocol call that can wedge (a
+     * route that blackholes SYN blocks for the OS TCP timeout, far longer than
+     * any response timeout), and a heartbeat left at 0 reads as "not running
+     * yet" and would never fire. */
+    if (rt.progress)
+        atomic_store(&rt.progress->beat_ms, (long long)(tdot_mono() * 1000.0));
+
     /* Initial connect for all devices. */
     for (size_t i = 0; i < cfg->ndevices; i++)
         connect_device(&rt, &cfg->devices[i]);
@@ -1032,37 +1040,64 @@ typedef struct {
  * status` can tell a wedged connector from a config error (which exits 1). */
 #define TDOT_EXIT_STALLED 70
 
-static void *watchdog_main(void *arg) {
-    watchdog_t *wd = arg;
+double tdot_runtime_stall_idle(long long beat_ms, long long now_ms,
+                               double limit_s) {
+    if (limit_s <= 0)
+        return -1.0; /* watchdog disabled for this connector */
+    if (beat_ms == 0)
+        return -1.0; /* loop has not started ticking yet */
+    double idle_s = (double)(now_ms - beat_ms) / 1000.0;
+    return idle_s >= limit_s ? idle_s : -1.0;
+}
 
+double tdot_runtime_watchdog_period(const double *limits, size_t n) {
     /* Check often enough to react within a quarter of the tightest limit, but
      * never busier than twice a second nor lazier than every 10s -- the same
      * shape as the Rust watchdog's period. */
     double tightest = 0;
-    for (size_t i = 0; i < wd->n; i++)
-        if (wd->slots[i].limit_s > 0 &&
-            (tightest == 0 || wd->slots[i].limit_s < tightest))
-            tightest = wd->slots[i].limit_s;
+    for (size_t i = 0; i < n; i++)
+        if (limits[i] > 0 && (tightest == 0 || limits[i] < tightest))
+            tightest = limits[i];
+    if (tightest == 0)
+        return 0;
     double period = tightest / 4;
     if (period < 0.5)
         period = 0.5;
     if (period > 10.0)
         period = 10.0;
+    return period;
+}
+
+static void *watchdog_main(void *arg) {
+    watchdog_t *wd = arg;
+
+    double *limits = calloc(wd->n, sizeof *limits);
+    for (size_t i = 0; i < wd->n; i++)
+        limits[i] = wd->slots[i].limit_s;
+    double period = tdot_runtime_watchdog_period(limits, wd->n);
+    free(limits);
+    if (period <= 0)
+        return NULL; /* nothing armed; start_watchdog should have caught this */
 
     while (!g_stop) {
-        struct timespec ts = {.tv_sec = (time_t)period,
-                              .tv_nsec = (long)((period - (long)period) * 1e9)};
-        nanosleep(&ts, NULL);
+        /* Sleep in short slices rather than one long nap: the check only needs
+         * to happen every `period`, but shutdown must not wait for it. A single
+         * nanosleep(period) would hold the process open for up to 10s after the
+         * workers have finished. */
+        double slept = 0;
+        while (slept < period && !g_stop) {
+            struct timespec ts = {.tv_sec = 0, .tv_nsec = TICK_MS * 1000000L};
+            nanosleep(&ts, NULL);
+            slept += TICK_MS / 1000.0;
+        }
+        if (g_stop)
+            break;
         long long now_ms = (long long)(tdot_mono() * 1000.0);
         for (size_t i = 0; i < wd->n; i++) {
             progress_t *p = &wd->slots[i];
-            if (p->limit_s <= 0)
-                continue;
-            long long beat = atomic_load(&p->beat_ms);
-            if (beat == 0)
-                continue; /* loop has not started ticking yet */
-            double idle_s = (double)(now_ms - beat) / 1000.0;
-            if (idle_s < p->limit_s)
+            double idle_s = tdot_runtime_stall_idle(atomic_load(&p->beat_ms),
+                                                    now_ms, p->limit_s);
+            if (idle_s < 0)
                 continue;
             logmsg("error",
                    "%s: no progress for %.0fs (connector.stall_timeout %.0fs): "
