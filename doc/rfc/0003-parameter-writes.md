@@ -177,7 +177,7 @@ MQTT, and it has no notion of point state; on child devices it cannot run at all
 | --- | --- | --- |
 | SDK | parameter/set derivation from the config + DTM rendering | `crates/sdk/src/descriptor.rs` |
 | SDK runtime | `access` in samples, `write-batch` | `crates/sdk/src/runtime.rs` |
-| CLI | `tedge-dot describe [--set] [--device] [--compact]` | `src/main.rs` |
+| CLI | `tedge-dot describe [--set] [--device] [--compact]` | `src/main.rs`, `poc-c/src/main.c` |
 | Flows | `ot-parameter-state` (new); `ot-command-forward` reshapes `parameter_update`, `ot-command-result` honours `origin.command`; `ot-registration` advertises `parameter_update` | `flows/` |
 | c8y glue | none — the tedge-parameter-plugin's template (installed by the cloud e2e image) | |
 | Tests | offline flow checks incl. the chain through shared mapper state (`just test-flows`); e2e: `access` in samples, batch semantics, and the flows-driven parameter round-trip on a cloud-free flows runner (`just test-e2e modbus|opcua`); cloud: DTM registration → fragment → operation → measurement (`cloud/modbus/tests/parameters_c8y.robot`) | |
@@ -187,9 +187,13 @@ parameter flows in favour of the `access` sample field and the existing command 
 
 The C proof of concept ([poc-c/](../../poc-c/)) implements the same runtime pieces
 (`access` in samples, `write-batch` with the `executing` transition, and the management verbs
-with persist + live reload), so the flows and the Cumulocity glue work unchanged with either
-binary. The C build runs the same Robot e2e suites (`just test-e2e-c`) and the same conformance
-suite (`just conformance-c`) as the Rust build.
+with persist + live reload) and the same parameter derivation and DTM rendering
+(`poc-c/sdk/src/descriptor.c`, `tedge-dot describe`), so the flows, the Cumulocity glue and the
+tenant admin's registration step work unchanged with either binary. The C build runs the same
+Robot e2e suites (`just test-e2e-c`) and the same conformance suite (`just conformance-c`) as
+the Rust build; `just c-describe-parity` additionally asserts that both binaries render the
+same definitions (compared parsed, since key order differs) for every connector config in the
+repo.
 
 The e2e stacks gained a `flows` service: thin-edge from the `main` channel running this repo's
 flows as a user-defined mapper (`tedge-mapper ot`) against the stack's broker, so the full

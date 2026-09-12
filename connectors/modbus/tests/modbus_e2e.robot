@@ -165,6 +165,22 @@ Write Batch Rejects An Empty Request
     ${reason}=    Get Json Field    ${result}    reason
     Should Contain    ${reason}    no writes
 
+Describe Renders The Parameter Set Definition
+    [Documentation]    `tedge-dot describe` renders this config's writable points as the
+    ...                Cumulocity DTM property definition a tenant admin registers once, with
+    ...                the same keys the parameter twin fragment carries. Runs against whichever
+    ...                implementation the stack was built with (IMPL=rust|c).
+    ${output}=    DeviceLibrary.Execute Command
+    ...    cmd=tedge-dot describe -c /etc/connector.toml --compact    strip=${True}
+    ${definition}=    Evaluate    json.loads($output.splitlines()[0])    modules=json
+    Should Be Equal    ${definition}[identifier]    ${PROTOCOL}_parameters
+    ${properties}=    Set Variable    ${definition}[jsonSchema][properties]
+    Dictionary Should Contain Key    ${properties}    temp_u16
+    Dictionary Should Contain Key    ${properties}    coil_rw
+    Dictionary Should Not Contain Key    ${properties}    level_f32
+    Should Be Equal    ${properties}[coil_rw][type]    boolean
+    Should Be Equal    ${definition}[contexts]    ${{['asset', 'event', 'operation']}}
+
 Flows Register The Device And Advertise The Parameter Capability
     [Documentation]    (flows) ot-registration turns the link status into a child-device
     ...                registration and advertises parameter_update so a cloud mapper routes

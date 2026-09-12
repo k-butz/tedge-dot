@@ -239,6 +239,20 @@ cleanup PATTERN="TST_*" $CI="true":
 # (poc-c/cross/), so one host builds every architecture and the binaries carry
 # a glibc floor we choose (2.17 by default) rather than the build host's.
 
+# Build the C PoC natively and run its unit tests: the golden decode vectors shared with
+# the Rust SDK, plus the device-parameter/`describe` checks.
+# Usage: just c-test [extra ctest flags]
+c-test *args="":
+    cmake -B poc-c/build -S poc-c
+    cmake --build poc-c/build
+    ctest --test-dir poc-c/build --output-on-failure {{args}}
+
+# Check that `tedge-dot describe` renders identical Cumulocity DTM definitions in the Rust
+# and C builds. With no argument every connector config in the repo is compared.
+# Usage: just c-describe-parity [config.toml ...]
+c-describe-parity *configs="":
+    ./poc-c/ci/describe-parity.sh {{configs}}
+
 # Debian architectures the C PoC is built and packaged for.
 C_ARCHS := "amd64 arm64 armhf"
 C_GLIBC_MIN := "2.17"
