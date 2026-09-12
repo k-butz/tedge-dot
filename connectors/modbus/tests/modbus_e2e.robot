@@ -1,5 +1,5 @@
 *** Settings ***
-Documentation       End-to-end tests for the Rust tedge-dot against a real Modbus
+Documentation       End-to-end tests for tedge-dot against a real Modbus
 ...                 simulator (pymodbus). The connector reads the simulator and publishes raw
 ...                 samples + status to a local MQTT broker; these tests assert on that output.
 ...                 No cloud (Cumulocity) is involved.

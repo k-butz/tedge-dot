@@ -40,8 +40,15 @@ typedef struct tdot_point {
     tdot_transform_t transform;
     bool has_transform;
     char *meta_json; /* free-form [device.point.meta], serialized to JSON */
-    bool subscribe;  /* default true (push delivery hint; PoC polls only) */
+    bool subscribe;  /* default true: deliver by push when the module supports it */
     double poll_interval_s; /* resolved: point ?? device ?? connector */
+    /* The point's OWN poll_interval, or -1 when it did not set one. Mirrors the
+     * Rust PointRef::interval (an Option): a subscribe-capable module uses it
+     * as the per-point sampling-interval hint -- an OPC UA monitored item's
+     * samplingInterval, say -- and falls back to its own default when unset.
+     * Distinct from poll_interval_s, which is always resolved through the
+     * device and connector defaults and drives the polling schedule. */
+    double own_poll_interval_s;
     toml_table_t *address;  /* protocol-specific, borrowed from the doc */
 
     /* Filled by the connector during configure(): */
@@ -51,6 +58,11 @@ typedef struct tdot_point {
     /* Runtime state: */
     uint64_t seq;
     double next_due; /* monotonic seconds */
+    /* Set by the runtime when the module accepted this point for push delivery
+     * (contract §4.2). A subscribed point is off the polling schedule; it is
+     * cleared whenever the device link drops, so the point falls back to
+     * polling until the subscription is re-established on reconnect. */
+    bool subscribed;
 } tdot_point_t;
 
 typedef enum {
@@ -81,6 +93,24 @@ typedef struct tdot_config {
     char *service_name; /* default "tedge-dot" */
     char *log_level;    /* default "info" */
     double poll_interval_s; /* default 2.0 */
+
+    /* Liveness bounds (contract §8.1), mirroring the Rust runtime's
+     * [connector] operation_timeout / stall_timeout.
+     *
+     * operation_timeout is the upper bound on ONE protocol-module call. The C
+     * runtime cannot cancel a call in flight (a blocking libmodbus/open62541
+     * call owns the thread), so instead of wrapping the call it pushes this
+     * value down into the protocol library's own response timeout during
+     * configure() — which is what actually makes a hung peer return.
+     *
+     * stall_timeout arms a watchdog over the poll loop's progress heartbeat:
+     * if a loop stops making progress for this long, a protocol call is stuck
+     * somewhere the response timeout does not cover and the process exits so
+     * the service manager restarts it (see tdot_runtime_run_configs).
+     * 0 disables the watchdog. Raised to 2x operation_timeout when set lower,
+     * so one slow-but-legitimate call cannot cause a restart loop. */
+    double operation_timeout_s; /* default 30.0 */
+    double stall_timeout_s;     /* default 120.0; 0 disables */
 
     char *mqtt_host; /* default "127.0.0.1" */
     int mqtt_port;   /* default 1883 */

@@ -1,4 +1,4 @@
-/* tedge-dot C PoC — Modbus connector on libmodbus (LGPL-2.1+, dynamically
+/* tedge-dot — Modbus connector on libmodbus (LGPL-2.1+, dynamically
  * linked). Mirrors impl/rust/crates/connector-modbus: TCP + RTU transports, the four
  * tables (coil / discrete_input / holding / input), multi-register typed
  * decode, single-point writes, quality propagation on Modbus exceptions.
@@ -47,10 +47,14 @@ typedef struct {
     int baudrate; /* [connection.serial] defaults */
     char parity;
     int databits, stopbits;
+    /* connector.operation_timeout, pushed into libmodbus's response timeout.
+     * This runtime cannot cancel a call in flight, so bounding the library is
+     * what actually makes a silent peer return (contract §8.1). */
+    double operation_timeout_s;
 } mb_state_t;
 
 static const char CAPABILITIES[] =
-    "{\"protocol\":\"modbus\",\"version\":\"0.1.0-poc\","
+    "{\"protocol\":\"modbus\",\"version\":\"" TDOT_VERSION "\","
     "\"modes\":[\"raw\",\"typed\"],"
     "\"datatypes\":[\"bool\",\"int16\",\"uint16\","
     "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\"],"
@@ -77,6 +81,7 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
                      size_t errlen) {
     mb_state_t *st = self->state;
 
+    st->operation_timeout_s = cfg->operation_timeout_s;
     st->baudrate = 9600;
     st->parity = 'N';
     st->databits = 8;
@@ -245,7 +250,14 @@ static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
         return -1;
     }
     modbus_set_slave(mb->ctx, mb->unit_id);
-    modbus_set_response_timeout(mb->ctx, 2, 0);
+    {
+        /* One read/write is one request, so the per-call bound IS the response
+         * timeout here. */
+        mb_state_t *st = self->state;
+        double t = st->operation_timeout_s;
+        modbus_set_response_timeout(mb->ctx, (uint32_t)t,
+                                    (uint32_t)((t - (uint32_t)t) * 1e6));
+    }
     if (modbus_connect(mb->ctx) != 0) {
         snprintf(err, errlen, "connect %s: %s",
                  mb->tcp ? mb->host : mb->serial, modbus_strerror(errno));

@@ -1,4 +1,4 @@
-/* tedge-dot C PoC — minimal Vector DBC parser (BO_ / SG_ lines only). */
+/* tedge-dot — minimal Vector DBC parser (BO_ / SG_ lines only). */
 #include "dbc.h"
 
 #include <errno.h>

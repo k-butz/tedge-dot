@@ -1,9 +1,9 @@
-/* tedge-dot C PoC — PROFIBUS-DP connector (minimal single-master DP-V0
+/* tedge-dot — PROFIBUS-DP connector (minimal single-master DP-V0
  * class-1 master). Mirrors impl/rust/crates/connector-profibus, replacing the profirust
  * stack with a hand-rolled FDL/DP subset that speaks to DP-V0 slaves over a
  * serial-over-TCP byte stream ("tcp://host:port" — RS-485 device servers or
  * the containerised slave simulator). No FDL token timing is implemented; the
- * PoC drives one master, one bus, request/response only.
+ * This module drives one master, one bus, request/response only.
  *
  * Init sequence per peripheral: Slave_Diag (SAP 60) -> Set_Prm (SAP 61) ->
  * Chk_Cfg (SAP 62) -> Slave_Diag -> cyclic Data_Exchange (default SAP).
@@ -113,7 +113,7 @@ typedef struct {
 } pb_state_t;
 
 static const char CAPABILITIES[] =
-    "{\"protocol\":\"profibus\",\"version\":\"0.1.0-poc\","
+    "{\"protocol\":\"profibus\",\"version\":\"" TDOT_VERSION "\","
     "\"modes\":[\"typed\"],"
     "\"datatypes\":[\"bool\",\"int8\",\"uint8\",\"int16\",\"uint16\","
     "\"int32\",\"uint32\",\"float32\"],"
@@ -609,9 +609,12 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
         snprintf(err, errlen, "[connection].port is required");
         return -1;
     }
-    /* PoC transport: TCP byte stream only (no serial / pty phys). */
+    /* Transport: TCP byte stream only (no serial / pty phys) -- the Rust
+     * module additionally supports a serial PHY; see the parity table in
+     * impl/c/README.md (capability `profibus-serial`). */
     if (strncmp(d.u.s, "tcp://", 6) != 0) {
-        snprintf(err, errlen, "PoC supports tcp:// transport only");
+        snprintf(err, errlen,
+                 "the C build supports tcp:// transport only");
         free(d.u.s);
         return -1;
     }
@@ -638,7 +641,7 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
         st->master_address = (uint8_t)d.u.i;
 
     if (cfg->ndevices > PB_MAX_DEV) {
-        snprintf(err, errlen, "PoC supports at most %d devices", PB_MAX_DEV);
+        snprintf(err, errlen, "at most %d devices are supported", PB_MAX_DEV);
         return -1;
     }
 

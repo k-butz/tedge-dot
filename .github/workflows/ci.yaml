@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   test:
-    name: Build & unit/property tests
+    name: Rust build & unit/property tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,12 +22,17 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: impl/rust
+      # The cargo workspace lives in impl/rust/; go through `just` so CI and a local run
+      # use exactly the same --manifest-path.
+      - uses: extractions/setup-just@v2
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --manifest-path impl/rust/Cargo.toml --workspace
       - name: Unit + integration + property tests
-        run: cargo test --workspace
+        run: just test
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: just lint
 
   flows:
     name: Flow tests (tedge flows test)
@@ -57,8 +62,8 @@ jobs:
             cargo +nightly fuzz run "$t" -- -max_total_time=30
           done
 
-  c-poc:
-    name: C PoC (${{ matrix.protocol }})
+  c:
+    name: C build & conformance (${{ matrix.protocol }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -102,9 +107,11 @@ jobs:
         if: matrix.protocol == 'modbus' || matrix.protocol == 'opcua'
       - uses: Swatinem/rust-cache@v2
         if: matrix.protocol == 'modbus' || matrix.protocol == 'opcua'
+        with:
+          workspaces: impl/rust
       - name: Conformance suite against the C build
         if: matrix.protocol == 'modbus' || matrix.protocol == 'opcua'
-        run: cargo run -p ot-conformance -- check --spec connectors/${{ matrix.protocol }}/conformance-c.toml
+        run: just conformance-c ${{ matrix.protocol }}
       # `tedge-dot describe` must render the same Cumulocity DTM definitions in both builds;
       # runs once (it covers every config in the repo) where the Rust toolchain is set up.
       - name: Describe parity (Rust vs C)
@@ -127,6 +134,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: impl/rust
       - uses: extractions/setup-just@v2
       - name: Run conformance suite
         run: just conformance ${{ matrix.protocol }}

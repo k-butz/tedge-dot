@@ -17,7 +17,7 @@ log_level     = "info"
 host = "127.0.0.1"
 port = 1883
 
-# Shared bus parameters. The PoC connector speaks serial-over-TCP only
+# Shared bus parameters. The C connector speaks serial-over-TCP only
 # (port = "tcp://host:port"); point it at a serial-to-TCP device server or the
 # demo simulator.
 [connection]

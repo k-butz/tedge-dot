@@ -1,10 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
-project(tedge-dot-poc C)
+# Keep VERSION in step with impl/rust/Cargo.toml: both implementations publish the same
+# `version` in their capability descriptor, and the conformance suite compares the two.
+project(tedge-dot VERSION 0.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE MinSizeRel) # PoC goal: small binaries
+  set(CMAKE_BUILD_TYPE MinSizeRel) # the point of this build: small binaries
 endif()
 
 # Protocol feature flags (mirror the Rust cargo features). The SocketCAN
@@ -40,6 +42,8 @@ add_library(tedge_dot_sdk STATIC
   sdk/src/factory.c
 )
 target_include_directories(tedge_dot_sdk PUBLIC sdk/include)
+# The version every module reports in its capability descriptor (contract §7).
+target_compile_definitions(tedge_dot_sdk PUBLIC TDOT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(tedge_dot_sdk PUBLIC tomlc99 PkgConfig::CJSON
                       PkgConfig::MOSQUITTO m Threads::Threads)
 
@@ -130,6 +134,12 @@ add_test(NAME golden-vectors
 add_executable(tedge-dot-describe tests/describe.c)
 target_link_libraries(tedge-dot-describe PRIVATE tedge_dot_sdk)
 add_test(NAME describe COMMAND tedge-dot-describe)
+
+# Config-loader semantics the runtime relies on: the liveness bounds (§8.1) and the
+# per-point sampling hint that keeps push delivery off the polling schedule.
+add_executable(tedge-dot-config tests/config.c)
+target_link_libraries(tedge-dot-config PRIVATE tedge_dot_sdk)
+add_test(NAME config COMMAND tedge-dot-config)
 
 # Strip in release-style builds for a honest size comparison
 if(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel" AND NOT APPLE)

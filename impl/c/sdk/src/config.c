@@ -206,9 +206,11 @@ static int parse_point(toml_table_t *pt, tdot_point_t *point,
         point->subscribe = d.u.b;
 
     point->poll_interval_s = device_interval;
+    point->own_poll_interval_s = -1.0;
     d = toml_string_in(pt, "poll_interval");
     if (d.ok) {
         point->poll_interval_s = tdot_duration_parse(d.u.s);
+        point->own_poll_interval_s = point->poll_interval_s;
         if (point->poll_interval_s < 0) {
             snprintf(err, errlen, "point %s: invalid poll_interval '%s'",
                      point->id, d.u.s);
@@ -279,6 +281,49 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
             goto fail;
         }
         free(d.u.s);
+    }
+
+    /* Liveness bounds (contract §8.1). Both are optional; an unparseable value
+     * falls back to the default with a warning rather than failing the load,
+     * matching the Rust runtime. */
+    cfg->operation_timeout_s = 30.0;
+    d = toml_string_in(conn, "operation_timeout");
+    if (d.ok) {
+        double v = tdot_duration_parse(d.u.s);
+        if (v < 0 || v == 0) {
+            fprintf(stderr,
+                    "warn  invalid connector.operation_timeout '%s'; using 30s\n",
+                    d.u.s);
+        } else {
+            cfg->operation_timeout_s = v;
+        }
+        free(d.u.s);
+    }
+
+    cfg->stall_timeout_s = 120.0;
+    d = toml_string_in(conn, "stall_timeout");
+    if (d.ok) {
+        double v = tdot_duration_parse(d.u.s);
+        if (v < 0) {
+            fprintf(stderr,
+                    "warn  invalid connector.stall_timeout '%s'; using 120s\n",
+                    d.u.s);
+        } else {
+            cfg->stall_timeout_s = v;
+        }
+        free(d.u.s);
+    }
+    if (cfg->stall_timeout_s > 0) {
+        /* Must outlast a single legitimate slow call, or a large batch on a
+         * slow serial line would look like a hang and restart in a loop. */
+        double floor_s = cfg->operation_timeout_s * 2;
+        if (cfg->stall_timeout_s < floor_s) {
+            fprintf(stderr,
+                    "warn  connector.stall_timeout (%.0fs) is not longer than "
+                    "operation_timeout (%.0fs); using %.0fs\n",
+                    cfg->stall_timeout_s, cfg->operation_timeout_s, floor_s);
+            cfg->stall_timeout_s = floor_s;
+        }
     }
 
     toml_table_t *mqtt = toml_table_in(root, "mqtt");

@@ -12,6 +12,28 @@ Documentation       Stack lifecycle for the connector e2e suites: DeviceLibrary 
 ...                 isolated; the containers of each test are reclaimed when the suite ends):
 ...                 | Test Setup        Setup OT Stack    modbus
 ...                 | Test Teardown     Teardown OT Stack
+...
+...                 IMPLEMENTATION PARITY
+...
+...                 The same suites run against both implementations (IMPL=rust|c, see
+...                 `just test-e2e` / `just test-e2e-c` and the robot.toml profiles). That is
+...                 how parity is proven, so a test belongs to BOTH unless the feature it
+...                 covers genuinely cannot exist in one of them.
+...
+...                 When that happens, tag the test with the capability it needs:
+...                 | [Tags]    requires:subscribe
+...
+...                 The runner turns the capabilities an implementation lacks into
+...                 `robot --skip requires:<capability>`, so the test is reported as SKIPPED
+...                 for that implementation instead of failing or being silently dropped. The
+...                 list of what each implementation lacks lives in ONE place — the
+...                 C_MISSING_CAPABILITIES variable in the justfile — and is mirrored by the
+...                 parity table in impl/c/README.md.
+...
+...                 Two rules for such a test: it must FAIL (not pass) on an implementation
+...                 lacking the capability if the tag were removed — otherwise it is not really
+...                 testing the feature — and the capability must be a genuine limitation, not
+...                 a shortcut around a bug.
 
 Library             DeviceLibrary
 Library             MqttClient.py

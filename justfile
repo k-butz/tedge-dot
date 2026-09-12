@@ -15,6 +15,18 @@ VERSION := `awk -F '"' '/^version = /{print $2; exit}' impl/rust/Cargo.toml`
 # Points cargo at the Rust workspace without leaving the repository root.
 MANIFEST := "--manifest-path impl/rust/Cargo.toml"
 
+# --- implementation capabilities ------------------------------------------------------------
+#
+# The Rust and C implementations run the SAME system tests, which is how parity is proven.
+# Where one of them genuinely cannot support a feature, the test that covers it is tagged
+# `requires:<capability>` and is SKIPPED for that implementation -- reported as a skip, with a
+# reason, rather than quietly dropped or (worse) passing for the wrong reason.
+#
+# This list is the single source of truth for what the C build still lacks. Keep it in sync
+# with the parity table in impl/c/README.md. Adding a capability here is a deliberate act:
+# prefer implementing the feature.
+C_MISSING_CAPABILITIES := "opcua-security canbus-fd profibus-serial"
+
 # Create/refresh the single Python virtualenv used by every system test (and by the editor,
 # see .vscode/settings.json).
 venv:
@@ -151,6 +163,18 @@ test-e2e proto *args="":
 test-e2e-c proto *args="":
     just _e2e {{proto}} c "{{args}}"
 
+# Capabilities the named implementation does NOT provide, one per line, so the suite runners
+# can turn them into `robot --skip requires:<capability>` arguments. An unknown implementation
+# is an error rather than an empty list: a typo must not silently run every test.
+_missing-capabilities impl:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{impl}}" in
+        rust) : ;;
+        c)    for cap in {{C_MISSING_CAPABILITIES}}; do echo "$cap"; done ;;
+        *)    echo "unknown implementation '{{impl}}' (expected rust or c)" >&2; exit 1 ;;
+    esac
+
 # Shared body of test-e2e / test-e2e-c. `impl` is "rust" (the stack's own Dockerfile.connector)
 # or "c" (connectors/_shared/Dockerfile.connector-c, selected via CONNECTOR_DOCKERFILE).
 _e2e proto impl args:
@@ -162,10 +186,16 @@ _e2e proto impl args:
         outdir=connectors/{{proto}}/output-c
         export CONNECTOR_DOCKERFILE=connectors/_shared/Dockerfile.connector-c
     fi
+    # Tests covering a capability this implementation lacks are skipped, not dropped: they
+    # show up in the report as skips so the parity gap stays visible.
+    skips=()
+    while read -r cap; do
+        [ -n "$cap" ] && skips+=(--skip "requires:$cap")
+    done < <(just _missing-capabilities {{impl}})
     just venv
     just _pull-stack-images connectors/{{proto}}/docker-compose.yaml
     ./.venv/bin/python -m robot \
-        --outputdir "$outdir" --variable IMPL:{{impl}} {{args}} \
+        --outputdir "$outdir" --variable IMPL:{{impl}} "${skips[@]+"${skips[@]}"}" {{args}} \
         connectors/{{proto}}/tests/
 
 # Pull the stack's registry images once, with backoff, before any suite starts.
@@ -257,9 +287,14 @@ _cloud proto impl args:
     outdir=cloud/{{proto}}/output
     export IMPL={{impl}}
     if [ "{{impl}}" != "rust" ]; then outdir=cloud/{{proto}}/output-{{impl}}; fi
+    # Same capability skipping as the connector suites (see _missing-capabilities).
+    skips=()
+    while read -r cap; do
+        [ -n "$cap" ] && skips+=(--skip "requires:$cap")
+    done < <(just _missing-capabilities {{impl}})
     just venv
     ./.venv/bin/python -m robot \
-        --outputdir "$outdir" --variable IMPL:{{impl}} {{args}} \
+        --outputdir "$outdir" --variable IMPL:{{impl}} "${skips[@]+"${skips[@]}"}" {{args}} \
         cloud/{{proto}}/tests/
 
 # Bring a cloud stack up manually for inspection (fixed project name, DEVICE_ID from the env),
@@ -293,13 +328,13 @@ cleanup PATTERN="TST_*" $CI="true":
     c8y users list -n --tenant "$tenant" --filter "userName like device_{{PATTERN}}" --pageSize 2000 \
         | c8y users delete --tenant "$tenant" --silentStatusCodes 404 || true
 
-# --- C proof of concept (impl/c/) ---------------------------------------------
+# --- C implementation (impl/c/) -----------------------------------------------
 #
 # The C build is cross-compiled with zig inside a Debian multiarch container
 # (impl/c/cross/), so one host builds every architecture and the binaries carry
 # a glibc floor we choose (2.17 by default) rather than the build host's.
 
-# Build the C PoC natively and run its unit tests: the golden decode vectors shared with
+# Build the C implementation natively and run its unit tests: the golden decode vectors shared with
 # the Rust SDK, plus the device-parameter/`describe` checks.
 # Usage: just c-test [extra ctest flags]
 c-test *args="":
@@ -313,7 +348,7 @@ c-test *args="":
 c-describe-parity *configs="":
     ./impl/c/ci/describe-parity.sh {{configs}}
 
-# Debian architectures the C PoC is built and packaged for.
+# Debian architectures the C implementation is built and packaged for.
 C_ARCHS := "amd64 arm64 armhf"
 C_GLIBC_MIN := "2.17"
 
@@ -321,7 +356,7 @@ C_GLIBC_MIN := "2.17"
 c-cross-image:
     docker build -t tedge-dot-cross impl/c/cross
 
-# Cross-build the C PoC for one architecture into impl/c/dist/<arch>/.
+# Cross-build the C implementation for one architecture into impl/c/dist/<arch>/.
 # Usage: just c-cross arm64 [extra cmake args]
 c-cross arch="arm64" *args="": c-cross-image
     mkdir -p "impl/c/dist/{{arch}}"

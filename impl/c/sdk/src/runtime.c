@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,30 @@
 #define BACKOFF_INITIAL_S 1.0
 #define BACKOFF_MAX_S 60.0
 
+/* ---- liveness ------------------------------------------------------------
+ *
+ * The runtime bounds protocol calls by pushing connector.operation_timeout down
+ * into the protocol library's own response timeout (see each module's
+ * configure()). That covers a peer that stops answering, which is the common
+ * case, but not a call that wedges INSIDE a library: this runtime is one thread
+ * per config and cannot cancel a call in flight the way the Rust runtime's
+ * tokio::time::timeout can.
+ *
+ * connector.stall_timeout closes that gap from the outside. Every poll loop
+ * stamps a heartbeat each tick; a watchdog thread notices when one stops
+ * advancing and exits the process, so the service manager restarts it
+ * (packaging/tedge-dot.service sets Restart=always). That is coarser than the
+ * Rust behaviour -- which cancels and restarts the one wedged connector while
+ * the others keep running -- because a pthread stuck in a blocking library call
+ * cannot be safely cancelled. Documented in impl/c/README.md's parity table. */
+typedef struct {
+    /* tdot_mono() in milliseconds at the last loop tick; 0 before the loop
+     * starts, which the watchdog treats as "not running yet". */
+    _Atomic long long beat_ms;
+    double limit_s; /* connector.stall_timeout; 0 disables this slot */
+    const char *name; /* config path, for the log line */
+} progress_t;
+
 static volatile sig_atomic_t g_stop = 0;
 
 static void on_signal(int sig) {
@@ -29,6 +54,7 @@ typedef struct {
     tdot_config_t *cfg;
     struct mosquitto *mosq; /* NULL in stdout mode */
     tdot_output_t output;
+    progress_t *progress; /* NULL when no watchdog is armed */
 } rt_t;
 
 static void logmsg(const char *level, const char *fmt, ...) {
@@ -118,12 +144,48 @@ static void publish_health(rt_t *rt, const char *status) {
     publish(rt, topic, payload, true);
 }
 
+/* Drop every push subscription flag, putting the device's points back on the
+ * polling schedule. Called whenever the link goes down: the module's
+ * subscription died with the transport, and subscribe_device() will re-arm on
+ * the next successful connect. */
+static void clear_subscriptions(tdot_device_t *dev) {
+    for (size_t j = 0; j < dev->npoints; j++)
+        dev->points[j].subscribed = false;
+}
+
+/* Ask the module for push delivery on a freshly connected device. Failure is
+ * not fatal: the points simply stay on the polling schedule, which is the
+ * contract's own fallback (§4.2) and keeps a subscription-hostile server
+ * working. */
+static void arm_subscriptions(rt_t *rt, tdot_device_t *dev) {
+    clear_subscriptions(dev);
+    if (!rt->conn->subscribe_device || !rt->conn->drain_subscriptions)
+        return;
+    char err[TDOT_ERR_MAX];
+    if (rt->conn->subscribe_device(rt->conn, dev, err, sizeof err) != 0) {
+        logmsg("warn",
+               "device %s: push delivery unavailable (%s); polling every point",
+               dev->name, err);
+        clear_subscriptions(dev);
+        return;
+    }
+    size_t pushed = 0;
+    for (size_t j = 0; j < dev->npoints; j++)
+        if (dev->points[j].subscribed)
+            pushed++;
+    if (pushed > 0)
+        logmsg("info", "device %s: %zu point(s) delivered by subscription",
+               dev->name, pushed);
+}
+
 static void connect_device(rt_t *rt, tdot_device_t *dev) {
     char err[TDOT_ERR_MAX];
     if (rt->conn->connect_device(rt->conn, dev, err, sizeof err) == 0) {
         dev->backoff_s = 0;
+        arm_subscriptions(rt, dev);
         publish_link(rt, dev, TDOT_LINK_CONNECTED);
     } else {
+        clear_subscriptions(dev);
         logmsg("warn", "device %s: connect failed: %s", dev->name, err);
         publish_link(rt, dev, TDOT_LINK_DISCONNECTED);
         dev->backoff_s = dev->backoff_s > 0
@@ -138,6 +200,7 @@ static void connect_device(rt_t *rt, tdot_device_t *dev) {
 }
 
 static void mark_transport_down(rt_t *rt, tdot_device_t *dev) {
+    clear_subscriptions(dev);
     rt->conn->disconnect_device(rt->conn, dev);
     publish_link(rt, dev, TDOT_LINK_DISCONNECTED);
     dev->backoff_s = BACKOFF_INITIAL_S;
@@ -778,13 +841,34 @@ static void handle_management(rt_t *rt, const char *topic, const char *verb,
 
 /* ---- main loop ------------------------------------------------------------ */
 
+/* Context handed to the module's drain_subscriptions() so pushed samples reach
+ * the same publishing path as polled ones. */
+typedef struct {
+    rt_t *rt;
+} sink_ctx_t;
+
+static void push_sink(void *ctx, tdot_device_t *dev, tdot_point_t *pt,
+                      const tdot_sample_t *s) {
+    sink_ctx_t *c = ctx;
+    /* Same raw-mode rule as the poll path: a raw point publishes the wire bytes
+     * only, never a decoded value. tdot_sample_t is a flat POD, so the copy is
+     * cheap and leaves the module's own sample untouched. */
+    tdot_sample_t local = *s;
+    if (pt->mode == TDOT_MODE_RAW)
+        local.value.kind = TDOT_VAL_NONE;
+    emit_sample(c->rt, dev, pt, &local);
+}
+
 /* Run one connector to completion. Assumes the mosquitto library is already
  * initialised and the SIGINT/SIGTERM handlers are installed by the caller, so
  * it is safe to call from one of several worker threads (each owns its own
  * connector, config and mosquitto client). */
 static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
-                         const tdot_run_opts_t *opts) {
-    rt_t rt = {.conn = conn, .cfg = cfg, .output = opts->output};
+                         const tdot_run_opts_t *opts, progress_t *progress) {
+    rt_t rt = {.conn = conn,
+               .cfg = cfg,
+               .output = opts->output,
+               .progress = progress};
     char err[256];
 
     if (conn->configure(conn, cfg, err, sizeof err) != 0) {
@@ -843,6 +927,12 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
         if (deadline > 0 && now >= deadline)
             break;
 
+        /* Heartbeat for the stall watchdog: stamped at the top of every tick,
+         * so it stops advancing exactly when a protocol call below does not
+         * return. */
+        if (rt.progress)
+            atomic_store(&rt.progress->beat_ms, (long long)(now * 1000.0));
+
         for (size_t i = 0; i < cfg->ndevices && !g_stop; i++) {
             tdot_device_t *dev = &cfg->devices[i];
             if (dev->link == TDOT_LINK_DISCONNECTED) {
@@ -856,6 +946,10 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
             size_t bad = 0, polled = 0;
             for (size_t j = 0; j < dev->npoints && !transport_down; j++) {
                 tdot_point_t *pt = &dev->points[j];
+                /* A subscribed point is delivered by the module's drain below;
+                 * polling it too would double-publish. */
+                if (pt->subscribed)
+                    continue;
                 if (!(pt->access & TDOT_ACCESS_READ) || now < pt->next_due)
                     continue;
                 tdot_sample_t s;
@@ -873,12 +967,31 @@ static int run_connector(tdot_connector_t *conn, tdot_config_t *cfg,
             }
             if (transport_down) {
                 mark_transport_down(&rt, dev);
-            } else if (polled > 0) {
+                continue;
+            }
+            if (polled > 0) {
                 /* whole batch failing degrades the link; any success is
                  * connected */
                 publish_link(&rt, dev,
                              bad == polled ? TDOT_LINK_DEGRADED
                                            : TDOT_LINK_CONNECTED);
+            }
+
+            /* Hand over whatever the module received by push since the last
+             * tick. Only the drain's transport verdict feeds the link state:
+             * pushed samples are value changes, so their absence says nothing
+             * about the link (a quiet signal is normal), which is why they do
+             * not drive the degraded/connected transitions above. */
+            if (rt.conn->drain_subscriptions) {
+                bool any = false;
+                for (size_t j = 0; j < dev->npoints && !any; j++)
+                    any = dev->points[j].subscribed;
+                if (any) {
+                    sink_ctx_t sink = {.rt = &rt};
+                    if (rt.conn->drain_subscriptions(rt.conn, dev, push_sink,
+                                                     &sink) != 0)
+                        mark_transport_down(&rt, dev);
+                }
             }
         }
 
@@ -908,12 +1021,106 @@ static void install_signal_handlers(void) {
     sigaction(SIGTERM, &sa, NULL);
 }
 
+/* ---- stall watchdog ------------------------------------------------------- */
+
+typedef struct {
+    progress_t *slots;
+    size_t n;
+} watchdog_t;
+
+/* Exit code used when the watchdog fires, so an operator reading `systemctl
+ * status` can tell a wedged connector from a config error (which exits 1). */
+#define TDOT_EXIT_STALLED 70
+
+static void *watchdog_main(void *arg) {
+    watchdog_t *wd = arg;
+
+    /* Check often enough to react within a quarter of the tightest limit, but
+     * never busier than twice a second nor lazier than every 10s -- the same
+     * shape as the Rust watchdog's period. */
+    double tightest = 0;
+    for (size_t i = 0; i < wd->n; i++)
+        if (wd->slots[i].limit_s > 0 &&
+            (tightest == 0 || wd->slots[i].limit_s < tightest))
+            tightest = wd->slots[i].limit_s;
+    double period = tightest / 4;
+    if (period < 0.5)
+        period = 0.5;
+    if (period > 10.0)
+        period = 10.0;
+
+    while (!g_stop) {
+        struct timespec ts = {.tv_sec = (time_t)period,
+                              .tv_nsec = (long)((period - (long)period) * 1e9)};
+        nanosleep(&ts, NULL);
+        long long now_ms = (long long)(tdot_mono() * 1000.0);
+        for (size_t i = 0; i < wd->n; i++) {
+            progress_t *p = &wd->slots[i];
+            if (p->limit_s <= 0)
+                continue;
+            long long beat = atomic_load(&p->beat_ms);
+            if (beat == 0)
+                continue; /* loop has not started ticking yet */
+            double idle_s = (double)(now_ms - beat) / 1000.0;
+            if (idle_s < p->limit_s)
+                continue;
+            logmsg("error",
+                   "%s: no progress for %.0fs (connector.stall_timeout %.0fs): "
+                   "a protocol call is not returning, restarting the process",
+                   p->name, idle_s, p->limit_s);
+            /* The loop cannot rescue itself -- the hang is inside it -- and a
+             * pthread blocked in a protocol library cannot be safely
+             * cancelled, so the whole process goes down and the service manager
+             * brings it back (Restart=always). Exiting also drops the MQTT
+             * connection, which makes the broker publish the retained last-will
+             * health "down" -- the same observable outcome as the Rust runtime
+             * cancelling the connector. _exit() rather than exit(): no atexit
+             * handler should run while another thread is wedged. */
+            fflush(NULL);
+            _exit(TDOT_EXIT_STALLED);
+        }
+    }
+    return NULL;
+}
+
+/* Start the watchdog thread when at least one connector arms it. Returns true
+ * when a thread was created (and must be joined by the caller). */
+static bool start_watchdog(watchdog_t *wd, pthread_t *thread) {
+    bool armed = false;
+    for (size_t i = 0; i < wd->n; i++)
+        if (wd->slots[i].limit_s > 0)
+            armed = true;
+    if (!armed) {
+        logmsg("info", "stall watchdog disabled (connector.stall_timeout = 0)");
+        return false;
+    }
+    return pthread_create(thread, NULL, watchdog_main, wd) == 0;
+}
+
 int tdot_runtime_run(tdot_connector_t *conn, tdot_config_t *cfg,
                      const tdot_run_opts_t *opts) {
     if (opts->output == TDOT_OUTPUT_MQTT)
         mosquitto_lib_init();
     install_signal_handlers();
-    int rc = run_connector(conn, cfg, opts);
+
+    /* The watchdog only guards the long-running service. A `run --duration` or
+     * stdout invocation is a foreground one-shot whose caller is watching it. */
+    progress_t slot = {.beat_ms = 0,
+                       .limit_s = opts->output == TDOT_OUTPUT_MQTT &&
+                                          opts->duration_s <= 0
+                                      ? cfg->stall_timeout_s
+                                      : 0,
+                       .name = cfg->path ? cfg->path : cfg->protocol};
+    watchdog_t wd = {.slots = &slot, .n = 1};
+    pthread_t wd_thread;
+    bool watching = start_watchdog(&wd, &wd_thread);
+
+    int rc = run_connector(conn, cfg, opts, &slot);
+
+    if (watching) {
+        g_stop = 1; /* wake the watchdog out of its sleep loop */
+        pthread_join(wd_thread, NULL);
+    }
     if (opts->output == TDOT_OUTPUT_MQTT)
         mosquitto_lib_cleanup();
     return rc;
@@ -928,12 +1135,13 @@ typedef struct {
     tdot_connector_t *conn;
     tdot_config_t *cfg;
     const tdot_run_opts_t *opts;
+    progress_t *progress;
     int rc;
 } worker_t;
 
 static void *worker_main(void *arg) {
     worker_t *w = arg;
-    w->rc = run_connector(w->conn, w->cfg, w->opts);
+    w->rc = run_connector(w->conn, w->cfg, w->opts, w->progress);
     return NULL;
 }
 
@@ -946,6 +1154,7 @@ int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
 
     worker_t *workers = calloc(npaths, sizeof *workers);
     pthread_t *threads = calloc(npaths, sizeof *threads);
+    progress_t *slots = calloc(npaths, sizeof *slots);
     size_t started = 0;
 
     /* Load every config and build its connector up front, so a bad config is
@@ -967,12 +1176,22 @@ int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
         workers[started].conn = conn;
         workers[started].cfg = cfg;
         workers[started].opts = opts;
+        /* One watchdog slot per connector, each with its own stall_timeout, so
+         * a slow serial bus and a fast TCP one can be bounded differently. */
+        slots[started].beat_ms = 0;
+        slots[started].limit_s =
+            opts->output == TDOT_OUTPUT_MQTT && opts->duration_s <= 0
+                ? cfg->stall_timeout_s
+                : 0;
+        slots[started].name = cfg->path ? cfg->path : paths[i];
+        workers[started].progress = &slots[started];
         logmsg("info", "loaded %s (%s)", paths[i], cfg->protocol);
         started++;
     }
     if (started == 0) {
         free(workers);
         free(threads);
+        free(slots);
         logmsg("error", "no valid connector configs");
         return -1;
     }
@@ -981,10 +1200,18 @@ int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
         mosquitto_lib_init();
     install_signal_handlers();
 
+    watchdog_t wd = {.slots = slots, .n = started};
+    pthread_t wd_thread;
+    bool watching = start_watchdog(&wd, &wd_thread);
+
     for (size_t i = 0; i < started; i++)
         pthread_create(&threads[i], NULL, worker_main, &workers[i]);
     for (size_t i = 0; i < started; i++)
         pthread_join(threads[i], NULL);
+    if (watching) {
+        g_stop = 1; /* wake the watchdog out of its sleep loop */
+        pthread_join(wd_thread, NULL);
+    }
 
     int rc = 0;
     for (size_t i = 0; i < started; i++) {
@@ -997,5 +1224,6 @@ int tdot_runtime_run_configs(const char *const *paths, size_t npaths,
         mosquitto_lib_cleanup();
     free(workers);
     free(threads);
+    free(slots);
     return rc;
 }

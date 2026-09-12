@@ -1,8 +1,8 @@
-/* tedge-dot C PoC — CANopen connector on Linux SocketCAN (no external
+/* tedge-dot — CANopen connector on Linux SocketCAN (no external
  * library). Mirrors impl/rust/crates/connector-canopen: expedited SDO upload (read)
  * and download (write) over a shared raw CAN socket, NMT Start broadcast on
  * bus open, identity-object probe (0x1018:0) on connect. Segmented SDO,
- * PDO and heartbeat are out of scope for this PoC.
+ * PDO and heartbeat are out of scope for this module.
  *
  * Linux-only: CMake gates compilation of this file to Linux hosts.
  */
@@ -51,7 +51,7 @@ typedef struct {
 } co_state_t;
 
 static const char CAPABILITIES[] =
-    "{\"protocol\":\"canopen\",\"version\":\"0.1.0-poc\","
+    "{\"protocol\":\"canopen\",\"version\":\"" TDOT_VERSION "\","
     "\"modes\":[\"typed\"],"
     "\"datatypes\":[\"bool\",\"int8\",\"uint8\",\"int16\",\"uint16\","
     "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\"],"

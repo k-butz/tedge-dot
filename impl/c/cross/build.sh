@@ -1,5 +1,5 @@
 #!/bin/sh
-# Cross-build the C PoC inside the image defined by ./Dockerfile.
+# Cross-build the C implementation inside the image defined by ./Dockerfile.
 #
 #   ARCH      Debian architecture to build for: amd64 | arm64 | armhf
 #   GLIBC_MIN Oldest glibc the binary must run against (default 2.17 = RHEL 7 /

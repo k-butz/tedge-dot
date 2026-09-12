@@ -1,5 +1,5 @@
 *** Settings ***
-Documentation       Full end-to-end test for the Rust tedge-dot against Cumulocity.
+Documentation       Full end-to-end test for tedge-dot against Cumulocity.
 ...                 The tedge container installs the connector, its thin-edge flows and the
 ...                 Cumulocity operation shims (no Python plugin), reads a real Modbus simulator,
 ...                 and bridges everything to Cumulocity. These tests assert the cloud-facing

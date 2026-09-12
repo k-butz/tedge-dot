@@ -1,4 +1,4 @@
-# Cross-compilation image for the C PoC: zig supplies the compiler and libc,
+# Cross-compilation image for the C implementation: zig supplies the compiler and libc,
 # Debian supplies the target-architecture shared libraries via multiarch.
 #
 # This is what lets one runner (or one laptop) build every architecture. The

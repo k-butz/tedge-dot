@@ -1,7 +1,7 @@
-/* tedge-dot C PoC — CAN bus connector on Linux SocketCAN. Mirrors
+/* tedge-dot — CAN bus connector on Linux SocketCAN. Mirrors
  * impl/rust/crates/connector-canbus: DBC-driven signal extraction, Intel/Motorola bit
  * layouts, read-modify-write signal encoding. The Rust connector is
- * push-based; this PoC adapts it to the poll runtime by draining pending
+ * push-based; this build adapts it to the poll runtime by draining pending
  * frames into a last-frame cache on every read.
  */
 #include <errno.h>
@@ -55,7 +55,7 @@ typedef struct {
 } cb_device_t;
 
 static const char CAPABILITIES[] =
-    "{\"protocol\":\"canbus\",\"version\":\"0.1.0-poc\","
+    "{\"protocol\":\"canbus\",\"version\":\"" TDOT_VERSION "\","
     "\"modes\":[\"typed\"],"
     "\"datatypes\":[\"bool\",\"int8\",\"uint8\",\"int16\",\"uint16\","
     "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\"],"

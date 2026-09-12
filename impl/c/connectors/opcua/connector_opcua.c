@@ -1,12 +1,12 @@
-/* tedge-dot C PoC — OPC UA connector on open62541 (MPL-2.0).
+/* tedge-dot — OPC UA connector on open62541 (MPL-2.0).
  * Mirrors impl/rust/crates/connector-opcua: client sessions per device, node-id
  * addressed points ("ns=2;s=Temperature"), typed reads/writes, quality "bad"
- * on Bad status codes. Polling only (the Rust connector also supports
- * monitored-item push; out of PoC scope).
+ * on Bad status codes, and monitored-item push delivery.
  */
 #include <open62541/client.h>
 #include <open62541/client_config_default.h>
 #include <open62541/client_highlevel.h>
+#include <open62541/client_subscriptions.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,10 +20,37 @@ typedef struct {
     char node_id[160]; /* textual "ns=2;s=Temperature" */
 } ua_point_t;
 
+/* Default monitored-item sampling interval for a point that does not set its
+ * own poll_interval, matching DEFAULT_SAMPLING_INTERVAL in the Rust module. */
+#define UA_DEFAULT_SAMPLING_MS 500.0
+
+/* Samples that arrived by subscription since the last drain.
+ *
+ * open62541 delivers data changes through a callback fired from inside
+ * UA_Client_run_iterate(), which drain_subscriptions() calls on the runtime
+ * thread -- so producer and consumer are the same thread and the queue needs no
+ * locking. It is a ring rather than a single slot per point so that a burst of
+ * changes between two ticks is delivered as the separate value changes it was,
+ * not collapsed into the latest one. */
+#define UA_PUSH_QUEUE_LEN 256
+
+typedef struct {
+    tdot_point_t *pt;
+    tdot_sample_t sample;
+} ua_pending_t;
+
 /* Per-device state (dev->proto, flat; client freed on disconnect). */
 typedef struct {
     char endpoint[256];
     UA_Client *client; /* NULL when disconnected */
+
+    /* Push delivery state, all reset on (re)connect. */
+    UA_UInt32 sub_id;
+    bool subscribed;
+    ua_pending_t queue[UA_PUSH_QUEUE_LEN];
+    size_t head; /* next slot to write */
+    size_t tail; /* next slot to read */
+    unsigned long dropped; /* overruns since the last warning */
 } ua_device_t;
 
 typedef struct {
@@ -34,14 +61,14 @@ typedef struct {
 } ua_state_t;
 
 static const char CAPABILITIES[] =
-    "{\"protocol\":\"opcua\",\"version\":\"0.1.0-poc\","
+    "{\"protocol\":\"opcua\",\"version\":\"" TDOT_VERSION "\","
     "\"modes\":[\"raw\",\"typed\"],"
     "\"datatypes\":[\"bool\",\"int8\",\"uint8\",\"int16\",\"uint16\","
     "\"int32\",\"uint32\",\"int64\",\"uint64\",\"float32\",\"float64\","
     "\"string\"],"
     "\"point_kinds\":[\"variable\"],"
     "\"command_verbs\":[\"write\",\"write-batch\"],"
-    "\"features\":[\"polling\"],\"subscribe\":false}";
+    "\"features\":[\"polling\",\"subscribe\"],\"subscribe\":true}";
 
 static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
                      size_t errlen) {
@@ -49,7 +76,14 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
     snprintf(st->application_name, sizeof st->application_name, "tedge-dot");
     snprintf(st->application_uri, sizeof st->application_uri, "urn:tedge-dot");
     st->connect_timeout_s = 15;
-    st->request_timeout_s = 5;
+    /* connector.operation_timeout is the contract-level bound on one protocol
+     * call (§8.1); open62541's client timeout is where it actually takes
+     * effect, since this runtime cannot cancel a call in flight. The
+     * opcua-specific [connection] request_timeout_s still wins when set, so an
+     * existing config keeps its tuning. */
+    st->request_timeout_s = (int)(cfg->operation_timeout_s + 0.5);
+    if (st->request_timeout_s < 1)
+        st->request_timeout_s = 1;
     if (cfg->connection) {
         toml_datum_t d;
         if ((d = toml_string_in(cfg->connection, "application_name")).ok) {
@@ -66,7 +100,8 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
             st->connect_timeout_s = (int)d.u.i;
         if ((d = toml_int_in(cfg->connection, "request_timeout_s")).ok)
             st->request_timeout_s = (int)d.u.i;
-        /* security_policy / security_mode: PoC supports "None"/"none" only */
+        /* security_policy / security_mode: this build supports "None"/"none"
+         * only; see the parity table in impl/c/README.md (`opcua-security`) */
     }
 
     for (size_t i = 0; i < cfg->ndevices; i++) {
@@ -88,7 +123,7 @@ static int configure(tdot_connector_t *self, tdot_config_t *cfg, char *err,
         if (d.ok) {
             if (strcmp(d.u.s, "None") != 0) {
                 snprintf(err, errlen,
-                         "device %s: PoC supports security_policy \"None\" "
+                         "device %s: the C build supports security_policy \"None\" "
                          "only (got %s)",
                          dev->name, d.u.s);
                 free(d.u.s);
@@ -147,6 +182,16 @@ static void disconnect_device(tdot_connector_t *self, tdot_device_t *dev) {
         UA_Client_delete(ua->client);
         ua->client = NULL;
     }
+    if (ua) {
+        /* The subscription died with the session. Drop the id and anything
+         * still queued so a reconnect cannot deliver samples belonging to the
+         * previous session, or reuse its subscription id. The runtime has
+         * already cleared pt->subscribed for every point. */
+        ua->sub_id = 0;
+        ua->subscribed = false;
+        ua->head = ua->tail = 0;
+        ua->dropped = 0;
+    }
 }
 
 static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
@@ -160,7 +205,7 @@ static int connect_device(tdot_connector_t *self, tdot_device_t *dev,
     UA_ClientConfig_setDefault(cc);
     /* Ask for the None/None endpoint explicitly. The default leaves the mode
      * "invalid" (= pick any endpoint), which some servers (async-opcua) reject
-     * at session activation with BadSecurityChecksFailed. The PoC supports
+     * at session activation with BadSecurityChecksFailed. This build supports
      * security policy None only anyway (checked in configure()). */
     cc->securityMode = UA_MESSAGESECURITYMODE_NONE;
     UA_String_clear(&cc->securityPolicyUri);
@@ -457,6 +502,179 @@ static int write_point(tdot_connector_t *self, tdot_device_t *dev,
     return 0;
 }
 
+/* ---- push delivery (monitored items) -------------------------------------
+ *
+ * One subscription per device, one monitored item per subscribe-enabled point,
+ * mirroring impl/rust/crates/connector-opcua. The data-change callback runs
+ * inside UA_Client_run_iterate(), which the runtime calls from its own loop
+ * through drain_subscriptions() -- so the callback only parks the sample in the
+ * device's ring and the runtime publishes it, exactly as it does for a polled
+ * one. Nothing here touches MQTT.
+ */
+
+/* The point's own poll_interval is the sampling hint (contract §4.2); a point
+ * that does not set one gets the module default rather than inheriting the
+ * device/connector polling rate, which is what the Rust module does with
+ * PointRef::interval. */
+static double sampling_interval_ms(const tdot_point_t *pt) {
+    if (pt->own_poll_interval_s > 0)
+        return pt->own_poll_interval_s * 1000.0;
+    return UA_DEFAULT_SAMPLING_MS;
+}
+
+static void on_data_change(UA_Client *client, UA_UInt32 sub_id,
+                           void *sub_ctx, UA_UInt32 mon_id, void *mon_ctx,
+                           UA_DataValue *value) {
+    (void)client;
+    (void)sub_id;
+    (void)mon_id;
+    tdot_device_t *dev = sub_ctx;
+    tdot_point_t *pt = mon_ctx;
+    if (!dev || !pt)
+        return;
+    ua_device_t *ua = dev->proto;
+
+    size_t next = (ua->head + 1) % UA_PUSH_QUEUE_LEN;
+    if (next == ua->tail) {
+        /* Ring full: the runtime has not drained for a while. Drop the NEWEST
+         * change rather than overwriting the oldest, so the samples that are
+         * already queued keep their order and none is silently replaced. */
+        ua->dropped++;
+        return;
+    }
+
+    ua_pending_t *slot = &ua->queue[ua->head];
+    slot->pt = pt;
+    tdot_sample_init(&slot->sample);
+    if (!value->hasValue || !UA_Variant_isScalar(&value->value)) {
+        tdot_sample_bad(&slot->sample, "no scalar value in notification");
+    } else if (value->hasStatus && value->status != UA_STATUSCODE_GOOD) {
+        tdot_sample_bad(&slot->sample, "%s",
+                        UA_StatusCode_name(value->status));
+    } else {
+        variant_to_sample(&value->value, pt, &slot->sample);
+    }
+    ua->head = next;
+}
+
+static int subscribe_device(tdot_connector_t *self, tdot_device_t *dev,
+                            char *err, size_t errlen) {
+    (void)self;
+    ua_device_t *ua = dev->proto;
+    if (!ua || !ua->client) {
+        snprintf(err, errlen, "device not connected");
+        return -1;
+    }
+
+    ua->sub_id = 0;
+    ua->subscribed = false;
+    ua->head = ua->tail = 0;
+    ua->dropped = 0;
+
+    /* Points that opted out (subscribe = false) and write-only points stay on
+     * the polling schedule. */
+    size_t wanted = 0;
+    double fastest = 0;
+    for (size_t j = 0; j < dev->npoints; j++) {
+        tdot_point_t *pt = &dev->points[j];
+        if (!pt->subscribe || !(pt->access & TDOT_ACCESS_READ))
+            continue;
+        wanted++;
+        double ms = sampling_interval_ms(pt);
+        if (fastest == 0 || ms < fastest)
+            fastest = ms;
+    }
+    if (wanted == 0)
+        return 0; /* nothing to push: armed, with no points */
+
+    /* One subscription per device, publishing at the fastest requested point
+     * rate -- the same parameters the Rust module uses. */
+    UA_CreateSubscriptionRequest req = UA_CreateSubscriptionRequest_default();
+    req.requestedPublishingInterval = fastest;
+    req.requestedLifetimeCount = 60;
+    req.requestedMaxKeepAliveCount = 20;
+    UA_CreateSubscriptionResponse resp = UA_Client_Subscriptions_create(
+        ua->client, req, dev /*subContext*/, NULL, NULL);
+    if (resp.responseHeader.serviceResult != UA_STATUSCODE_GOOD) {
+        snprintf(err, errlen, "create_subscription failed: %s",
+                 UA_StatusCode_name(resp.responseHeader.serviceResult));
+        return -1;
+    }
+    ua->sub_id = resp.subscriptionId;
+    ua->subscribed = true;
+
+    size_t armed = 0;
+    for (size_t j = 0; j < dev->npoints; j++) {
+        tdot_point_t *pt = &dev->points[j];
+        if (!pt->subscribe || !(pt->access & TDOT_ACCESS_READ))
+            continue;
+        ua_point_t *up = pt->proto;
+        UA_NodeId node;
+        if (UA_NodeId_parse(&node, UA_STRING(up->node_id)) !=
+            UA_STATUSCODE_GOOD)
+            continue; /* the polling path reports this as a bad sample */
+
+        UA_MonitoredItemCreateRequest mreq =
+            UA_MonitoredItemCreateRequest_default(node);
+        mreq.requestedParameters.samplingInterval = sampling_interval_ms(pt);
+        mreq.requestedParameters.queueSize = 1;
+        mreq.requestedParameters.discardOldest = true;
+        UA_MonitoredItemCreateResult mres =
+            UA_Client_MonitoredItems_createDataChange(
+                ua->client, ua->sub_id, UA_TIMESTAMPSTORETURN_BOTH, mreq,
+                pt /*monContext*/, on_data_change, NULL);
+        UA_NodeId_clear(&node);
+        if (mres.statusCode == UA_STATUSCODE_GOOD) {
+            /* Telling the runtime this point is pushed is what takes it off the
+             * polling schedule. A node the server refuses to monitor simply
+             * stays polled. */
+            pt->subscribed = true;
+            armed++;
+        }
+    }
+    if (armed == 0) {
+        /* The subscription exists but carries nothing: tear it down rather than
+         * leaving an idle one on the server. */
+        UA_Client_Subscriptions_deleteSingle(ua->client, ua->sub_id);
+        ua->sub_id = 0;
+        ua->subscribed = false;
+        snprintf(err, errlen,
+                 "server accepted no monitored item for %zu requested point(s)",
+                 wanted);
+        return -1;
+    }
+    return 0;
+}
+
+static int drain_subscriptions(tdot_connector_t *self, tdot_device_t *dev,
+                               tdot_sample_sink_t sink, void *sink_ctx) {
+    (void)self;
+    ua_device_t *ua = dev->proto;
+    if (!ua || !ua->client || !ua->subscribed)
+        return 0;
+
+    /* Non-blocking: services whatever publish responses have arrived, firing
+     * on_data_change() for each notification, and keeps publish requests in
+     * flight. */
+    UA_StatusCode rc = UA_Client_run_iterate(ua->client, 0);
+    if (rc != UA_STATUSCODE_GOOD)
+        return -1; /* session gone: the runtime reconnects and re-subscribes */
+
+    while (ua->tail != ua->head) {
+        ua_pending_t *slot = &ua->queue[ua->tail];
+        sink(sink_ctx, dev, slot->pt, &slot->sample);
+        ua->tail = (ua->tail + 1) % UA_PUSH_QUEUE_LEN;
+    }
+    if (ua->dropped) {
+        fprintf(stderr,
+                "warn  device %s: dropped %lu pushed sample(s); the queue of "
+                "%d filled between two runtime ticks\n",
+                dev->name, ua->dropped, UA_PUSH_QUEUE_LEN);
+        ua->dropped = 0;
+    }
+    return 0;
+}
+
 static void destroy(tdot_connector_t *self) {
     free(self->state);
     free(self);
@@ -471,6 +689,8 @@ tdot_connector_t *tdot_connector_opcua_new(void) {
     c->connect_device = connect_device;
     c->read_point = read_point;
     c->write_point = write_point;
+    c->subscribe_device = subscribe_device;
+    c->drain_subscriptions = drain_subscriptions;
     c->disconnect_device = disconnect_device;
     c->destroy = destroy;
     return c;

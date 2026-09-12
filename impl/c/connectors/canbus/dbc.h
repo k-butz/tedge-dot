@@ -1,4 +1,4 @@
-/* tedge-dot C PoC — minimal Vector DBC parser for the canbus connector.
+/* tedge-dot — minimal Vector DBC parser for the canbus connector.
  *
  * Parses only BO_ (message) and SG_ (signal) lines; everything else in the
  * file is ignored. Mirrors the subset of can-dbc the Rust connector uses.

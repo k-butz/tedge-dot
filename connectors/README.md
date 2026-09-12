@@ -81,7 +81,7 @@ just e2e-down modbus [c]   # tear that manual stack down
 
 ### Rust and C: one suite, two connectors
 
-The Rust crates and the C proof of concept ([impl/c/](../impl/c/)) implement the same
+The Rust crates and the C implementation ([impl/c/](../impl/c/)) implement the same
 contract and are maintained to the same coverage. Every stack therefore runs its Robot suite
 against both: `test-e2e` builds the stack's `Dockerfile.connector` (Rust), `test-e2e-c` sets
 `CONNECTOR_DOCKERFILE` so the same compose file builds the `connector` service from
@@ -144,8 +144,11 @@ profile from [`robot.toml`](../robot.toml):
 The profile only sets `IMPL` and `CONNECTOR_DOCKERFILE`, which the compose file interpolates
 into the connector service's image name and build recipe; each implementation therefore has its
 own image and the first run after switching rebuilds it. The suite setup logs which one is in
-use (`Connector under test: c implementation …`), and the C build's capability descriptor
-reports version `0.1.0-poc`, so the Robot log always says which binary answered.
+use (`Connector under test: c implementation …`), so the Robot log always says which binary
+answered. Both builds report the same capability `version` — they implement the same contract
+revision — so the descriptor deliberately does NOT distinguish them; the cloud suites assert
+the implementation separately by which package is installed (see
+[cloud/_shared/device.resource](../cloud/_shared/device.resource)).
 
 Robot must run from the repo root (the default in VS Code) so the compose files, `robot.toml`
 and `.env` are found. If `just venv` reports that it is recreating the environment, the `./.venv` directory had

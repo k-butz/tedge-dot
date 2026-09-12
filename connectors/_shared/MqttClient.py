@@ -155,6 +155,36 @@ class MqttClient:
                 f"expected no messages matching {pattern}, but saw: {', '.join(offending)}"
             )
 
+    @keyword
+    def no_new_messages_on_topic(self, topic, timeout=5):
+        """Assert nothing NEW arrives on an exact topic during the timeout.
+
+        Unlike `No Messages On Topic`, history is ignored: only messages received
+        after this call count, so it can be used mid-suite without clearing the
+        recorded traffic other tests rely on.
+
+        This is what tells push delivery apart from polling. A subscription
+        reports value CHANGES, so a point on a static node publishes once and
+        then goes quiet; polling republishes it every interval whether or not
+        anything changed. A rate check cannot make that distinction, because the
+        runtime hands the connector the point's poll interval as the monitored
+        item's sampling interval -- push and polling run at the same rate by
+        design.
+        """
+        start = time.time()
+        time.sleep(float(timeout))
+        with self._lock:
+            fresh = [
+                payload
+                for recv_time, payload in self._messages.get(topic, [])
+                if recv_time >= start
+            ]
+        if fresh:
+            raise AssertionError(
+                f"expected no new messages on {topic} within {timeout}s, "
+                f"but saw {len(fresh)}; first: {fresh[0]}"
+            )
+
     @staticmethod
     def _filter_to_regex(pattern):
         """Convert an MQTT topic filter into an anchored regex.

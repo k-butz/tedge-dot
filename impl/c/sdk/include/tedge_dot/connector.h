@@ -18,6 +18,12 @@ extern "C" {
 
 typedef struct tdot_connector tdot_connector_t;
 
+/* Sink a module hands pushed samples to, one call per sample. Supplied by the
+ * runtime to drain_subscriptions() and only valid for the duration of that
+ * call; the sample is borrowed and must not be retained past it. */
+typedef void (*tdot_sample_sink_t)(void *ctx, tdot_device_t *dev,
+                                   tdot_point_t *pt, const tdot_sample_t *s);
+
 struct tdot_connector {
     const char *protocol;
     /* JSON capability descriptor published retained on startup. */
@@ -45,6 +51,37 @@ struct tdot_connector {
     int (*write_point)(tdot_connector_t *self, tdot_device_t *dev,
                        tdot_point_t *pt, const tdot_value_t *value, char *err,
                        size_t errlen);
+
+    /* Optional: push delivery (contract §4.2), the C rendering of the Rust
+     * trait's `subscribe`.
+     *
+     * Rust returns a stream the runtime selects on; the C runtime is one
+     * thread per config with no async machinery, so the same job is split in
+     * two: subscribe_device() arms the subscription, and drain_subscriptions()
+     * is called from the poll loop to hand over whatever arrived since the
+     * last tick. Keeping the handover on the runtime thread is what makes this
+     * safe -- samples are published from the loop, and the module never
+     * touches MQTT or the mosquitto handle.
+     *
+     * subscribe_device() must set pt->subscribed on every point it accepted
+     * (and leave it false on the rest, which stay on the polling schedule).
+     * It is called after each successful connect, so a reconnect re-arms the
+     * subscription. Returns 0 when the device is armed -- including when it
+     * accepted no points at all -- and -1 with err filled when the attempt
+     * failed, in which case the runtime polls every point of the device.
+     *
+     * A module providing subscribe_device MUST also provide
+     * drain_subscriptions. NULL hooks mean poll-only, which is the default. */
+    int (*subscribe_device)(tdot_connector_t *self, tdot_device_t *dev,
+                            char *err, size_t errlen);
+
+    /* Optional: hand the runtime every sample received since the last call,
+     * via sink(). Called once per loop tick for each connected device that was
+     * subscribed. Must not block for longer than one tick. Returns 0 when the
+     * transport is healthy, -1 when the link is down (triggers the runtime's
+     * reconnect backoff, exactly as read_point does). */
+    int (*drain_subscriptions)(tdot_connector_t *self, tdot_device_t *dev,
+                               tdot_sample_sink_t sink, void *sink_ctx);
 
     /* Close one device's transport (frees device->proto). */
     void (*disconnect_device)(tdot_connector_t *self, tdot_device_t *dev);

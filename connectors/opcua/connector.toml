@@ -75,3 +75,19 @@ default_mode     = "typed"
   datatype = "uint32"
   address  = { node_id = "ns=2;s=Ticks" }
   meta     = { on_change = true, source = "sim" }
+
+  # Subscribed, but pointing at the STATIC Temperature node, and it exists purely to make the
+  # push tests discriminating.
+  #
+  # A subscription reports value CHANGES, so this point publishes its initial value once and
+  # then goes quiet. Polling would republish it every poll_interval whether or not anything
+  # changed. That silence is the one thing polling cannot imitate -- and it is the only usable
+  # discriminator, because a RATE check cannot tell the two apart: the runtime hands the
+  # connector each point's resolved poll interval as the monitored item's sampling interval, so
+  # push and polling deliver at the same rate by design. See
+  # "Subscribed Static Node Falls Silent After Its First Value" in tests/opcua_e2e.robot.
+  [[device.point]]
+  id       = "temperature_pushed"
+  datatype = "float64"
+  unit     = "°C"
+  address  = { node_id = "ns=2;s=Temperature" }

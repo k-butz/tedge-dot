@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke test for the C PoC connector against a protocol simulator
+# End-to-end smoke test for the C connector against a protocol simulator
 # and a live MQTT broker.
 #
 #   impl/c/ci/smoke.sh <modbus|opcua|canbus|canopen|profibus>

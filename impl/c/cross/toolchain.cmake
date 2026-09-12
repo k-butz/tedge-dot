@@ -1,4 +1,4 @@
-# CMake toolchain for cross-compiling the C PoC with `zig cc` against Debian's
+# CMake toolchain for cross-compiling the C implementation with `zig cc` against Debian's
 # multiarch libraries. Driven by three environment variables, all set by
 # build.sh: ZIG_TARGET, DEB_MULTIARCH and TDOT_SYSTEM_PROCESSOR.
 #

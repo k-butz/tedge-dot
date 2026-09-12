@@ -5,7 +5,7 @@
 # IMPL selects the implementation under test, exactly as the connector e2e stacks do:
 #
 #   rust (default) — the cross-compiled .deb from dist/; run `just build` first.
-#   c              — the C proof of concept (impl/c/), compiled in a builder stage here, so
+#   c              — the C implementation (impl/c/), compiled in a builder stage here, so
 #                    nothing has to be built beforehand and dist/ is not read at all
 #                    (BuildKit skips the stage that COPYs it).
 #

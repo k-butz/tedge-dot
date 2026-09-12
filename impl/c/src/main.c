@@ -1,4 +1,4 @@
-/* tedge-dot C PoC — CLI entry point.
+/* tedge-dot — CLI entry point (C implementation).
  *
  *   tedge-dot read  -c <config> [-d <device-glob>] [-p <point-glob>]...
  *                   [--poll] [--interval 1s] [--count N] [--json]
@@ -24,7 +24,7 @@
 
 static void usage(void) {
     fputs(
-        "tedge-dot (C PoC) — OT protocol connectors for thin-edge.io\n"
+        "tedge-dot (C) — OT protocol connectors for thin-edge.io\n"
         "\n"
         "USAGE:\n"
         "  tedge-dot read  -c <config> [-d <device>] [-p <point>]... "
