@@ -160,6 +160,12 @@ Set names change, which matters to anyone who registered the old ones:
 * a tenant's existing DTM definitions must be re-registered under the new identifiers
   (`tedge-dot describe` prints them), or pinned to the old name — `--set <name>` on `describe`
   and `default_set` in the `ot-parameter-state` flow still force one name for everything;
-* the old twin fragment is retained under its old name until it is cleared.
+* the old twin fragment is retained under its old name until it is cleared — nothing removes
+  it, so both the device twin and the Cumulocity managed object keep a stale copy of the
+  values. Clear it once per device after upgrading:
+
+```sh
+tedge mqtt pub -r -q 1 'te/device/plc1///twin/modbus_parameters' ''
+```
 
 `type` itself is optional everywhere, so no configuration fails to load.

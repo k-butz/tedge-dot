@@ -670,7 +670,9 @@ points_from      = [{refs}]
     fn device_type_must_be_a_non_empty_string() {
         let dir = Dir::new("device-type-invalid");
         dir.write("modbus/acme-meter.toml", LIBRARY);
-        for bad in ["\"\"", "7"] {
+        // An array or a table is *present but unusable*, not absent — the case the C loader's
+        // scalar-only presence check used to drop silently.
+        for bad in ["\"\"", "\"  \"", "7", "true", "[\"acme\"]", "{ a = 1 }"] {
             let text = config_with(Some(dir.path()), "\"acme-meter\"", "").replace(
                 "points_from",
                 &format!("type             = {bad}\npoints_from"),
@@ -683,12 +685,14 @@ points_from      = [{refs}]
     #[test]
     fn library_type_must_be_a_non_empty_string() {
         let dir = Dir::new("type-invalid");
-        dir.write(
-            "modbus/bad.toml",
-            &LIBRARY.replace("[library]\n", "[library]\ntype = 7\n"),
-        );
-        let err = resolve_in(dir.path(), "\"bad\"", "").unwrap_err();
-        assert!(err.contains("[library] type"), "{err}");
+        for bad in ["\"\"", "\"  \"", "7", "true", "[\"acme\"]", "{ a = 1 }"] {
+            dir.write(
+                "modbus/bad.toml",
+                &LIBRARY.replace("[library]\n", &format!("[library]\ntype = {bad}\n")),
+            );
+            let err = resolve_in(dir.path(), "\"bad\"", "").unwrap_err();
+            assert!(err.contains("[library] type"), "{bad}: {err}");
+        }
     }
 
     #[test]

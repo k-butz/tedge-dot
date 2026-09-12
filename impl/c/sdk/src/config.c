@@ -549,6 +549,15 @@ static toml_array_t *library_points(toml_table_t *root, const char *path,
     return (dup || missing_id) ? NULL : points;
 }
 
+/* True when `key` is present in `tbl` under any TOML type. `toml_raw_in` only
+ * sees scalars, so a key whose value is a table or an array would otherwise
+ * look absent -- and `type = ["acme-meter-v2"]` would be silently dropped here
+ * while the Rust loader rejects it. */
+static bool key_present(toml_table_t *tbl, const char *key) {
+    return toml_raw_in(tbl, key) || toml_table_in(tbl, key) ||
+           toml_array_in(tbl, key);
+}
+
 /* True when `s` is empty or nothing but whitespace -- what neither a device type
  * nor a library type may be. The Rust loader rejects exactly the same values,
  * which is what keeps the two accepting the same files. */
@@ -566,7 +575,7 @@ static int library_type(toml_table_t *root, const char *path, char **out,
                         char *err, size_t errlen) {
     *out = NULL;
     toml_table_t *library = toml_table_in(root, "library");
-    if (!library || !toml_raw_in(library, "type"))
+    if (!library || !key_present(library, "type"))
         return 0;
     toml_datum_t d = toml_string_in(library, "type");
     if (!d.ok || blank(d.u.s)) {
@@ -896,7 +905,7 @@ tdot_config_t *tdot_config_load(const char *path, char *err, size_t errlen) {
          * present-but-unusable value is an error rather than an absent type:
          * the Rust loader rejects the same files, and an empty string would
          * otherwise behave like no type at all. */
-        if (toml_raw_in(dt, "type")) {
+        if (key_present(dt, "type")) {
             d = toml_string_in(dt, "type");
             if (!d.ok || blank(d.u.s)) {
                 if (d.ok)

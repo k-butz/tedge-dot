@@ -287,7 +287,7 @@ Describe Renders The Parameter Set Definition
     ...                the same keys the parameter twin fragment carries. Runs against whichever
     ...                implementation the stack was built with (IMPL=rust|c).
     ${output}=    DeviceLibrary.Execute Command
-    ...    cmd=tedge-dot describe -c /etc/connector.toml --compact    strip=${True}
+    ...    cmd=tedge-dot describe -c /etc/connector.toml --compact 2>/dev/null    strip=${True}
     ${definition}=    Evaluate    json.loads($output.splitlines()[0])    modules=json
     Should Be Equal    ${definition}[identifier]    ${PARAM_SET}
     ${properties}=    Set Variable    ${definition}[jsonSchema][properties]

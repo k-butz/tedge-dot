@@ -35,7 +35,7 @@ Parameter Definitions Are Rendered From The Connector Config
     [Documentation]    `tedge-dot describe` renders one DTM property definition per parameter
     ...                set, with the writable points as properties (an admin registers it once).
     ${output}=    Execute Shell Command And Get Output
-    ...    tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact    timeout=${OP_TIMEOUT}
+    ...    tedge-dot describe -c /etc/tedge/plugins/ot/modbus.toml --compact 2>/dev/null    timeout=${OP_TIMEOUT}
     ${definition}=    Evaluate    json.loads($output.strip().splitlines()[0])    modules=json
     Should Be Equal    ${definition}[identifier]    ${SET}
     Dictionary Should Contain Key    ${definition}[jsonSchema][properties]    temp_u16

@@ -35,6 +35,8 @@
 //   "ot-device-type:<device>"             -> declared device type, when the connector reports one
 //   "ot-parameter-values:<device>:<set>"  -> { <point>: value }
 //   "ot-parameter-set:<device>:<point>"   -> set name, or false for opted-out points
+//                                            (from the point's samples, else from the
+//                                            parameter_update request that wrote it)
 
 const decoder = new TextDecoder();
 
@@ -84,6 +86,17 @@ function setFromSample(sample, names) {
   return setFor(names); // `true`, or any other scalar
 }
 
+// The points a write/write-batch REQUEST names (the retained `init`), in order.
+function writtenPoints(verb, payload) {
+  if (verb === "write") return typeof payload.point === "string" ? [payload.point] : [];
+  if (verb === "write-batch") {
+    return (payload.writes ?? [])
+      .map((w) => w?.point)
+      .filter((p) => typeof p === "string" && p);
+  }
+  return [];
+}
+
 // Apply {point: value} updates for a device; returns the twin messages of the changed sets.
 function applyValues(context, device, updates, resolveSet) {
   const changed = new Set();
@@ -123,6 +136,13 @@ export function onMessage(message, context) {
   // never samples — still gets its sets named after its type.
   if (typeof payload.type === "string" && payload.type) {
     context.mapper.set(`ot-device-type:${device}`, payload.type);
+  } else if (kind === "status") {
+    // The link status describes the whole device and is republished on every config reload, so
+    // one without a type means the type is gone (a revert, or a switch to an untyped library)
+    // and the sets go back to the protocol name — which is what `describe` now renders too.
+    // Never inferred from a sample: a sample legitimately omits the type for a point the
+    // runtime has no configuration entry for.
+    context.mapper.set(`ot-device-type:${device}`, "");
   }
   if (kind === "status") return [];
   const names = naming(context, device, protocol);
@@ -134,6 +154,24 @@ export function onMessage(message, context) {
     context.mapper.set(`ot-parameter-set:${device}:${point}`, set);
     if (!set || payload.quality !== "good" || payload.value === undefined) return [];
     return applyValues(context, device, { [point]: payload.value }, () => set);
+  }
+
+  // The request half of a write: a parameter_update names the set it edited (origin.set), and
+  // for a write-only point — which never samples — that is the ONLY thing that can say which
+  // set its value belongs in. Recorded, never overriding what a sample already established.
+  if (kind === "cmd" && payload.status === "init") {
+    const set = payload.origin?.set;
+    if (typeof set === "string" && set) {
+      for (const point of writtenPoints(parts[6], payload)) {
+        // A missing key reads back as undefined or null depending on the runtime; `false` is a
+        // real value (an opted-out point) and must not be overwritten.
+        const known = context.mapper.get(`ot-parameter-set:${device}:${point}`);
+        if (known === undefined || known === null) {
+          context.mapper.set(`ot-parameter-set:${device}:${point}`, set);
+        }
+      }
+    }
+    return [];
   }
 
   if (kind === "cmd" && payload.status === "successful") {
@@ -148,7 +186,8 @@ export function onMessage(message, context) {
         }
       }
     }
-    // A point that was written is writable by definition: known set, else the default one.
+    // A point that was written is writable by definition: the set learned from its samples or
+    // from the request that wrote it, else the default one.
     const resolveSet = (point) => {
       const known = context.mapper.get(`ot-parameter-set:${device}:${point}`);
       return known === undefined || known === null ? setFor(names) : known;

@@ -861,12 +861,17 @@ fn cmd_describe(args: DescribeArgs) -> Result<(), String> {
     // A DTM identifier is tenant-wide, so a set named after the protocol is shared with every
     // other device type that speaks it. Declaring the device type is what keeps them apart.
     if args.set.is_none() {
-        for device in tedge_dot_sdk::descriptor::devices_without_type(&config) {
+        // Worded and shaped exactly like the C build's warning (impl/c/src/main.c): the two
+        // CLIs are meant to be interchangeable, and `describe-parity.sh` compares stderr.
+        let untyped = tedge_dot_sdk::descriptor::devices_without_type(&config);
+        if !untyped.is_empty() {
             eprintln!(
-                "warning: device '{device}' declares no `type`, so its parameter sets are named \
+                "warning: device(s) {} declare no `type`, so their parameter sets are named \
                  after the protocol ('{}_...') and collide with every other {} device type in \
                  the tenant; set `type` on the device or in its point library",
-                config.connector.protocol, config.connector.protocol
+                untyped.join(", "),
+                config.connector.protocol,
+                config.connector.protocol
             );
         }
     }

@@ -173,6 +173,15 @@ points_from   = []              # optional; point libraries to inherit points fr
 | `subscribe` | boolean | no | Default `true`. `false` keeps the point on the polling schedule even when the connector supports push delivery. |
 | `address` | object | yes | **Protocol-specific**; shape defined by the connector spec. |
 
+`name` and `description` are **not** echoed in the sample envelope: they are static per point,
+so the connector publishes them once in its retained capability descriptor (§7) instead of on
+every read. `meta.parameter.title` / `meta.parameter.description` override them for a
+parameter's cloud-facing labels, so a point can carry a general-purpose label and still say
+something different in the parameter UI.
+
+A device MAY inherit these same point fields from a **point library** instead of declaring
+them inline; see §3.4.
+
 #### The device `type`
 
 `[[device]] type` names the **device type** the instance is one of: what its point list
@@ -186,15 +195,6 @@ It matters because it names things that outlive the device: the device's **param
 registration flow assigns. A connector MUST therefore echo it where a consumer needs it without
 the configuration file: in every sample (§5) and on the link status (§8). Nothing else in the
 runtime interprets it.
-
-`name` and `description` are **not** echoed in the sample envelope: they are static per point,
-so the connector publishes them once in its retained capability descriptor (§7) instead of on
-every read. `meta.parameter.title` / `meta.parameter.description` override them for a
-parameter's cloud-facing labels, so a point can carry a general-purpose label and still say
-something different in the parameter UI.
-
-A device MAY inherit these same point fields from a **point library** instead of declaring
-them inline; see §3.4.
 
 ### 3.2 Protocol-specific fields
 
@@ -214,6 +214,9 @@ that they are objects and that each connector documents and schema-validates the
   error.
 - The rules above apply to the **resolved** point, after every `points_from` reference has
   been merged (§3.4).
+- A device `type`, where present, MUST be a non-empty string; a connector MUST reject a blank
+  one rather than treat it as absent, so the same configuration is accepted by every
+  implementation.
 - Duration strings follow the thin-edge convention (`"500ms"`, `"2s"`, `"5m"`).
 - Unknown top-level keys SHOULD be rejected; unknown keys inside protocol-specific objects
   are delegated to the connector's own schema.

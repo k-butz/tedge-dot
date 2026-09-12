@@ -333,6 +333,27 @@ check "parameter-state: link status supplies the type for write-only points" ot-
   '[te/device/plc1///twin/acme_boiler_v2_control_parameters] {"valve_cmd":true}'
 check_empty "parameter-state: link status alone publishes nothing" ot-parameter-state \
   '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2"}'
+# A link status without a type means the type is GONE (a reverted config, a switch to an
+# untyped library) — the flow must follow `describe` back to the protocol name instead of
+# publishing to a fragment no DTM definition matches any more.
+check "parameter-state: a link status without a type clears the learned one" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2"}'$'\n''[te/device/plc1/ot/modbus/status/link] {"status":"connected"}'$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--1] {\"status\":\"successful\",\"results\":[{\"point\":\"valve_cmd\",\"status\":\"successful\",\"value\":true}]}" \
+  '[te/device/plc1///twin/modbus_control_parameters] {"valve_cmd":true}'
+# A write-only point in a non-default group never samples, so the only thing that can say
+# which set its value belongs in is the request that wrote it (origin.set, from the
+# parameter_update the operator sent). Without this it landed in the *control* set while
+# `describe` declared it in the commissioning one.
+WBINIT='{"status":"init","writes":[{"point":"valve_cmd","value":true}],"origin":{"command":"parameter_update","set":"acme_boiler_v2_commissioning_parameters","parameters":{"valve_cmd":true}}}'
+check "parameter-state: a write-only point lands in the set the request named" ot-parameter-state \
+  '[te/device/plc1/ot/modbus/status/link] {"status":"connected","type":"acme-boiler-v2"}'$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--2] $WBINIT"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--2] {\"status\":\"successful\",\"results\":[{\"point\":\"valve_cmd\",\"status\":\"successful\",\"value\":true}]}" \
+  '[te/device/plc1///twin/acme_boiler_v2_commissioning_parameters] {"valve_cmd":true}'
+# ...but a set learned from the point's own samples wins: the samples carry its meta, the
+# request only carries what the operator's UI happened to edit.
+SAMPLED='{"ts":"2026-05-30T10:00:00.000Z","device":"plc1","type":"acme-boiler-v2","protocol":"modbus","point":"temp_u16","mode":"typed","datatype":"uint16","value":17001,"value_repr":"number","raw":"4269","quality":"good","addr":{},"access":"read_write"}'
+RQINIT='{"status":"init","writes":[{"point":"temp_u16","value":4242}],"origin":{"command":"parameter_update","set":"some_other_set","parameters":{"temp_u16":4242}}}'
+check "parameter-state: the set learned from samples wins over the request" ot-parameter-state \
+  "[te/device/plc1/ot/modbus/sample/temp_u16] $SAMPLED"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--3] $RQINIT"$'\n'"[te/device/plc1/ot/modbus/cmd/write-batch/ot--3] {\"status\":\"successful\",\"results\":[{\"point\":\"temp_u16\",\"status\":\"successful\",\"value\":4242}]}" \
+  '[te/device/plc1///twin/acme_boiler_v2_control_parameters] {"temp_u16":4242}'
 
 # --- ot-command-forward: parameter_update -> write-batch ---
 C8YOP='{"status":"init","operation":{"deviceId":"123","c8y_ParameterUpdate":{},"c8y_ParameterUpdate_acme_boiler_v2_control_parameters":{},"acme_boiler_v2_control_parameters":{"temp_u16":4242,"coil_rw":true}},"c8y-mapper":{"on_fragment":"c8y_ParameterUpdate","output":null}}'
@@ -373,8 +394,8 @@ check "registration: advertises the parameter_update capability" ot-registration
 
 # --- the parameter bridge in one mapper: state records the protocol, forward uses it, result completes, state updates the twin ---
 CHAIN="[te/device/opc1/ot/opcua/sample/setpoint] {\"device\":\"opc1\",\"protocol\":\"opcua\",\"point\":\"setpoint\",\"mode\":\"typed\",\"datatype\":\"int32\",\"value\":0,\"value_repr\":\"number\",\"raw\":\"0000 0000\",\"quality\":\"good\",\"addr\":{},\"access\":\"read_write\"}
-[te/device/opc1///cmd/parameter_update/c8y-mapper-9] {\"status\":\"init\",\"operation\":{\"c8y_ParameterUpdate\":{},\"c8y_ParameterUpdate_opcua_parameters\":{},\"opcua_parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
-[te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {\"status\":\"init\",\"writes\":[{\"point\":\"setpoint\",\"value\":42}],\"origin\":{\"command\":\"parameter_update\",\"set\":\"opcua_parameters\",\"parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
+[te/device/opc1///cmd/parameter_update/c8y-mapper-9] {\"status\":\"init\",\"operation\":{\"c8y_ParameterUpdate\":{},\"c8y_ParameterUpdate_opcua_control_parameters\":{},\"opcua_control_parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
+[te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {\"status\":\"init\",\"writes\":[{\"point\":\"setpoint\",\"value\":42}],\"origin\":{\"command\":\"parameter_update\",\"set\":\"opcua_control_parameters\",\"parameters\":{\"setpoint\":42}},\"c8y-mapper\":{\"on_fragment\":\"c8y_ParameterUpdate\",\"output\":null}}
 [te/device/opc1/ot/opcua/cmd/write-batch/ot--c8y-mapper-9] {\"status\":\"successful\",\"results\":[{\"point\":\"setpoint\",\"status\":\"successful\",\"value\":42}]}"
 check_multi "parameter bridge: forward targets the protocol the state flow recorded (no params needed)" \
   "ot-parameter-state ot-command-forward ot-command-result" "$CHAIN" \

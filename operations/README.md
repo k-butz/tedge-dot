@@ -119,6 +119,13 @@ it references): without one the sets fall back to `<protocol>_control_parameters
 other device type on that protocol also falls back to, and the definitions would overwrite each
 other in the tenant. `describe` warns when a device exposes parameters without a type.
 
+Renaming a set leaves the old twin fragment retained under its old name (and mirrored into the
+managed object), so clear it once per device after changing a name:
+
+```sh
+tedge mqtt pub -r -q 1 'te/device/plc1///twin/modbus_parameters' ''
+```
+
 > The legacy operations carried raw register/coil addresses and per-register scaling. Those now
 > live in connector config (point `address`) and flows (scaling), so the cloud-facing operation
 > only needs the logical point id and value. Adapt the `input.*` jq expressions in each shim if

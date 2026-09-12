@@ -76,21 +76,30 @@ fi
 
 # stdout is the JSON and stderr carries diagnostics (a config with no device `type` is
 # warned about, §5.2) — merging them would feed a warning line to the JSON parser below.
-errs=$(mktemp)
-trap 'rm -f "$compare" "$errs"' EXIT
+rust_errs=$(mktemp)
+c_errs=$(mktemp)
+trap 'rm -f "$compare" "$rust_errs" "$c_errs"' EXIT
 
 fail=0
 for config in "${configs[@]}"; do
     name=${config#"$repo"/}
-    if ! rust_out=$("$rust_bin" describe -c "$config" --compact 2>"$errs"); then
+    if ! rust_out=$("$rust_bin" describe -c "$config" --compact 2>"$rust_errs"); then
         echo "FAIL $name: the Rust binary rejected the config:" >&2
-        cat "$errs" >&2
+        cat "$rust_errs" >&2
         fail=1
         continue
     fi
-    if ! c_out=$("$c_bin" describe -c "$config" --compact 2>"$errs"); then
+    if ! c_out=$("$c_bin" describe -c "$config" --compact 2>"$c_errs"); then
         echo "FAIL $name: the C binary rejected the config:" >&2
-        cat "$errs" >&2
+        cat "$c_errs" >&2
+        fail=1
+        continue
+    fi
+    # Diagnostics are part of the CLI contract too: the untyped-device warning (§5.2) must read
+    # the same from either binary, or a user gets different advice depending on the package.
+    if ! diff -u "$rust_errs" "$c_errs" >/dev/null; then
+        echo "FAIL $name: the two binaries print different diagnostics:" >&2
+        diff -u "$rust_errs" "$c_errs" >&2 || true
         fail=1
         continue
     fi

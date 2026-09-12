@@ -439,7 +439,11 @@ static void check_device_type_is_inherited_from_the_first_library(void) {
 
     /* A device `type` that is present but unusable is an error, not an absent
      * type -- and the Rust loader must reject the same files. */
-    for (int i = 0; i < 2; i++) {
+    /* An array or a table is present but unusable, not absent: tomlc99's
+     * scalar-only lookup would drop it silently while Rust rejects the file. */
+    static const char *bad_types[] = {"\"\"", "\"  \"", "7", "true",
+                                      "[\"acme\"]", "{ a = 1 }"};
+    for (size_t i = 0; i < sizeof bad_types / sizeof *bad_types; i++) {
         char bad_body[1024];
         snprintf(bad_body, sizeof bad_body,
                  "[connector]\n"
@@ -452,24 +456,26 @@ static void check_device_type_is_inherited_from_the_first_library(void) {
                  "protocol_address = { transport = \"tcp\", host = \"127.0.0.1\", "
                  "port = 502, unit_id = 1 }\n"
                  "points_from = [\"acme-meter\"]\n",
-                 s.dir, i == 0 ? "\"\"" : "7");
+                 s.dir, bad_types[i]);
         write_file(&s, "etc/bad-type.toml", bad_body);
         tdot_config_t *bad_cfg =
             tdot_config_load(scratch_path(&s, "etc/bad-type.toml"), err, sizeof err);
         CHECK(bad_cfg == NULL && strstr(err, "type must be a non-empty string") != NULL,
-              "an unusable device type must be rejected, got '%s'", err);
+              "device type %s must be rejected, got '%s'", bad_types[i], err);
         tdot_config_free(bad_cfg);
     }
 
-    /* A non-string library type is a mistake worth naming. */
-    char bad[2048];
-    snprintf(bad, sizeof bad, "[library]\ntype = 7\n%s",
-             LIBRARY + strlen("[library]\n"));
-    write_file(&s, "modbus/bad-type.toml", bad);
-    cfg = load_with_libs(&s, "\"bad-type\"", "", err, sizeof err);
-    CHECK(cfg == NULL && strstr(err, "[library] type") != NULL,
-          "a non-string [library] type must be rejected, got '%s'", err);
-    tdot_config_free(cfg);
+    /* Same for a library type: present but unusable is an error, not absent. */
+    for (size_t i = 0; i < sizeof bad_types / sizeof *bad_types; i++) {
+        char bad[2048];
+        snprintf(bad, sizeof bad, "[library]\ntype = %s\n%s", bad_types[i],
+                 LIBRARY + strlen("[library]\n"));
+        write_file(&s, "modbus/bad-type.toml", bad);
+        cfg = load_with_libs(&s, "\"bad-type\"", "", err, sizeof err);
+        CHECK(cfg == NULL && strstr(err, "[library] type") != NULL,
+              "[library] type %s must be rejected, got '%s'", bad_types[i], err);
+        tdot_config_free(cfg);
+    }
     scratch_free(&s);
 }
 
