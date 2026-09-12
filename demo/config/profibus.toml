@@ -34,39 +34,19 @@ slot_bits      = 300
 [[device]]
 name             = "remote_io"
 protocol_address = { station_address = 7, ident_number = 0, input_bytes = 8, output_bytes = 4 }
+points_from      = ["demo-sim"]
 
-  [[device.point]]
-  id       = "di_byte0"
-  datatype = "uint8"
-  access   = "read"
-  address  = { direction = "input", byte_offset = 0 }
-
-  [[device.point]]
-  id       = "di_bit3"
-  datatype = "bool"
-  access   = "read"
-  address  = { direction = "input", byte_offset = 0, bit_offset = 3, bit_count = 1 }
-
-  [[device.point]]
-  id       = "ai0_raw"
-  datatype = "uint16"
-  access   = "read"
-  address  = { direction = "input", byte_offset = 2 }
-
-  [[device.point]]
-  id       = "ai1_raw"
-  datatype = "uint16"
-  access   = "read"
-  address  = { direction = "input", byte_offset = 4 }
-
-  [[device.point]]
-  id       = "do_byte0"
-  datatype = "uint8"
-  access   = "read_write"
-  address  = { direction = "output", byte_offset = 0 }
-
-  [[device.point]]
-  id       = "ao0_raw"
-  datatype = "uint16"
-  access   = "write"
-  address  = { direction = "output", byte_offset = 2 }
+  # The points come from the packaged point library
+  # points.d/profibus/demo-sim.toml (contract §3.4): the simulator's data point
+  # list lives there, so this file holds only what is per-instance. An
+  # installed package finds it automatically; from a source checkout point the
+  # search path at the copy in this repo:
+  #
+  #   export TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d
+  #
+  # A device may still add points of its own, or adjust an inherited one by
+  # naming its id and only the fields to change, e.g.:
+  #
+  #   [[device.point]]
+  #   id   = "ai0_raw"
+  #   name = "A label of my own"

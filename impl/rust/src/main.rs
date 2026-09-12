@@ -468,10 +468,21 @@ fn pick_log_level(configs: &[PathBuf]) -> String {
     }
     configs
         .iter()
-        .filter_map(|p| load_config(&p.display().to_string()).ok())
-        .map(|c| c.connector.log_level)
+        .filter_map(|p| connector_section(p))
+        .map(|c| c.log_level)
         .max_by_key(|l| verbosity(l))
         .unwrap_or_else(|| "info".to_string())
+}
+
+/// Parse only the `[connector]` section of a config file, skipping point-library resolution
+/// (§3.4). The log level and the service name do not depend on a device's points, and a config
+/// whose library reference does not resolve should still contribute them — the real load in
+/// `run_one` is what reports that error, once, with the connector's own span.
+fn connector_section(path: &Path) -> Option<tedge_dot_sdk::config::ConnectorSection> {
+    let text = std::fs::read_to_string(path).ok()?;
+    toml::from_str::<ConnectorConfig>(&text)
+        .ok()
+        .map(|c| c.connector)
 }
 
 /// Two configs sharing a `service_name` fight over the same MQTT client id and health topic;
@@ -480,9 +491,9 @@ fn warn_duplicate_service_names(configs: &[PathBuf]) {
     let mut by_service: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for path in configs {
-        if let Ok(config) = load_config(&path.display().to_string()) {
+        if let Some(connector) = connector_section(path) {
             by_service
-                .entry(config.connector.service_name)
+                .entry(connector.service_name)
                 .or_default()
                 .push(path.display().to_string());
         }
@@ -890,11 +901,10 @@ fn print_write_result(device: &str, result: &tedge_dot_sdk::CommandResult, json:
     }
 }
 
-/// Load and parse a connector configuration file.
+/// Load and parse a connector configuration file, resolving the point libraries its devices
+/// reference (`points_from`, contract §3.4).
 fn load_config(path: &str) -> Result<ConnectorConfig, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("failed to read config '{path}': {e}"))?;
-    toml::from_str(&text).map_err(|e| format!("failed to parse config '{path}': {e}"))
+    tedge_dot_sdk::library::load(Path::new(path))
 }
 
 /// Parse a CLI `--value` string into a JSON value and its `value_repr` tag, inferring the type:

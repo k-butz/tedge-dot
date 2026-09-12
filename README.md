@@ -93,6 +93,42 @@ sudo systemctl restart tedge-dot
 tedge mqtt sub 'te/+/+/+/+/m/+'    # watch the measurements arrive
 ```
 
+## One point list, many devices
+
+A device's point list belongs to its *type*, not to the instance: every ACME meter of the same
+firmware has the same registers, and only the address differs. So a point list can live in its
+own file — a **point library** — and a device reference it:
+
+```toml
+[[device]]
+name             = "plc-7"
+protocol_address = { transport = "tcp", host = "192.168.0.17", port = 502, unit_id = 1 }
+points_from      = ["acme-meter-v2"]     # /usr/share/tedge-dot/points.d/modbus/acme-meter-v2.toml
+```
+
+Libraries are looked up as `<dir>/<protocol>/<name>.toml` under
+`/etc/tedge/plugins/ot/points.d` (a site's own) and then `/usr/share/tedge-dot/points.d`
+(packaged), so a site copy shadows a packaged list of the same name. A device may reference
+several and add or adjust points of its own — the later definition of a point id patches the
+earlier one — which is how a packaged list gets extended without editing the file a package
+upgrade replaces.
+
+Points can also carry a `name` and `description`, so a shared list documents itself once for
+every instance that references it — they render into the Cumulocity parameter UI and into the
+connector's retained capability descriptor, rather than being echoed on every sample.
+
+The packages ship a library per demo simulator (`demo-sim`, one for each protocol), so the
+quickest way to get data out of a device is to give a `[[device]]` its address and
+`points_from = ["demo-sim"]` — no point definitions to type. The demo configs in
+[demo/config/](demo/config/) are written exactly that way.
+
+Because only the *reference* is stored, `define-device` can add an instance at runtime from
+its address alone, which is what lets your own discovery (mDNS, a subnet scan, an asset
+inventory) onboard a known device type without shipping its point list. See
+[RFC 0004](doc/rfc/0004-point-libraries.md), the normative
+[contract §3.4](doc/contract/ot-connector-contract.md#34-point-libraries), and
+the demo configs in [demo/config/](demo/config/) for runnable examples.
+
 ## Try it without hardware
 
 Each protocol has a Docker simulator. No broker or cloud needed for a first
@@ -100,6 +136,7 @@ poke — the CLI talks to the device directly:
 
 ```sh
 just sim modbus     # pymodbus simulator on 127.0.0.1:5020
+export TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d   # where the demo point lists live in a checkout
 cargo run --manifest-path impl/rust/Cargo.toml -- read -c demo/config/modbus.toml                    # all devices, all readable points
 cargo run --manifest-path impl/rust/Cargo.toml -- read -c demo/config/modbus.toml -d plc1 -p 'temp_*' --poll   # keep polling (Ctrl-C stops)
 cargo run --manifest-path impl/rust/Cargo.toml -- run  -c demo/config/modbus.toml --output stdout --duration 10s  # sample JSON lines, no broker
@@ -144,6 +181,7 @@ the same config. See [RFC 0003](doc/rfc/0003-parameter-writes.md), [flows/](flow
 | [connectors/](connectors/) | per-protocol e2e test stacks: simulator, Docker compose, Robot suites |
 | [cloud/](cloud/) | Cumulocity cloud e2e suites (live tenant) |
 | [packaging/](packaging/) | installed default configs, systemd unit, package scripts |
+| [demo/points.d/](demo/points.d/) | example point libraries (a device type's point list, packaged on its own) |
 | [doc/](doc/) | proposal, RFCs, contract + schemas, connector specs, testing strategy |
 | [demo/](demo/) | simulator compose file + demo configs: local CLI exploration and the all-protocols on-device demo |
 

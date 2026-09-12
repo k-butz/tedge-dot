@@ -1,0 +1,82 @@
+# Point library for the demo pymodbus simulator (contract §3.4).
+#
+# A point library is a data point list for one *device type*, with no connection
+# information in it: every instance of that type references this one file and
+# supplies only its own address. See demo/config/modbus.toml for the device
+# side, and doc/rfc/0004-point-libraries.md for the design.
+#
+# Packages install libraries under /usr/share/tedge-dot/points.d/<protocol>/;
+# a site's own go in /etc/tedge/plugins/ot/points.d/<protocol>/, which shadows
+# a packaged library of the same name.
+
+# The addresses map onto the values seeded in connectors/modbus/sim/modbus.json
+# (the simulator shares one address space between the holding, input and coil
+# tables, so these holding addresses read the seeded values):
+#
+#   holding 3      -> uint16  17001
+#   holding 4..5   -> uint32  617001
+#   holding 6..7   -> float32 404.17
+#   coil    48     -> bool    false (initially)
+#   holding 1      -> flagged "invalid" -> read raises a Modbus exception (bad quality)
+
+[library]
+protocol    = "modbus"
+description = "pymodbus simulator, as seeded by demo/docker-compose.yaml's modbus-sim"
+version     = "1"
+
+# uint16 holding register -> 17001. Writable, so it shows up as a Cumulocity
+# device parameter (see RFC 0003); meta.parameter enriches that schema.
+[[point]]
+id          = "temp_u16"
+name        = "Temperature setpoint"
+description = "Target temperature for the boiler loop"
+datatype    = "uint16"
+access      = "read_write"
+address     = { table = "holding", address = 3, count = 1 }
+meta        = { parameter = { min = 0, max = 30000 } }
+
+# The same register with the signal's own scaling applied: 17001 * 10^-3 = 17.001.
+#
+# `name` and `description` are what make a shared list self-documenting: they are
+# declared once here and every instance that references this library inherits
+# them, so nothing has to guess what "temp_scaled" means. They are published in
+# the connector's retained capability descriptor (§7), not in every sample.
+[[point]]
+id          = "temp_scaled"
+name        = "Boiler temperature"
+description = "Measured boiler loop temperature, scaled to °C"
+datatype    = "uint16"
+address     = { table = "holding", address = 3, count = 1 }
+transform   = { decimal_shift = -3 }
+unit        = "°C"
+meta        = { on_change = true, deadband = 0.5, min_interval = "10s" }
+
+# Reading this address makes the simulator return an exception -> quality "bad".
+# Kept deliberately: it shows quality propagating end to end.
+[[point]]
+id          = "bad_point"
+name        = "Faulty sensor"
+description = "Address the simulator answers with an exception, to show bad quality"
+datatype    = "uint16"
+address     = { table = "holding", address = 1, count = 1 }
+
+# uint32 across two registers -> 617001.
+[[point]]
+id          = "count_u32"
+name        = "Cycle count"
+description = "Completed pump cycles since power-on"
+datatype    = "uint32"
+address     = { table = "holding", address = 4, count = 2 }
+
+# float32 across two registers -> 404.17.
+[[point]]
+id       = "level_f32"
+datatype = "float32"
+address  = { table = "holding", address = 6, count = 2 }
+
+# Coil used for the boolean write round-trip.
+[[point]]
+id       = "coil_rw"
+datatype = "bool"
+access   = "read_write"
+address  = { table = "coil", address = 48, count = 1 }

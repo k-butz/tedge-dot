@@ -44,6 +44,11 @@ pub struct Parameter {
     pub datatype: Option<DataType>,
     pub access: Access,
     pub unit: Option<String>,
+    /// The point's own `name`/`description` (§3.1). `meta.parameter.title` and
+    /// `meta.parameter.description` override them, so a point can carry a general-purpose
+    /// label and still say something different in the parameter UI.
+    pub name: Option<String>,
+    pub description: Option<String>,
     /// The `meta.parameter` table (normalized to an object).
     pub options: Map<String, Value>,
 }
@@ -79,6 +84,8 @@ pub fn parameter_of(point: &PointConfig, default_set: &str) -> Option<Parameter>
         datatype: point.datatype,
         access,
         unit: point.unit.clone(),
+        name: point.name.clone(),
+        description: point.description.clone(),
         options,
     })
 }
@@ -185,6 +192,7 @@ pub fn property_schema(param: &Parameter) -> Value {
         .get("title")
         .and_then(|t| t.as_str())
         .map(String::from)
+        .or_else(|| param.name.clone())
         .unwrap_or_else(|| param.point.clone());
     schema.insert("title".into(), json!(title));
     let mut description = param
@@ -192,6 +200,7 @@ pub fn property_schema(param: &Parameter) -> Value {
         .get("description")
         .and_then(|d| d.as_str())
         .map(String::from)
+        .or_else(|| param.description.clone())
         .unwrap_or_default();
     if let Some(unit) = &param.unit {
         if !description.is_empty() {
@@ -225,6 +234,34 @@ pub fn property_schema(param: &Parameter) -> Value {
         schema.insert("readOnly".into(), json!(true));
     }
     Value::Object(schema)
+}
+
+/// The `point_labels` of the capability descriptor (§7): every configured point that declares
+/// a `name` or a `description`, so a consumer can show something friendlier than the point id.
+///
+/// Points with neither are omitted — their id *is* their label — so a configuration that uses
+/// none of this adds nothing to the descriptor. Published once, retained, rather than echoed
+/// in every sample: the labels are static, and a sample is a time series.
+pub fn point_labels(config: &ConnectorConfig) -> Vec<Value> {
+    let mut labels = Vec::new();
+    for device in &config.devices {
+        for point in &device.points {
+            if point.name.is_none() && point.description.is_none() {
+                continue;
+            }
+            let mut entry = Map::new();
+            entry.insert("device".into(), json!(device.name));
+            entry.insert("point".into(), json!(point.id));
+            if let Some(name) = &point.name {
+                entry.insert("name".into(), json!(name));
+            }
+            if let Some(description) = &point.description {
+                entry.insert("description".into(), json!(description));
+            }
+            labels.push(Value::Object(entry));
+        }
+    }
+    labels
 }
 
 fn title_from_key(key: &str) -> String {
@@ -263,6 +300,8 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   datatype = "uint16"
   access = "read_write"
   unit = "°C"
+  name = "Boiler temp"
+  description = "Outlet temperature after the heat exchanger"
   address = { table = "holding", address = 3, count = 1 }
   meta = { parameter = { title = "Temperature setpoint", min = 0, max = 100, order = 7 } }
 
@@ -270,6 +309,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   id = "coil_rw"
   datatype = "bool"
   access = "read_write"
+  name = "Pump enable"
   address = { table = "coil", address = 48, count = 1 }
 
   [[device.point]]
@@ -282,6 +322,7 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
   [[device.point]]
   id = "level_f32"
   datatype = "float32"
+  description = "Level in the buffer tank"
   address = { table = "holding", address = 6, count = 2 }
 
   [[device.point]]
@@ -347,7 +388,16 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
         assert_eq!(props["temp_u16"]["minimum"], 0.0);
         assert_eq!(props["temp_u16"]["maximum"], 100.0);
         assert_eq!(props["temp_u16"]["order"], 7);
-        assert_eq!(props["temp_u16"]["description"], "[°C]");
+        // meta.parameter.title wins over the point's `name`...
+        assert_eq!(props["temp_u16"]["title"], "Temperature setpoint");
+        // ...while the point's `description` is used (no meta.parameter.description here) and
+        // still composes with the unit.
+        assert_eq!(
+            props["temp_u16"]["description"],
+            "Outlet temperature after the heat exchanger [°C]"
+        );
+        // With no meta at all, the point's `name` becomes the title.
+        assert_eq!(props["coil_rw"]["title"], "Pump enable");
         assert_eq!(props["coil_rw"]["type"], "boolean");
         assert_eq!(props["coil_rw"]["order"], 2);
         assert_eq!(props["status_word"]["readOnly"], true);
@@ -361,6 +411,42 @@ protocol_address = { transport = "tcp", host = "127.0.0.1", port = 502, unit_id 
         let speed = &pump["jsonSchema"]["properties"]["pump_speed"];
         assert_eq!(speed["type"], "number");
         assert!(speed["description"].as_str().unwrap().contains("write-only"));
+    }
+
+    /// The capability descriptor's `point_labels` (§7): the labels are static, so they are
+    /// published once and retained rather than echoed in every sample. Read-only points get an
+    /// entry too — they have no DTM parameter to carry one — and a point with neither label is
+    /// omitted, so a configuration using none of this adds nothing to the descriptor.
+    #[test]
+    fn point_labels_carry_the_human_readable_text() {
+        let labels = point_labels(&cfg());
+        assert_eq!(
+            labels,
+            vec![
+                json!({
+                    "device": "plc1",
+                    "point": "temp_u16",
+                    "name": "Boiler temp",
+                    "description": "Outlet temperature after the heat exchanger",
+                }),
+                json!({ "device": "plc1", "point": "coil_rw", "name": "Pump enable" }),
+                json!({
+                    "device": "plc1",
+                    "point": "level_f32",
+                    "description": "Level in the buffer tank",
+                }),
+            ],
+            "labelled points only, in configuration order, with just the fields they declare"
+        );
+
+        // A configuration that labels nothing produces no labels at all, so the descriptor is
+        // unchanged for everyone not using the feature.
+        let mut bare = cfg();
+        for point in &mut bare.devices[0].points {
+            point.name = None;
+            point.description = None;
+        }
+        assert!(point_labels(&bare).is_empty());
     }
 
     #[test]

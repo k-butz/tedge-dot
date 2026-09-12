@@ -8,7 +8,11 @@
 #
 # Two ways to use it:
 #
-#   * Local exploration, no broker needed — the read/write CLI ignores [mqtt]:
+#   * Local exploration, no broker needed — the read/write CLI ignores [mqtt].
+#     The points come from a packaged library, so from a checkout say where it is
+#     once (an installed package needs none of this):
+#
+#       export TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d
 #       cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/opcua.toml -d opc1 -p temperature -p count_u32 --json
 #       cargo run --manifest-path impl/rust/Cargo.toml -- write -c demo/config/opcua.toml -d opc1 -p setpoint --value 42
 #       cargo run --manifest-path impl/rust/Cargo.toml -- read  -c demo/config/opcua.toml -d opc1 -p bad_point  # exits 1 (bad quality)
@@ -50,41 +54,19 @@ connect_timeout_s = 10
 name             = "opc1"
 protocol_address = { endpoint = "opc.tcp://127.0.0.1:4840/", security_policy = "None", security_mode = "none" }
 default_mode     = "typed"
+points_from      = ["demo-sim"]
 
-  [[device.point]]
-  id       = "temperature"
-  datatype = "float64"
-  unit     = "°C"
-  address  = { node_id = "ns=2;s=Temperature" }
-
-  [[device.point]]
-  id       = "count_u32"
-  datatype = "uint32"
-  address  = { node_id = "ns=2;s=Count" }
-
-  # Int32 used for the numeric write round-trip. Writable points are *parameters* (see the
-  # ot-parameter-state flow and `tedge-dot describe`); meta.parameter enriches the generated
-  # schema.
-  [[device.point]]
-  id       = "setpoint"
-  datatype = "int32"
-  access   = "read_write"
-  address  = { node_id = "ns=2;s=Setpoint" }
-  meta     = { parameter = { title = "Setpoint", min = -1000, max = 1000 } }
-
-  # Boolean used for the boolean write round-trip.
-  [[device.point]]
-  id       = "running"
-  datatype = "bool"
-  access   = "read_write"
-  address  = { node_id = "ns=2;s=Running" }
-
-  # Reading this node returns a Bad status -> quality "bad"
-  # (kept in the demo deliberately, to show quality propagation end to end).
-  # Excluded from push delivery: the server rejects a monitored item for an
-  # unknown node, which would make the whole device fall back to polling.
-  [[device.point]]
-  id        = "bad_point"
-  datatype  = "uint16"
-  subscribe = false
-  address   = { node_id = "ns=2;s=DoesNotExist" }
+  # The points come from the packaged point library
+  # points.d/opcua/demo-sim.toml (contract §3.4): the simulator's data point
+  # list lives there, so this file holds only what is per-instance. An
+  # installed package finds it automatically; from a source checkout point the
+  # search path at the copy in this repo:
+  #
+  #   export TEDGE_DOT_POINT_LIBRARY_PATH=demo/points.d
+  #
+  # A device may still add points of its own, or adjust an inherited one by
+  # naming its id and only the fields to change, e.g.:
+  #
+  #   [[device.point]]
+  #   id   = "temperature"
+  #   name = "A label of my own"

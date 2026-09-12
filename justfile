@@ -106,6 +106,12 @@ fuzz-all seconds="30":
 check-capability-tags:
     ./connectors/_shared/check-capability-tags.sh
 
+# Cross-check that both packages install the same files: .goreleaser.yaml (tedge-dot-rs) and
+# impl/c/packaging/nfpm.yaml (tedge-dot-c) are meant to be interchangeable, and nothing else
+# enforces it.
+check-manifest-parity:
+    ./packaging/check-manifest-parity.sh
+
 # Validate the thin-edge flows offline with `tedge flows test` (no broker/device/cloud).
 test-flows:
     ./flows/test-flows.sh

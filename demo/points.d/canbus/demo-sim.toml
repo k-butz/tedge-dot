@@ -1,0 +1,44 @@
+# Point library for the demo CAN bus simulator (contract §3.4).
+#
+# The signals of a *device type*, with no connection information in it: the
+# SocketCAN interface and the DBC file belong to the instance
+# (`protocol_address`), these signals belong to every instance. Reference it
+# from a device with:
+#
+#   points_from = ["demo-sim"]
+#
+# Packages install this at /usr/share/tedge-dot/points.d/canbus/demo-sim.toml.
+#
+# The addresses name a message and a signal from the DBC the connector loads;
+# bit offsets, lengths, scaling and endianness all come from that DBC, which is
+# why a CAN point address is this short. See connectors/canbus/sim/test.dbc.
+
+[library]
+protocol    = "canbus"
+description = "Demo CAN sender (canbus-sim in demo/docker-compose.yaml), signals from test.dbc"
+version     = "1"
+
+[[point]]
+id          = "rpm"
+name        = "Engine speed"
+description = "Crankshaft speed from the ENGINE_STATUS frame"
+datatype    = "uint16"
+access      = "read"
+address     = { message_name = "ENGINE_STATUS", signal_name = "RPM" }
+
+[[point]]
+id          = "coolant_temp"
+name        = "Coolant temperature"
+description = "Engine coolant temperature from the ENGINE_STATUS frame"
+datatype    = "int8"
+access      = "read"
+address     = { message_name = "ENGINE_STATUS", signal_name = "COOLANT_TEMP" }
+
+# Writable: the connector sends the frame with this signal set.
+[[point]]
+id          = "brake_active"
+name        = "Brake active"
+description = "Brake pedal flag in the ENGINE_STATUS frame"
+datatype    = "bool"
+access      = "read_write"
+address     = { message_name = "ENGINE_STATUS", signal_name = "BRAKE_ACTIVE" }

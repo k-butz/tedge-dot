@@ -9,10 +9,12 @@ pub mod conformance;
 pub mod connector;
 pub mod decode;
 pub mod descriptor;
+pub mod library;
 pub mod model;
 pub mod runtime;
 
 pub use config::{parse_duration, ConnectorConfig, DeviceConfig, PointConfig};
+pub use library::{load as load_config, resolve as resolve_config};
 pub use connector::{
     Access, Capabilities, CommandRequest, CommandResult, ConfigError, Connector, ConnectorError,
     LinkReport, LinkStatus, PointRef, SampleSink,

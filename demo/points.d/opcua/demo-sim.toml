@@ -1,0 +1,61 @@
+# Point library for the demo OPC UA simulator (contract §3.4).
+#
+# The point list of a *device type*, with no connection information in it: the
+# endpoint belongs to the instance, these nodes belong to every instance of
+# this server. Reference it from a device with:
+#
+#   points_from = ["demo-sim"]
+#
+# Packages install this at /usr/share/tedge-dot/points.d/opcua/demo-sim.toml;
+# a list of your own goes in /etc/tedge/plugins/ot/points.d/opcua/ and shadows
+# a packaged one of the same name.
+
+[library]
+protocol    = "opcua"
+description = "Demo OPC UA server (opcua-sim in demo/docker-compose.yaml)"
+version     = "1"
+
+[[point]]
+id          = "temperature"
+name        = "Temperature"
+description = "Simulated process temperature, updated by the server"
+datatype    = "float64"
+unit        = "°C"
+address     = { node_id = "ns=2;s=Temperature" }
+
+[[point]]
+id          = "count_u32"
+name        = "Sample count"
+description = "Monotonic counter the server increments"
+datatype    = "uint32"
+address     = { node_id = "ns=2;s=Count" }
+
+# Writable, so it appears as a Cumulocity device parameter (RFC 0003);
+# meta.parameter adds the limits the plain datatype range cannot express.
+[[point]]
+id          = "setpoint"
+name        = "Setpoint"
+description = "Operator-settable target value"
+datatype    = "int32"
+access      = "read_write"
+address     = { node_id = "ns=2;s=Setpoint" }
+meta        = { parameter = { min = -1000, max = 1000 } }
+
+[[point]]
+id          = "running"
+name        = "Running"
+description = "Whether the simulated process is running"
+datatype    = "bool"
+access      = "read_write"
+address     = { node_id = "ns=2;s=Running" }
+
+# A node that does not exist on the server: shows a bad-quality sample end to
+# end. `subscribe = false` keeps it on the polling schedule, since a monitored
+# item for a missing node cannot be created in the first place.
+[[point]]
+id          = "bad_point"
+name        = "Missing node"
+description = "Node id the server does not have, to show bad quality"
+datatype    = "uint16"
+subscribe   = false
+address     = { node_id = "ns=2;s=DoesNotExist" }

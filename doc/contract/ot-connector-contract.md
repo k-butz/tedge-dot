@@ -89,6 +89,8 @@ poll_interval = "2s"            # default poll interval (duration string); per-p
 log_level     = "info"
 operation_timeout = "30s"       # optional: upper bound on one protocol-module call (§8.1)
 stall_timeout     = "120s"      # optional: restart the connector if its loop stops moving (§8.1)
+# optional: where bare point-library names are looked up (§3.4); shown with its default
+point_library_path = ["/etc/tedge/plugins/ot/points.d", "/usr/share/tedge-dot/points.d"]
 
 [mqtt]
 host = "127.0.0.1"
@@ -103,6 +105,7 @@ name     = "<device-name>"      # -> te/device/<device-name>
 protocol_address = { } # protocol-specific: how to reach this device. Shape per connector spec.
 poll_interval = "2s"            # optional per-device override
 default_mode  = "typed"         # optional; default output mode for this device's points
+points_from   = []              # optional; point libraries to inherit points from, in order (§3.4)
 
   [[device.point]]
   id       = "<point-id>"       # unique within the device; appears in topics
@@ -114,6 +117,8 @@ default_mode  = "typed"         # optional; default output mode for this device'
   address  = { } # protocol-specific: how to address this point. Shape per connector spec.
   access   = "read"             # "read" | "write" | "read_write" (default "read")
   unit     = "raw"              # optional free-form hint passed through in the sample
+  name     = "<short label>"    # optional human-readable label (§3.1); the id stays an identifier
+  description = "<what this signal is>"  # optional longer explanation (§3.1)
   transform = { multiplier = 1, divisor = 1, decimal_shift = 0, offset = 0 } # optional linear scale
 ```
 
@@ -160,10 +165,21 @@ default_mode  = "typed"         # optional; default output mode for this device'
 | `poll_interval` | duration string | no | Overrides device/connector default. |
 | `access` | `"read"` \| `"write"` \| `"read_write"` | no | Default `"read"`. |
 | `unit` | string | no | Opaque hint echoed into the sample for flows. |
+| `name` | string | no | Short human-readable label, for wherever a name is displayed instead of the `id` — which is a topic segment and a parameter-set key, so it stays a plain identifier. Feeds a parameter's DTM title (§5.2) and the capability descriptor's `point_labels` (§7). |
+| `description` | string | no | Longer human-readable explanation of the signal. Feeds a parameter's DTM description and `point_labels` (§7). |
 | `transform` | object | no | Per-point linear scale `(value*multiplier*10^decimal_shift/divisor)+offset`; see §4.2. |
 | `meta` | object | no | Free-form signal metadata echoed verbatim as `meta` in every sample envelope. Never interpreted by the connector; flows and tooling read it for per-signal behaviour (e.g. `on_change`, `deadband`, `min_interval`, `debounce`) and for exposing the point as an operator-editable *parameter* (`meta.parameter`, see §5.2). |
 | `subscribe` | boolean | no | Default `true`. `false` keeps the point on the polling schedule even when the connector supports push delivery. |
 | `address` | object | yes | **Protocol-specific**; shape defined by the connector spec. |
+
+`name` and `description` are **not** echoed in the sample envelope: they are static per point,
+so the connector publishes them once in its retained capability descriptor (§7) instead of on
+every read. `meta.parameter.title` / `meta.parameter.description` override them for a
+parameter's cloud-facing labels, so a point can carry a general-purpose label and still say
+something different in the parameter UI.
+
+A device MAY inherit these same point fields from a **point library** instead of declaring
+them inline; see §3.4.
 
 ### 3.2 Protocol-specific fields
 
@@ -176,10 +192,122 @@ that they are objects and that each connector documents and schema-validates the
 - A point with `mode = "typed"` MUST declare a `datatype`.
 - A point with `mode = "raw"` MUST NOT be rejected for missing `datatype`; decoding fields
   are ignored.
-- `id` MUST be unique within a device; `name` MUST be unique within a connector.
+- `id` MUST be unique within a device; `name` MUST be unique within a connector, and a
+  connector MUST reject a repeated device name rather than let two definitions publish over
+  each other on one entity's topics. Across the sources a device collects its points from
+  (§3.4) a repeated `id` is an override, not a duplicate; within one of those sources it is an
+  error.
+- The rules above apply to the **resolved** point, after every `points_from` reference has
+  been merged (§3.4).
 - Duration strings follow the thin-edge convention (`"500ms"`, `"2s"`, `"5m"`).
 - Unknown top-level keys SHOULD be rejected; unknown keys inside protocol-specific objects
   are delegated to the connector's own schema.
+
+### 3.4 Point libraries
+
+A device type has the same data points on every instance; what differs from one instance to
+the next is the connection information. A **point library** is that point list in its own
+file, carrying no connection information at all:
+
+```toml
+# /usr/share/tedge-dot/points.d/modbus/acme-meter-v2.toml
+[library]
+protocol    = "modbus"          # MUST match the referencing connector's protocol
+description = "ACME meter, firmware 2.x"   # optional, informational
+version     = "2.1"                        # optional, informational
+
+[[point]]                       # exactly the point fields of §3.1/§3.2
+id       = "boiler_temp"
+datatype = "float32"
+address  = { table = "holding", address = 7, count = 2 }
+```
+
+A device references one or more, in order, and declares only what is per-instance:
+
+```toml
+[[device]]
+name             = "plc-1"
+protocol_address = { transport = "tcp", host = "192.168.0.10", port = 502, unit_id = 1 }
+points_from      = ["acme-meter-v2", "site-extras"]
+```
+
+A library holds **only** `[library]` and `[[point]]`. A file that also carries `connector`,
+`mqtt`, `connection` or `device` is a connector configuration and MUST be rejected as such.
+
+#### Resolution
+
+A `points_from` entry is either a **name** or a **path**; an entry containing `/`, or ending
+in `.toml`, is a path, and a relative path resolves against the referencing configuration
+file's own directory. A name is resolved as `<dir>/<protocol>/<name>.toml` in each directory
+of the **library search path**, first match winning:
+
+| Precedence | Directory | For |
+| --- | --- | --- |
+| 1 | `/etc/tedge/plugins/ot/points.d` | a site's own libraries; shadow packaged ones of the same name |
+| 2 | `/usr/share/tedge-dot/points.d` | libraries shipped by a package (a connector's, or a vendor's device pack) |
+
+`[connector] point_library_path` (an array of directories, relative ones resolved against the
+configuration file's directory) **replaces** that default path, and MUST therefore name at
+least one directory — an empty or unusable list is a configuration error, not a way to say
+"no libraries", and MUST NOT be read as if the key were absent. Where the key *is* absent, the
+`TEDGE_DOT_POINT_LIBRARY_PATH` environment variable (colon-separated) replaces the default
+path instead, which is how a source checkout points at its own libraries. Names are protocol-scoped because a point's
+`address` is protocol-specific (§3.2): the same device type can have a library per protocol,
+and only the connector's own is ever loaded.
+
+#### Ordering and overrides
+
+Points are collected in order — each library in the order listed, then the device's own
+inline `[[device.point]]` entries — and a definition whose `id` already exists **patches** the
+one collected so far rather than adding a second point:
+
+- `meta` and `transform` are merged key by key (recursively for `meta`), so one field can be
+  adjusted without restating the rest;
+- every other field, `address` included, is **replaced** when the overriding definition
+  declares it (a partly-inherited protocol address is not a meaningful thing). `name` and
+  `description` (§3.1) are ordinary scalars under this rule, which is what lets a site relabel
+  an inherited point — one label at a time — without restating its address;
+- a field the override does not mention keeps its inherited value.
+
+Inline points are applied last, so a device always wins over the libraries it references.
+That ordering is what lets a site extend or adjust a packaged list — add a few points, retitle
+a parameter, slow one point's `poll_interval` — without editing the file the package owns and
+an upgrade replaces.
+
+The validation rules of §3.3 apply to the **resolved** point: a definition that only ever
+appears as a patch, with no library supplying the rest, is rejected for the fields it is
+missing. Within a single library a repeated `id` is an error, not an override: there is no
+order in which to apply it.
+
+#### Relationship to the rest of the contract
+
+Resolution happens when the configuration is **loaded**, so a protocol module, a flow, the
+capability descriptor and the `sample` envelopes see no difference between a point that was
+inherited and one that was written inline. What is *not* expanded is the configuration
+document the runtime keeps for the management verbs (§6.3): it retains the `points_from`
+reference, so persisting a patched configuration never bakes a library's points into the
+operator's file, and `define-device` MAY define a device from connection information plus a
+reference alone. That is the hook for discovery: a mechanism that finds instances on the
+network (mDNS, a scan, an asset inventory) publishes one small `define-device` per instance
+naming a device type it already knows.
+
+A connector MUST report an unresolvable reference as a configuration error naming what it
+looked for; it MUST NOT silently resolve a device to zero points. A library that declares an
+empty `point` list is therefore rejected exactly like one that declares none at all: left to
+resolve, the device would come up healthy and publish nothing, which is also what a generated
+library that found nothing would produce.
+
+A reference *introduced* by a **management command** (§6.3) MUST be a name, never a path, and
+MUST be refused before the path is opened. A configuration file is written by whoever
+administers the device, but a command is a different trust boundary: a reference taken from the
+broker could otherwise name an arbitrary path and have the connector report what it found
+there — whether the file exists, and, through a parse error, part of its contents — in the
+retained command result. Names are all a discovery mechanism needs.
+
+Only what the command changes is judged: the path references a device already had remain
+valid, so a configuration that legitimately uses the path form still accepts every management
+verb. A connector MUST therefore compare the patched document against the one it held, not
+scan the result as a whole.
 
 ## 4. Datatypes (typed mode)
 
@@ -529,7 +657,11 @@ same fields with its own values (and typically `"subscribe": true`):
   "point_kinds": ["coil", "discrete_input", "holding_register", "input_register"],
   "command_verbs": ["write", "set-config", "define-device", "remove-device"],
   "features": ["polling", "bitfield", "management"],
-  "subscribe": false
+  "subscribe": false,
+  "point_labels": [
+    { "device": "plc-1", "point": "boiler_temp",
+      "name": "Boiler temp", "description": "Outlet temperature after the heat exchanger" }
+  ]
 }
 ```
 
@@ -541,8 +673,18 @@ same fields with its own values (and typically `"subscribe": true`):
 | `command_verbs` | Verbs accepted on `cmd/<verb>`. MUST include `write` if any point is writable; SDK-based connectors also list `write-batch` (§6.4) and the management verbs (§6.3). |
 | `features` | Optional capability tags: `polling`, `subscribe`, `bitfield`, `string`, `bulk_read`, … |
 | `subscribe` | Whether the connector supports event-driven (push) reads in addition to polling. |
+| `point_labels` | The human-readable `name`/`description` of the configured points (§3.1), so a consumer can show something friendlier than the point id. Only points declaring one of them appear, and each entry carries only the fields it declares — **no entry means the id is the label**, so a configuration that labels nothing adds nothing here. Unlike the fields above, this describes the *configuration* rather than the connector's abilities; it lives here because it is static per point, which makes one retained message the right place for it and a per-sample echo the wrong one (§5 samples are a time series). |
 
 Tooling and the conformance suite use the descriptor to decide which tests apply.
+
+The descriptor is retained, so it MUST be republished whenever something it reports changes.
+Everything except `point_labels` is a property of the connector build and so is published once
+at startup; `point_labels` follows the configuration, and a connector MUST therefore republish
+the descriptor after a management command (§6.3) changes it — a retained message describing the
+configuration as it was at startup is worse than none. Note also that labelling every point of
+a large list has a size: two hundred fully labelled points add on the order of ten kilobytes to
+this one message. That is paid once per (re)publish, not per sample, which is the reason the
+labels live here rather than in the sample envelope.
 
 ## 8. Status and health
 

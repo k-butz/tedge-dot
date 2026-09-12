@@ -1,0 +1,71 @@
+# Point library for the demo PROFIBUS-DP simulator (contract §3.4).
+#
+# The process image of a *device type*, with no connection information in it:
+# the bus port and master address (`[connection]`) and the station address
+# (`protocol_address`) belong to the instance, these offsets belong to every
+# slave of this type. Reference it from a device with:
+#
+#   points_from = ["demo-sim"]
+#
+# Packages install this at /usr/share/tedge-dot/points.d/profibus/demo-sim.toml.
+#
+# A DP slave exchanges a fixed input and output image every cycle, so an
+# address here is a direction plus a byte offset into that image — optionally
+# with a bit offset and count to pick single bits out of a byte.
+
+[library]
+protocol    = "profibus"
+description = "Demo DP slave (profibus-sim in demo/docker-compose.yaml), 8 input / 4 output bytes"
+version     = "1"
+
+[[point]]
+id          = "di_byte0"
+name        = "Digital inputs"
+description = "First input byte, one bit per discrete input"
+datatype    = "uint8"
+access      = "read"
+address     = { direction = "input", byte_offset = 0 }
+
+# Bit-field extraction: one bit out of the byte above.
+[[point]]
+id          = "di_bit3"
+name        = "Digital input 3"
+description = "Bit 3 of the first input byte, extracted by the connector"
+datatype    = "bool"
+access      = "read"
+address     = { direction = "input", byte_offset = 0, bit_offset = 3, bit_count = 1 }
+
+[[point]]
+id          = "ai0_raw"
+name        = "Analog input 0"
+description = "Raw analog input word at input offset 2"
+datatype    = "uint16"
+access      = "read"
+address     = { direction = "input", byte_offset = 2 }
+
+[[point]]
+id          = "ai1_raw"
+name        = "Analog input 1"
+description = "Raw analog input word at input offset 4"
+datatype    = "uint16"
+access      = "read"
+address     = { direction = "input", byte_offset = 4 }
+
+# Writable, so it appears as a Cumulocity device parameter (RFC 0003).
+[[point]]
+id          = "do_byte0"
+name        = "Digital outputs"
+description = "First output byte, one bit per discrete output"
+datatype    = "uint8"
+access      = "read_write"
+address     = { direction = "output", byte_offset = 0 }
+
+# Write-only: the output image is not read back, so the parameter twin shows
+# the last value written rather than a measured one.
+[[point]]
+id          = "ao0_raw"
+name        = "Analog output 0"
+description = "Raw analog output word at output offset 2"
+datatype    = "uint16"
+access      = "write"
+address     = { direction = "output", byte_offset = 2 }

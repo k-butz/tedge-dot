@@ -12,6 +12,12 @@
 #   holding 1      -> flagged "invalid" -> read raises a Modbus exception
 #
 # Decode defaults are big-endian / big word-order, which matches the simulator.
+#
+# `count_u32` and `level_f32` are NOT defined here: they come from the point
+# library points.d/modbus/plc-sim.toml (contract §3.4), which the connector
+# image installs at /usr/share/tedge-dot/points.d/. Keeping half the points in
+# a library and half inline makes every existing assertion in the suite double
+# as a check that a referenced point behaves identically to an inline one.
 
 [connector]
 protocol      = "modbus"
@@ -27,6 +33,12 @@ port = 1883
 name             = "plc1"
 protocol_address = { transport = "tcp", host = "simulator", port = 502, unit_id = 1 }
 default_mode     = "typed"
+points_from      = ["plc-sim", "./points.d/modbus/plc-sim-extra.toml"]
+# ^ one library by NAME (resolved along the search path, where the image installs
+#   points.d as a package would) and one by relative PATH (resolved against this
+#   file's own directory, which is why the image also places points.d next to it).
+#   Both forms are legal in a config file, and the path form must not stop the
+#   management verbs from working (§3.4/§6.3) — the define-device test depends on it.
 
   # uint16 holding register (also used for the register write round-trip).
   [[device.point]]
@@ -35,17 +47,11 @@ default_mode     = "typed"
   access   = "read_write"
   address  = { table = "holding", address = 3, count = 1 }
 
-  # uint32 across two registers.
+  # Override one field of a point the library provides, without restating its
+  # datatype or address: the resolved point must keep those and take this unit.
   [[device.point]]
-  id       = "count_u32"
-  datatype = "uint32"
-  address  = { table = "holding", address = 4, count = 2 }
-
-  # float32 across two registers.
-  [[device.point]]
-  id       = "level_f32"
-  datatype = "float32"
-  address  = { table = "holding", address = 6, count = 2 }
+  id   = "level_f32"
+  unit = "m"
 
   # Reading this address makes the simulator return an exception -> quality "bad".
   [[device.point]]

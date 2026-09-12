@@ -132,6 +132,15 @@ nfpms:
         type: config|noreplace
         file_info: { owner: tedge, group: tedge, mode: 0644 }
 
+      # Site-local point libraries (contract §3.4): the data point lists of the
+      # device types this gateway talks to, referenced by `points_from` in a
+      # connector config. Ships empty; a library dropped in here shadows a
+      # packaged one of the same name. Writable by tedge for the same reason as
+      # the directory above.
+      - dst: /etc/tedge/plugins/ot/points.d
+        type: dir
+        file_info: { owner: tedge, group: tedge, mode: 0755 }
+
       # thin-edge.io flows: the device-side mapping between the connector's generic
       # OT envelopes and the thin-edge.io data model. The connector is a dumb driver,
       # so without these flows its samples, registrations and command results never
@@ -188,6 +197,32 @@ nfpms:
         file_info: { owner: tedge, group: tedge, mode: 0644 }
       - src: demo/config/canopen.toml
         dst: /usr/share/tedge-dot/demo/canopen.toml
+        file_info: { owner: tedge, group: tedge, mode: 0644 }
+
+      # Packaged point libraries (contract §3.4): the data point list of each demo
+      # simulator, which is what the demo configs above reference instead of
+      # inlining their points. They are also the quickest way to experiment with
+      # a device of your own — point a `[[device]]` at your address and add
+      # `points_from = ["demo-sim"]`, no point definitions to type. A vendor's
+      # device pack installs into this same
+      # /usr/share/tedge-dot/points.d/<protocol>/ layout.
+      - src: demo/points.d/modbus/demo-sim.toml
+        dst: /usr/share/tedge-dot/points.d/modbus/demo-sim.toml
+        file_info: { owner: tedge, group: tedge, mode: 0644 }
+      - src: demo/points.d/opcua/demo-sim.toml
+        dst: /usr/share/tedge-dot/points.d/opcua/demo-sim.toml
+        file_info: { owner: tedge, group: tedge, mode: 0644 }
+      - src: demo/points.d/canbus/demo-sim.toml
+        dst: /usr/share/tedge-dot/points.d/canbus/demo-sim.toml
+        file_info: { owner: tedge, group: tedge, mode: 0644 }
+      - src: demo/points.d/canopen/demo-sim.toml
+        dst: /usr/share/tedge-dot/points.d/canopen/demo-sim.toml
+        file_info: { owner: tedge, group: tedge, mode: 0644 }
+      - src: demo/points.d/profibus/demo-sim.toml
+        dst: /usr/share/tedge-dot/points.d/profibus/demo-sim.toml
+        file_info: { owner: tedge, group: tedge, mode: 0644 }
+      - src: demo/points.d/README.md
+        dst: /usr/share/tedge-dot/points.d/README.md
         file_info: { owner: tedge, group: tedge, mode: 0644 }
 
       # DBC database describing the CAN signals the canbus simulator emits.

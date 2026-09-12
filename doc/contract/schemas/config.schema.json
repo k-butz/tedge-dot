@@ -47,6 +47,15 @@
             "trace"
           ],
           "default": "info"
+        },
+        "point_library_path": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Directories searched for the point libraries devices name in points_from (§3.4), most specific first. REPLACES the default path (/etc/tedge/plugins/ot/points.d then /usr/share/tedge-dot/points.d), so it must name at least one directory; omit the key to use the default. Relative entries resolve against this configuration file's own directory.",
+          "minItems": 1
         }
       }
     },
@@ -108,19 +117,47 @@
             "typed"
           ]
         },
+        "points_from": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Point libraries this device inherits its points from, in order (§3.4). An entry containing '/' or ending in '.toml' is a path (relative ones resolve against this configuration file's directory); anything else is a name, resolved as <dir>/<protocol>/<name>.toml along the library search path. Libraries are applied in order and then the device's own inline points, with a repeated id patching what came before: meta and transform merge key by key, every other field replaces."
+        },
         "point": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/point"
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "description": "Without a points_from reference there is nothing for a point to inherit from, so every inline point must be complete (§3.4). With one, a point may be a patch and the connector applies these rules to the resolved point instead — which a static schema cannot check, since it would have to read the referenced files.",
+          "if": {
+            "not": {
+              "required": [
+                "points_from"
+              ]
+            }
+          },
+          "then": {
+            "properties": {
+              "point": {
+                "items": {
+                  "$ref": "#/$defs/complete_point"
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "point": {
       "type": "object",
       "required": [
-        "id",
-        "address"
+        "id"
       ],
       "additionalProperties": false,
       "properties": {
@@ -179,6 +216,14 @@
         "unit": {
           "type": "string"
         },
+        "name": {
+          "type": "string",
+          "description": "Short human-readable label for this signal, for wherever a name is displayed instead of the id — which is a topic segment and a parameter-set key, so it stays a plain identifier. Feeds a parameter's DTM title and the capability descriptor's point_labels (§7). Not echoed per sample."
+        },
+        "description": {
+          "type": "string",
+          "description": "Longer human-readable explanation of the signal. Feeds a parameter's DTM description and the capability descriptor's point_labels (§7). Not echoed per sample; meta.parameter.description overrides it for the parameter UI."
+        },
         "address": {
           "type": "object",
           "description": "Protocol-specific point address. Shape defined by the connector spec."
@@ -216,6 +261,14 @@
           "description": "Set false to keep this point on the polling schedule even when the connector supports push delivery (subscriptions)."
         }
       },
+      "description": "A point definition. When the device inherits points from a library (§3.4) this may be a patch of one: only `id` is required, and any field it omits keeps the inherited value. A device that inherits nothing must define every point completely, which $defs/complete_point states."
+    },
+    "complete_point": {
+      "description": "The completeness rules a point must satisfy when nothing supplies its missing fields: a full address, and a datatype whenever the mode is typed (§3.3).",
+      "required": [
+        "id",
+        "address"
+      ],
       "allOf": [
         {
           "if": {
@@ -284,7 +337,9 @@
                 "on_change": true,
                 "deadband": 0.5,
                 "min_interval": "10s"
-              }
+              },
+              "name": "Boiler temp",
+              "description": "Outlet temperature after the heat exchanger"
             },
             {
               "id": "run_command",
@@ -295,6 +350,24 @@
                 "address": 0,
                 "count": 1
               }
+            }
+          ]
+        },
+        {
+          "name": "plc-2",
+          "protocol_address": {
+            "transport": "tcp",
+            "host": "192.168.0.11",
+            "port": 502,
+            "unit_id": 1
+          },
+          "points_from": [
+            "acme-meter-v2"
+          ],
+          "point": [
+            {
+              "id": "boiler_temp_raw",
+              "unit": "K"
             }
           ]
         }

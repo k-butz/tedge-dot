@@ -27,6 +27,12 @@ trap 'kill $connector_pid 2>/dev/null || true; rm -rf "$workdir"' EXIT
 config="$workdir/$proto.toml"
 cp "$repo/demo/config/$proto.toml" "$config"
 
+# The demo configs get their points from the packaged point libraries (contract
+# §3.4), which a checkout has not installed -- and the copy above moved the
+# config away from them anyway, so a relative reference would not help either.
+# Point the search path at the repo's copies.
+export TEDGE_DOT_POINT_LIBRARY_PATH="$repo/demo/points.d"
+
 # Per-protocol: expected point + value, optional write point/value, config fixups.
 write_point="" write_value="" write_device=""
 case "$proto" in

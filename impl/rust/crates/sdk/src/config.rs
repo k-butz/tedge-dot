@@ -39,6 +39,13 @@ pub struct ConnectorSection {
     /// down so the cloud sees the outage). `"0"` disables the watchdog.
     #[serde(default = "default_stall_timeout")]
     pub stall_timeout: String,
+    /// Directories searched for the point libraries devices name in `points_from`
+    /// ([`crate::library`]). Unset means the built-in path: the site directory
+    /// `/etc/tedge/plugins/ot/points.d` first, then the packaged
+    /// `/usr/share/tedge-dot/points.d`. Relative entries resolve against the configuration
+    /// file's own directory.
+    #[serde(default)]
+    pub point_library_path: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,6 +74,14 @@ pub struct DeviceConfig {
     pub poll_interval: Option<String>,
     #[serde(default)]
     pub default_mode: Option<Mode>,
+    /// Point libraries this device inherits its points from, in order (§3.4). Names are
+    /// resolved against the library search path; entries containing `/` or ending in `.toml`
+    /// are paths, relative ones against the configuration file's directory. Resolution
+    /// happens in [`crate::library`] when the configuration is loaded, so by the time a
+    /// connector sees this config `points` already holds the fully-resolved list and this
+    /// field is only a record of where it came from.
+    #[serde(default)]
+    pub points_from: Vec<String>,
     #[serde(rename = "point", default)]
     pub points: Vec<PointConfig>,
 }
@@ -90,6 +105,16 @@ pub struct PointConfig {
     pub access: Option<String>,
     #[serde(default)]
     pub unit: Option<String>,
+    /// Short human-readable label for this signal, for where a name is displayed instead of the
+    /// `id` (which is a topic segment and a fragment key, so it stays a plain identifier).
+    /// Feeds a parameter's DTM title and the `point_labels` of the capability descriptor (§7).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Longer human-readable explanation of what this signal is. Feeds a parameter's DTM
+    /// description and the `point_labels` of the capability descriptor (§7). Neither this nor
+    /// `name` is echoed per sample: they are static, so they are published once, retained.
+    #[serde(default)]
+    pub description: Option<String>,
     /// Optional per-point linear transform applied by the connector after decode.
     #[serde(default)]
     pub transform: Option<Transform>,

@@ -26,6 +26,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/tedge-dot /usr/bin/tedge-dot
 COPY connectors/modbus/connector.toml /etc/connector.toml
+# Point libraries referenced by connector.toml (contract §3.4), twice over
+# because the config references one of each form: at the packaged search-path
+# location a shipped package uses (for the reference by name), and next to the
+# config itself (for the relative-path reference, which resolves against the
+# config's own directory).
+COPY connectors/modbus/points.d/ /usr/share/tedge-dot/points.d/
+COPY connectors/modbus/points.d/ /etc/points.d/
 COPY connectors/modbus/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENV RUST_LOG=info

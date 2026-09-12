@@ -43,6 +43,22 @@ Connector Publishes Capability Descriptor
     ${verbs}=    Get Json Field    ${payload}    command_verbs
     List Should Contain Value    ${verbs}    write
 
+Capability Descriptor Carries The Point Labels
+    [Documentation]    A point's `name`/`description` (§3.1) are static, so they are published
+    ...                once in the retained capability descriptor (§7) rather than echoed in
+    ...                every sample. Only labelled points appear — no entry means the id is the
+    ...                label — and here they come from the point library, which is where a
+    ...                shared list documents itself once for every instance that references it.
+    ${payload}=    Wait For Retained    ${CAPS_TOPIC}    timeout=${READY_TIMEOUT}
+    ${labels}=    Get Json Field    ${payload}    point_labels
+    ${by_point}=    Evaluate    {l["point"]: l for l in $labels}
+    Dictionary Should Contain Key    ${by_point}    count_u32
+    Should Be Equal    ${by_point}[count_u32][device]    ${DEVICE}
+    Should Be Equal    ${by_point}[count_u32][name]    Cycle count
+    Should Be Equal    ${by_point}[count_u32][description]    Completed pump cycles since power-on
+    # temp_u16 declares no labels, so it is absent rather than carrying an empty entry.
+    Dictionary Should Not Contain Key    ${by_point}    temp_u16
+
 Service Health Is Up
     [Documentation]    The connector publishes a retained service health status of "up".
     ${payload}=    Wait For Retained    ${HEALTH_TOPIC}    timeout=${READY_TIMEOUT}
@@ -77,6 +93,30 @@ Reads Float32 Across Two Registers
     Sample Should Be Good    ${payload}
     ${value}=    Get Json Field    ${payload}    value
     Should Be True    abs(${value} - 404.17) < 0.05
+
+Library Point Keeps Its Definition Under An Inline Override
+    [Documentation]    level_f32 comes from the point library points.d/modbus/plc-sim.toml and is
+    ...                overridden inline with `unit = "m"` alone (contract §3.4). The resolved
+    ...                point must take the override's unit while keeping the library's datatype
+    ...                and address -- the whole point of referencing a list you do not own.
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/level_f32    timeout=${SAMPLE_TIMEOUT}
+    Sample Should Be Good    ${payload}
+    ${unit}=    Get Json Field    ${payload}    unit
+    Should Be Equal    ${unit}    m
+    ${datatype}=    Get Json Field    ${payload}    datatype
+    Should Be Equal    ${datatype}    float32
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be True    abs(${value} - 404.17) < 0.05
+
+Reads A Point From A Path-Referenced Library
+    [Documentation]    connector.toml references its second library by absolute path rather
+    ...                than by name (contract §3.4). Both forms are legal in a config file —
+    ...                and the define-device test below depends on this one being present, since
+    ...                a pre-existing path reference must not stop the management verbs working.
+    ${payload}=    Wait For Sample    ${SAMPLE_PREFIX}/temp_u16_alias    timeout=${SAMPLE_TIMEOUT}
+    Sample Should Be Good    ${payload}
+    ${unit}=    Get Json Field    ${payload}    unit
+    Should Be Equal    ${unit}    alias
 
 Invalid Register Reports Bad Quality
     [Documentation]    Reading a flagged-invalid address yields a bad-quality sample with an error.
@@ -237,6 +277,67 @@ Generic Write Command Is Bridged By The Flows
     Publish Message    te/device/${DEVICE}///cmd/ot_write/w-1    {"status":"init","point":"temp_u16","value":17001}    retain=True
     ${result}=    Wait For Message Containing    te/device/${DEVICE}///cmd/ot_write/w-1    "status":"successful"    timeout=${FLOWS_TIMEOUT}
     ${twin}=    Wait For Message Containing    ${PARAM_TWIN}    "temp_u16":17001    timeout=${FLOWS_TIMEOUT}
+
+Refuses A Point Library Path From A Management Command
+    [Documentation]    `points_from` may name a library, never a path, when it arrives over
+    ...                MQTT (contract §3.4). A config file is edited by root or tedge, but
+    ...                anything able to publish on the broker must not be able to make the
+    ...                connector open an arbitrary path and report what it found there — the
+    ...                loader's error would otherwise carry file detail into this retained
+    ...                result. Refused before the path is opened, in both implementations.
+    Publish Message    te/device/plc3/ot/${PROTOCOL}/cmd/define-device/lib-2
+    ...    {"status":"init","device":{"name":"plc3","protocol_address":{"transport":"tcp","host":"simulator","port":502,"unit_id":1},"points_from":["../../etc/hostname"]}}
+    ...    retain=True
+    ${result}=    Wait For Message Containing    te/device/plc3/ot/${PROTOCOL}/cmd/define-device/lib-2
+    ...    "status":"failed"    timeout=${SAMPLE_TIMEOUT}
+    ${reason}=    Get Json Field    ${result}    reason
+    Should Contain    ${reason}    is a path
+    # The refusal must not leak what is at that path.
+    Should Not Contain    ${reason}    parse
+
+Defines A Device From A Point Library Alone
+    [Documentation]    A define-device command carrying only connection information and a
+    ...                points_from reference must bring up a working device: this is what lets a
+    ...                discovery mechanism (mDNS and friends) add instances of a known device
+    ...                type at runtime without shipping their point lists. The persisted config
+    ...                must keep the reference rather than the points it expands to.
+    ...
+    ...                Last in the suite: it rewrites /etc/connector.toml and reconnects every
+    ...                device.
+    Publish Message    te/device/plc2/ot/${PROTOCOL}/cmd/define-device/lib-1
+    ...    {"status":"init","device":{"name":"plc2","protocol_address":{"transport":"tcp","host":"simulator","port":502,"unit_id":1},"points_from":["plc-sim"]}}
+    ...    retain=True
+    Wait For Message Containing    te/device/plc2/ot/${PROTOCOL}/cmd/define-device/lib-1
+    ...    "status":"successful"    timeout=${SAMPLE_TIMEOUT}
+    ${payload}=    Wait For Sample    te/device/plc2/ot/${PROTOCOL}/sample/count_u32    timeout=${SAMPLE_TIMEOUT}
+    Sample Should Be Good    ${payload}
+    ${value}=    Get Json Field    ${payload}    value
+    Should Be Equal As Numbers    ${value}    617001
+    # The reference was written back, not the points it resolves to (count_u32 exists only in
+    # the library). Both implementations rewrite this file on a management command; comments
+    # are dropped by one and kept by the other, and the kept ones talk about these point ids,
+    # so compare the settings only.
+    # (chr(10) rather than a "\n" literal: Robot would turn that into a real newline inside
+    # the Python expression.)
+    # The capability descriptor's point_labels come from the configuration, so the retained
+    # message must follow a reload — otherwise it keeps describing the config as it was at
+    # startup, with no labels for the device just defined.
+    ${payload}=    Wait For Message Containing    ${CAPS_TOPIC}    plc2    timeout=${SAMPLE_TIMEOUT}
+    ${labels}=    Get Json Field    ${payload}    point_labels
+    ${for_plc2}=    Evaluate    [l for l in $labels if l["device"] == "plc2"]
+    Should Not Be Empty    ${for_plc2}    the reload must republish the labels of the new device
+    Should Be Equal    ${for_plc2}[0][name]    Cycle count
+
+    ${config}=    DeviceLibrary.Execute Command    cmd=cat /etc/connector.toml    strip=${True}
+    ${settings}=    Evaluate
+    ...    chr(10).join(l for l in $config.splitlines() if not l.lstrip().startswith("#"))
+    Should Contain    ${settings}    points_from
+    # plc1's pre-existing path reference survived the rewrite, and did not cause the command
+    # to be refused as a management-supplied path.
+    Should Contain    ${settings}    plc-sim-extra.toml
+    # count_u32 is the one point that exists ONLY in the library (level_f32 is also patched
+    # inline by plc1, so it legitimately appears).
+    Should Not Contain    ${settings}    count_u32
 
 
 *** Keywords ***
