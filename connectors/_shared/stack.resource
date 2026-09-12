@@ -15,6 +15,7 @@ Documentation       Stack lifecycle for the connector e2e suites: DeviceLibrary 
 
 Library             DeviceLibrary
 Library             MqttClient.py
+Library             OperatingSystem
 
 
 *** Variables ***
@@ -48,6 +49,11 @@ Setup OT Stack
     Set Suite Variable    $STACK_SERIAL    ${serial}
     ${project}=    DeviceLibrary.Get Compose Project Name
     Log    Started ${protocol} stack as compose project '${project}' (device ${serial})
+    # Which implementation the stack built (see robot.toml profiles / just test-e2e-c):
+    # IMPL selects the image name, CONNECTOR_DOCKERFILE the build recipe.
+    ${impl}=    Get Environment Variable    IMPL    rust
+    ${container}=    DeviceLibrary.Get Container Name
+    Log    Connector under test: ${impl} implementation (container ${container})
 
     IF    "${broker_port}" == "${EMPTY}"
         ${host}    ${port}=    DeviceLibrary.Get Service Port

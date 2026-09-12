@@ -120,8 +120,24 @@ exactly what the `just` recipes use**. From the command line:
 ./.venv/bin/python -m robot --variable KEEP_STACK:true --test "Parameter Twin Follows The Device" connectors/modbus/tests/
 ```
 
-Robot must run from the repo root (the default in VS Code) so the compose files and `.env` are
-found. If `just venv` reports that it is recreating the environment, the `./.venv` directory had
+To run or debug a test against the **C connector** instead of the Rust one, select the `c`
+profile from [`robot.toml`](../robot.toml):
+
+- **VS Code**: command palette → *RobotCode: Select Configuration Profiles* → `c`. The choice
+  applies to Run/Debug Test in the test explorer and to the editor's gutter actions, so the
+  interactive debugger attaches to a stack built from [poc-c/](../poc-c/). Switch back by
+  selecting `rust` (or deselecting).
+- **CLI**: `robotcode --profile c run -- -t "<test>" connectors/modbus/tests/`, or just
+  `just test-e2e-c <proto>` for the whole suite.
+
+The profile only sets `IMPL` and `CONNECTOR_DOCKERFILE`, which the compose file interpolates
+into the connector service's image name and build recipe; each implementation therefore has its
+own image and the first run after switching rebuilds it. The suite setup logs which one is in
+use (`Connector under test: c implementation …`), and the C build's capability descriptor
+reports version `0.1.0-poc`, so the Robot log always says which binary answered.
+
+Robot must run from the repo root (the default in VS Code) so the compose files, `robot.toml`
+and `.env` are found. If `just venv` reports that it is recreating the environment, the `./.venv` directory had
 been copied from another checkout — its `pip` would have installed into *that* project.
 
 ---
